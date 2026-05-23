@@ -88,8 +88,27 @@ Request:
 {"id": 1234, "method": <int>, "params": {}}
 ```
 
-Known method codes (from elegoo-link source):
-- Get status: `7002` (approx; see `mapCommandType` in elegoo_fdm_cc2_message_adapter.cpp)
+**Live-observed message format (read-only, from active print 2026-05-23):**
+
+Status push on `elegoo/<sn>/api_status`:
+```json
+{
+  "id": 531900,
+  "method": 6000,
+  "result": {
+    "gcode_move": {"extruder": 43.1, "speed": 2400, "x": 200.0, "y": 140.4},
+    "print_status": {"print_duration": 5790, "total_duration": 5872}
+  }
+}
+```
+- Method `6000` = status push
+- `print_status.print_duration` = seconds elapsed in current print job
+- Printer serial number observed: `F0113YK6ZM8FV2F` (format: `F01<model><sn>`)
+
+Heartbeat: the broker sends PING, client responds PONG on `elegoo/<sn>/<clientId>/api_request` and `api_response`.
+
+Known method codes (from elegoo-link source + live observation):
+- `6000`: status push (server → client)
 - Pause: maps to `MethodType::PAUSE_PRINT`
 - Resume: maps to `MethodType::RESUME_PRINT`
 - Stop: maps to `MethodType::STOP_PRINT`
