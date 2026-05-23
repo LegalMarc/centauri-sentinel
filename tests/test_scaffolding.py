@@ -75,3 +75,31 @@ def test_get_settings_cached() -> None:
     # when PRINTER_IP is unset (uses default)
     s = Settings()
     assert s.printer_ip == "127.0.0.1"  # default from config.py
+
+
+def test_internal_snapshot_endpoint_hit() -> None:
+    from sentinel.ml.nonce import NonceStore
+
+    store = NonceStore()
+    jpeg = b"\xff\xd8\xff\xd9"
+    nonce = store.put(jpeg)
+
+    settings = Settings(printer_ip="10.0.0.1")
+    app = create_app(settings)
+
+    from unittest.mock import patch
+
+    with patch("sentinel.web.app.get_nonce_store", return_value=store):
+        client = TestClient(app)
+        resp = client.get(f"/__internal_snapshot/{nonce}")
+
+    assert resp.status_code == 200
+    assert resp.content == jpeg
+
+
+def test_internal_snapshot_endpoint_missing() -> None:
+    settings = Settings(printer_ip="10.0.0.1")
+    app = create_app(settings)
+    client = TestClient(app)
+    resp = client.get("/__internal_snapshot/no-such-nonce")
+    assert resp.status_code == 404
