@@ -1,0 +1,108 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "centauri-sentinel"
+version = "0.1.0"
+description = "Self-hosted failure detection for the Elegoo Centauri Carbon 2 FDM printer"
+license = { text = "MIT" }
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "httpx>=0.28",
+    "pydantic>=2.10",
+    "pydantic-settings>=2.7",
+    "python-telegram-bot>=21.0",
+    "aiosqlite>=0.20",
+    "bcrypt>=4.2",
+    "python-json-logger>=3.2",
+    "jinja2>=3.1",
+    "tenacity>=9.0",
+    "aiomqtt>=2.3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.8",
+    "mypy>=1.13",
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "pytest-httpx>=0.35",
+    "pytest-cov>=6.0",
+    "respx>=0.22",
+]
+
+[project.scripts]
+sentinel = "sentinel.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["sentinel"]
+
+# ---------------------------------------------------------------------------
+# Ruff
+# ---------------------------------------------------------------------------
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E", "W",   # pycodestyle
+    "F",        # pyflakes
+    "I",        # isort
+    "UP",       # pyupgrade
+    "B",        # flake8-bugbear
+    "C4",       # flake8-comprehensions
+    "SIM",      # flake8-simplify
+    "TCH",      # flake8-type-checking
+    "ANN",      # flake8-annotations (partial — no ANN101/102)
+    "RUF",      # ruff-specific
+]
+ignore = [
+    "ANN401",            # Any in return type OK for some edge cases
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["ANN"]   # no annotations required in tests
+
+[tool.ruff.lint.isort]
+known-first-party = ["sentinel"]
+
+# ---------------------------------------------------------------------------
+# Mypy
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = false
+
+
+# ---------------------------------------------------------------------------
+# Pytest
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "--cov=sentinel --cov-report=term-missing --cov-fail-under=85"
+markers = [
+    "slow: marks tests as slow (deselect with -m 'not slow')",
+]
+
+[tool.coverage.run]
+source = ["sentinel"]
+omit = ["sentinel/__main__.py"]
+
+[dependency-groups]
+dev = [
+    "mypy>=2.1.0",
+    "pytest>=9.0.3",
+    "pytest-asyncio>=1.3.0",
+    "pytest-cov>=7.1.0",
+    "pytest-httpx>=0.36.2",
+    "respx>=0.23.1",
+    "ruff>=0.15.14",
+]

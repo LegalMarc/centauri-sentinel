@@ -11,3 +11,7 @@
   Camera confirmed at port 8080/mjpeg (matches PLAN.md defaults). Coolify v4.1.0 API flow verified.
   PLAN.md amended in this commit. Full details in `docs/verified-assumptions.md`.
   v0.2 candidates: full 60-min MJPEG soak (deferred to #14); Carbon 2 MQTT method code table (need one print cycle to observe all state transitions).
+
+## Ticket #1 — Project scaffolding
+- Status: in_progress
+- Started: 2026-05-23T19:10:00Z
