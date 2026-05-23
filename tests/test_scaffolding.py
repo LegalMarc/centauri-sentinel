@@ -12,7 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import sentinel
-from sentinel.config import Settings, get_settings
+from sentinel.config import Settings
 from sentinel.web.app import create_app
 
 
@@ -51,7 +51,7 @@ def test_settings_auth_enabled() -> None:
 
 
 def test_settings_invalid_log_level() -> None:
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError):
         Settings(printer_ip="10.0.0.1", log_level="INVALID")
 
 
