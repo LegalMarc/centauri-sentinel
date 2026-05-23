@@ -1,0 +1,126 @@
+# centauri-sentinel — production compose stack
+#
+# Required env var:
+#   PRINTER_IP         — LAN IP of the Elegoo Centauri Carbon 2
+#
+# All other vars have defaults; see .env.example for the full reference.
+#
+# Quick start:
+#   PRINTER_IP=192.168.1.x docker compose up -d
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # token-init — one-shot: writes /shared/token if it does not yet exist.
+  # Subsequent runs are a no-op (idempotent).
+  # ---------------------------------------------------------------------------
+  token-init:
+    build:
+      context: ./docker/token-init
+    image: ghcr.io/legalmarc/centauri-sentinel/token-init:1.0
+    restart: "no"
+    volumes:
+      - ml-token:/shared
+
+  # ---------------------------------------------------------------------------
+  # obico-ml — Obico ML API; no host ports, no egress (internal network).
+  # Built from obico-server ml_api/ source; see docker/obico-ml/Dockerfile.
+  # ---------------------------------------------------------------------------
+  obico-ml:
+    build:
+      context: ./docker/obico-ml
+      args:
+        IMAGE_TAG_SUFFIX: ""   # set to "-linux-arm64" when building for arm64
+    image: ghcr.io/legalmarc/centauri-sentinel/obico-ml:1.4
+    restart: unless-stopped
+    depends_on:
+      token-init:
+        condition: service_completed_successfully
+    volumes:
+      - ml-token:/shared:ro
+    networks:
+      - internal
+    environment:
+      # Auth is managed by the token written to /shared/token.
+      # The sentinel passes the token in the Authorization header; obico-ml
+      # reads ML_API_TOKEN from env.  We source the file in the healthcheck
+      # but keep auth optional — the internal network prevents external access.
+      ML_API_TOKEN: ""
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:3333/hc/', timeout=5)\" 2>/dev/null && echo ok || exit 1"]
+      interval: 20s
+      timeout: 10s
+      start_period: 60s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # sentinel — the detection service and web UI.
+  # ---------------------------------------------------------------------------
+  sentinel:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ghcr.io/legalmarc/centauri-sentinel:latest
+    restart: unless-stopped
+    depends_on:
+      obico-ml:
+        condition: service_healthy
+    environment:
+      # --- Required ---
+      PRINTER_IP: ${PRINTER_IP:?PRINTER_IP env var is required}
+      # --- Printer ---
+      PRINTER_ACCESS_CODE: ${PRINTER_ACCESS_CODE:-123456}
+      PRINTER_MQTT_PORT: ${PRINTER_MQTT_PORT:-1883}
+      PRINTER_MJPEG_PORT: ${PRINTER_MJPEG_PORT:-8080}
+      PRINTER_MJPEG_PATH: ${PRINTER_MJPEG_PATH:-/mjpeg}
+      # --- ML ---
+      ML_API_URL: ${ML_API_URL:-http://obico-ml:3333}
+      ML_API_TOKEN_FILE: ${ML_API_TOKEN_FILE:-/shared/token}
+      ML_CONFIRM_COUNT: ${ML_CONFIRM_COUNT:-3}
+      ML_POLL_INTERVAL_SECONDS: ${ML_POLL_INTERVAL_SECONDS:-10}
+      ML_SCORE_THRESHOLD: ${ML_SCORE_THRESHOLD:-0.4}
+      # --- Detection ---
+      DETECTION_WARMUP_SECONDS: ${DETECTION_WARMUP_SECONDS:-300}
+      DETECTION_ENABLED_DEFAULT: ${DETECTION_ENABLED_DEFAULT:-true}
+      WATCHER_STALL_SECONDS: ${WATCHER_STALL_SECONDS:-60}
+      # --- Telegram (optional) ---
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      TELEGRAM_USER_IDS: ${TELEGRAM_USER_IDS:-}
+      # --- ntfy (optional) ---
+      NTFY_URL: ${NTFY_URL:-}
+      NTFY_TOKEN: ${NTFY_TOKEN:-}
+      # --- Auth (optional) ---
+      AUTH_USERNAME: ${AUTH_USERNAME:-}
+      AUTH_PASSWORD_BCRYPT: ${AUTH_PASSWORD_BCRYPT:-}
+      # --- Web server ---
+      BIND_HOST: ${BIND_HOST:-0.0.0.0}
+      BIND_PORT: ${BIND_PORT:-8000}
+      EXTERNAL_BIND_ALLOWED: ${EXTERNAL_BIND_ALLOWED:-false}
+      # --- Misc ---
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      DB_PATH: ${DB_PATH:-/data/sentinel.db}
+    volumes:
+      - ml-token:/shared:ro
+      - sentinel-data:/data
+    ports:
+      - "${SENTINEL_PORT:-8000}:8000"
+    networks:
+      - internal
+      - default
+    healthcheck:
+      test: ["CMD", "python", "-m", "sentinel.healthcheck"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
+
+volumes:
+  ml-token:
+  sentinel-data:
+
+networks:
+  # internal: true means no egress from services on this network.
+  # obico-ml has no host ports and no route to the internet.
+  internal:
+    internal: true
