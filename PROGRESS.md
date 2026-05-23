@@ -60,6 +60,13 @@
 - Finished: 2026-05-23T23:00:00Z
 - Notes: NtfyNotifier with Bearer auth, Priority/Tags headers, tenacity retry, 14 tests.
 
+## Ticket #11 — Telegram bot commands
+- Status: done
+- PR: #40
+- Started: 2026-05-24T00:00:00Z
+- Finished: 2026-05-24T00:45:00Z
+- Notes: BotCommandHandler with all 9 commands + inline keyboard callbacks. Auth guard uses TelegramNotifier.is_authorized (chat+user allowlist). /stop+/confirm with 30s window tracked per user_id via time.monotonic(). Snooze callback disables detection and schedules asyncio re-enable task (task reference kept in module-level set to prevent GC). BotRunner does lazy PTB import and clean lifecycle (initialize/start/polling/stop/shutdown). 21 tests; full suite 201 tests, 88% coverage.
+
 ## Ticket #10 — Status web UI
 - Status: done
 - PR: #39
