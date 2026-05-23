@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="refresh" content="10">
+<title>centauri-sentinel</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:monospace;font-size:14px;background:#111;color:#ddd;padding:1rem}
+h1{font-size:1.1rem;margin-bottom:1rem;color:#fff}
+h2{font-size:.95rem;margin:1rem 0 .5rem;color:#aaa;text-transform:uppercase;letter-spacing:.05em}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:.75rem;margin-bottom:1rem}
+.card{background:#1a1a1a;border:1px solid #333;border-radius:4px;padding:.75rem}
+.card dt{color:#888;font-size:.8rem;text-transform:uppercase;letter-spacing:.05em}
+.card dd{color:#fff;font-size:1.1rem;margin-top:.25rem}
+.stale{color:#f90}
+.camera{margin-bottom:1rem}
+.camera img{max-width:100%;border:1px solid #333;border-radius:4px;display:block}
+table{width:100%;border-collapse:collapse;font-size:.85rem;margin-bottom:1rem}
+th{text-align:left;padding:.3rem .5rem;background:#1a1a1a;color:#888;border-bottom:1px solid #333}
+td{padding:.3rem .5rem;border-bottom:1px solid #222;word-break:break-all}
+tr:hover td{background:#1a1a1a}
+footer{margin-top:1rem;font-size:.8rem;color:#555}
+footer a{color:#666}
+</style>
+</head>
+<body>
+<h1>centauri-sentinel</h1>
+
+<div class="grid">
+  <div class="card">
+    <dl>
+      <dt>Watcher state</dt>
+      <dd>{{ watcher_state }}</dd>
+    </dl>
+  </div>
+  <div class="card">
+    <dl>
+      <dt>Last tick</dt>
+      <dd class="{% if tick_age_stale %}stale{% endif %}">{{ tick_age }}</dd>
+    </dl>
+  </div>
+</div>
+
+<h2>Camera</h2>
+<div class="camera">
+  <img src="/snapshot" alt="Current camera frame" onerror="this.alt='Camera unavailable'">
+</div>
+
+<h2>Recent detections</h2>
+{% if detections %}
+<table>
+  <thead><tr><th>#</th><th>Time</th><th>Score</th><th>Action</th></tr></thead>
+  <tbody>
+  {% for d in detections %}
+    <tr>
+      <td>{{ d.id }}</td>
+      <td>{{ d.ts }}</td>
+      <td>{{ "%.3f"|format(d.score) }}</td>
+      <td>{{ d.action }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p style="color:#555;margin-bottom:1rem">No detections recorded.</p>
+{% endif %}
+
+<h2>Recent pauses</h2>
+{% if pauses %}
+<table>
+  <thead><tr><th>#</th><th>Started</th><th>Ended</th><th>Reason</th></tr></thead>
+  <tbody>
+  {% for p in pauses %}
+    <tr>
+      <td>{{ p.id }}</td>
+      <td>{{ p.started_at }}</td>
+      <td>{{ p.ended_at or "—" }}</td>
+      <td>{{ p.reason }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p style="color:#555;margin-bottom:1rem">No pauses recorded.</p>
+{% endif %}
+
+<footer>
+  <a href="/docs/threat-model.md">Threat model</a> &mdash;
+  centauri-sentinel v0.1
+</footer>
+</body>
+</html>
