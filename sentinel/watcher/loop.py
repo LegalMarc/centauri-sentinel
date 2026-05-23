@@ -1,0 +1,217 @@
+"""Detection watcher loop.
+
+State machine: IDLE → WARMUP → ARMED → PAUSED (and cross-cutting CAMERA_OFFLINE / STALLED).
+
+The main loop fires every ML_POLL_INTERVAL_SECONDS. A separate watchdog
+task monitors heartbeat freshness and raises a STALLED alert if the loop
+stops responding.
+
+SAFETY: The watcher never calls printer.pause() or printer.stop() without
+transitioning to PAUSED state and going through _on_confirmed_detection().
+Pause is logged and sent to notifiers; it is NOT called during IDLE/WARMUP.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any, Protocol
+
+from sentinel.camera.errors import CameraOfflineError
+from sentinel.watcher.state import WatcherState
+
+if TYPE_CHECKING:
+    from sentinel.config import Settings
+    from sentinel.db.repo import Database
+    from sentinel.ml.types import MlResult
+    from sentinel.printer.types import PrinterStatus
+
+logger = logging.getLogger(__name__)
+
+
+class Notifier(Protocol):
+    """Any object that can send alerts to users."""
+
+    async def send_detection_alert(self, score: float, snapshot_id: str | None) -> None: ...
+    async def send_stall_alert(self) -> None: ...
+    async def send_camera_offline_alert(self) -> None: ...
+
+
+class WatcherLoop:
+    """Core detection loop with injected dependencies (testable)."""
+
+    def __init__(
+        self,
+        settings: Settings,
+        printer: Any,
+        camera: Any,
+        ml: Any,
+        db: Database,
+        notifiers: list[Notifier],
+    ) -> None:
+        self._settings = settings
+        self._printer = printer
+        self._camera = camera
+        self._ml = ml
+        self._db = db
+        self._notifiers = notifiers
+
+        self.state = WatcherState.IDLE
+        self._confirm_count = 0
+        self._print_start: datetime | None = None
+        self._running = False
+
+    # ------------------------------------------------------------------
+    # Public
+    # ------------------------------------------------------------------
+
+    async def run_forever(self) -> None:
+        """Start the main loop and heartbeat watchdog; runs until cancelled."""
+        self._running = True
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(self._loop())
+            tg.create_task(self._watchdog())
+
+    async def tick(self) -> None:
+        """Run one iteration of the detection loop (useful for tests)."""
+        await self._tick()
+
+    # ------------------------------------------------------------------
+    # Internal loop
+    # ------------------------------------------------------------------
+
+    async def _loop(self) -> None:
+        while self._running:
+            try:
+                await self._tick()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Watcher loop tick raised unexpectedly")
+            await asyncio.sleep(self._settings.ml_poll_interval_seconds)
+
+    async def _tick(self) -> None:
+        ts = datetime.now(tz=UTC).isoformat()
+        await self._db.update_heartbeat(ts)
+
+        try:
+            printer_status: PrinterStatus = await self._printer.status()
+        except Exception:
+            logger.warning("Could not get printer status; staying in current state")
+            return
+
+        await self._update_state(printer_status)
+
+        if self.state == WatcherState.ARMED:
+            await self._check_frame()
+
+    async def _update_state(self, status: PrinterStatus) -> None:
+        if not status.printing:
+            if self.state != WatcherState.IDLE:
+                logger.info("Printer idle — transitioning IDLE")
+            self.state = WatcherState.IDLE
+            self._confirm_count = 0
+            self._print_start = None
+            return
+
+        # Printer is printing
+        if self._print_start is None:
+            self._print_start = datetime.now(tz=UTC)
+
+        elapsed = status.elapsed_seconds
+        warmup = self._settings.detection_warmup_seconds
+
+        if elapsed < warmup:
+            self.state = WatcherState.WARMUP
+        else:
+            if self.state in (WatcherState.IDLE, WatcherState.WARMUP):
+                logger.info("Printer armed for detection (elapsed=%.0fs)", elapsed)
+            if self.state != WatcherState.PAUSED:
+                self.state = WatcherState.ARMED
+
+    async def _check_frame(self) -> None:
+        try:
+            jpeg = await self._camera.grab()
+        except CameraOfflineError:
+            self.state = WatcherState.CAMERA_OFFLINE
+            logger.warning("Camera offline — suspending detection")
+            for n in self._notifiers:
+                try:
+                    await n.send_camera_offline_alert()
+                except Exception:
+                    logger.exception("Notifier camera_offline_alert failed")
+            return
+        except Exception:
+            logger.warning("Camera grab failed; skipping this tick")
+            return
+
+        result: MlResult = await self._ml.detect(jpeg)
+
+        if result.score >= self._settings.ml_score_threshold:
+            self._confirm_count += 1
+            logger.info(
+                "Detection score=%.2f confirm=%d/%d",
+                result.score,
+                self._confirm_count,
+                self._settings.ml_confirm_count,
+            )
+            if self._confirm_count >= self._settings.ml_confirm_count:
+                await self._on_confirmed_detection(result)
+        else:
+            if self._confirm_count > 0:
+                logger.debug("Score below threshold — resetting confirm counter")
+            self._confirm_count = 0
+
+    async def _on_confirmed_detection(self, result: MlResult) -> None:
+        logger.warning("CONFIRMED DETECTION score=%.2f — pausing printer", result.score)
+        self.state = WatcherState.PAUSED
+        self._confirm_count = 0
+        snapshot_id: str | None = None
+
+        pause_ok = False
+        try:
+            await self._printer.pause()
+            pause_ok = True
+        except Exception:
+            logger.exception("Printer pause failed — notifying anyway")
+
+        pause_id = await self._db.record_pause(reason="detection")
+        await self._db.record_detection(
+            score=result.score,
+            snapshot_id=snapshot_id,
+            action="paused" if pause_ok else "alert",
+        )
+
+        for n in self._notifiers:
+            try:
+                await n.send_detection_alert(result.score, snapshot_id)
+            except Exception:
+                logger.exception("Notifier detection_alert failed")
+
+        _ = pause_id  # will be used later when resume is wired up
+
+    # ------------------------------------------------------------------
+    # Watchdog
+    # ------------------------------------------------------------------
+
+    async def _watchdog(self) -> None:
+        stall_s = self._settings.watcher_stall_seconds
+        while self._running:
+            await asyncio.sleep(stall_s)
+            await self._watchdog_tick(self._db)
+
+    async def _watchdog_tick(self, db: Database) -> None:
+        stall_s = self._settings.watcher_stall_seconds
+        last = await db.get_heartbeat()
+        if last is None:
+            return
+        age = (datetime.now(tz=UTC) - datetime.fromisoformat(last)).total_seconds()
+        if age > stall_s:
+            logger.error("Heartbeat stale (age=%.0fs) — watcher stalled", age)
+            self.state = WatcherState.STALLED
+            for n in self._notifiers:
+                try:
+                    await n.send_stall_alert()
+                except Exception:
+                    logger.exception("Notifier stall_alert failed")
