@@ -60,6 +60,10 @@
 - Finished: 2026-05-23T23:00:00Z
 - Notes: NtfyNotifier with Bearer auth, Priority/Tags headers, tenacity retry, 14 tests.
 
+## Ticket #12 — Docker Compose stack
+- Status: in_progress
+- Started: 2026-05-24T01:00:00Z
+
 ## Ticket #11 — Telegram bot commands
 - Status: done
 - PR: #40
