@@ -27,10 +27,6 @@ services:
   # Built from obico-server ml_api/ source; see docker/obico-ml/Dockerfile.
   # ---------------------------------------------------------------------------
   obico-ml:
-    build:
-      context: ./docker/obico-ml
-      args:
-        IMAGE_TAG_SUFFIX: ""   # set to "-linux-arm64" when building for arm64
     image: ghcr.io/legalmarc/centauri-sentinel/obico-ml:1.4
     restart: unless-stopped
     depends_on:
