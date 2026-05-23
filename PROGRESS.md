@@ -61,8 +61,17 @@
 - Notes: NtfyNotifier with Bearer auth, Priority/Tags headers, tenacity retry, 14 tests.
 
 ## Ticket #12 — Docker Compose stack
-- Status: in_progress
+- Status: done
+- PRs: #41 (stack), #43 (obico-ml fix)
 - Started: 2026-05-24T01:00:00Z
+- Finished: 2026-05-24T03:30:00Z
+- Notes: Three-service Docker Compose stack (token-init → obico-ml → sentinel). GHCR CI workflow for obico-ml (build-obico-ml.yml). Two fixes required: (1) removed build: section from obico-ml so it pulls from GHCR; (2) obico-ml Dockerfile needed model weights downloaded at build time (base image does not include them) and ml_api source copied to /app (model.meta hardcodes /app/model/names). Stack deployed and verified healthy on Coolify host (5.161.127.252). Coolify queue system was non-functional (application_deployment_queues table empty, Horizon jobs stuck in reserved queue since March 2026); deployed directly via docker compose on host. Sentinel accessible at http://5.161.127.252:8010/healthz → {"status":"ok"}.
+
+## Ticket #13 — Documentation
+- Status: done
+- PR: #42
+- Finished: 2026-05-24T03:30:00Z
+- Notes: README full rewrite (quick start, config reference table, Telegram/ntfy setup, threat model summary). New docs: threat-model.md, printer-setup.md, troubleshooting.md. Updated coolify-deploy.md with PRINTER_ACCESS_CODE step.
 
 ## Ticket #11 — Telegram bot commands
 - Status: done
