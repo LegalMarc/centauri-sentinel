@@ -45,12 +45,14 @@ def _run(args: argparse.Namespace) -> None:
     import uvicorn
 
     from sentinel.config import get_settings
+    from sentinel.safety import check_external_bind
     from sentinel.web.app import create_app
 
     settings = get_settings()
     host = args.host or settings.bind_host
     port = args.port or settings.bind_port
 
+    check_external_bind(settings)
     app = create_app(settings)
     uvicorn.run(app, host=host, port=port, log_level=settings.log_level.lower())
 
