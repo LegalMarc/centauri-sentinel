@@ -13,14 +13,12 @@
 ARG IMAGE_TAG_SUFFIX=
 FROM thespaghettidetective/ml_api_base:1.4${IMAGE_TAG_SUFFIX}
 
-# Fetch only the ml_api directory from obico-server (sparse checkout, depth 1)
+# Fetch the ml_api directory from obico-server (shallow clone, copy, then discard)
 RUN apt-get update -qq \
     && apt-get install -y --no-install-recommends git \
-    && git clone --depth 1 --filter=blob:none --sparse \
+    && git clone --depth 1 \
        https://github.com/TheSpaghettiDetective/obico-server.git /tmp/obico \
-    && cd /tmp/obico \
-    && git sparse-checkout set ml_api \
-    && cp -r ml_api /app/ \
+    && cp -r /tmp/obico/ml_api /app/ \
     && apt-get purge -y --auto-remove git \
     && rm -rf /var/lib/apt/lists/* /tmp/obico
 
