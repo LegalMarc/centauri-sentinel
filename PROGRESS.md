@@ -13,5 +13,56 @@
   v0.2 candidates: full 60-min MJPEG soak (deferred to #14); Carbon 2 MQTT method code table (need one print cycle to observe all state transitions).
 
 ## Ticket #1 — Project scaffolding
-- Status: in_progress
+- Status: done
+- PR: #32
 - Started: 2026-05-23T19:10:00Z
+- Finished: 2026-05-23T19:30:00Z
+
+## Ticket #2 — Config + safety guard
+- Status: done
+- PR: #33
+- Finished: 2026-05-23T20:00:00Z
+
+## Ticket #3 — Persistence layer
+- Status: done
+- PR: #33
+- Finished: 2026-05-23T20:30:00Z
+
+## Ticket #4 — Printer client
+- Status: done
+- PR: #34
+- Finished: 2026-05-23T21:00:00Z
+
+## Ticket #5 — Camera MJPEG grabber
+- Status: done
+- PR: #35
+- Finished: 2026-05-23T21:30:00Z
+
+## Ticket #6 — ML client
+- Status: done
+- PR: #36
+- Finished: 2026-05-23T22:00:00Z
+
+## Ticket #7 — Watcher loop
+- Status: done
+- PR: #37
+- Finished: 2026-05-23T22:30:00Z
+
+## Ticket #8 — Telegram notifier
+- Status: done
+- PR: #38
+- Finished: 2026-05-23T23:00:00Z
+- Notes: TelegramNotifier with chat+user allowlist, tenacity retry, 17 tests.
+
+## Ticket #9 — ntfy notifier
+- Status: done
+- PR: #38
+- Finished: 2026-05-23T23:00:00Z
+- Notes: NtfyNotifier with Bearer auth, Priority/Tags headers, tenacity retry, 14 tests.
+
+## Ticket #10 — Status web UI
+- Status: done
+- PR: #39
+- Started: 2026-05-23T23:05:00Z
+- Finished: 2026-05-23T23:55:00Z
+- Notes: Full FastAPI app factory with optional DB/watcher/camera injection. AuthMiddleware (Basic auth + HMAC-SHA256 session cookie, 1h TTL) gates all routes except /healthz and /__internal_snapshot. Routes: / (Jinja2 status page, 10s meta-refresh), /snapshot, /stream, /readyz (heartbeat-age + DB-write check), /__internal_snapshot/{nonce} (single-use). Template: plain HTML, embedded CSS under 300 bytes, no CDN. 21 web tests; full suite 180 tests, 93% coverage. Assumption: printer state/elapsed not shown on status page since WatcherLoop does not expose last PrinterStatus as a public property — watcher state (IDLE/WARMUP/ARMED/PAUSED) conveys the same information for the operator. v0.2 candidate: add ML-reachability ping to /readyz.
