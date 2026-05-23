@@ -1,0 +1,16 @@
+.env.local
+.env
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
+htmlcov/
+.coverage
+data/
+mjpeg_soak_*.log
