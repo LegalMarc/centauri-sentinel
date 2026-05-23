@@ -16,6 +16,8 @@ centauri-sentinel is deployed as a Docker Compose application on Coolify.
 4. Set **Docker Compose file**: `./docker-compose.yml`.
 5. Under **Environment Variables**, add:
    - `PRINTER_IP` → your printer's LAN IP (e.g. `192.168.1.50`). **Required.**
+   - `PRINTER_ACCESS_CODE` → the access code from **Settings → Network** on the printer
+     touchscreen. Default `123456` if you have never changed it.
    - Any optional vars from `.env.example` (Telegram, ntfy, auth, etc.).
 6. Click **Save and Deploy**.
 7. Wait for all three services to become healthy (typically < 90 s).
@@ -28,9 +30,11 @@ See `.env.example` for the full reference. The minimum required set:
 
 ```
 PRINTER_IP=192.168.x.x
+PRINTER_ACCESS_CODE=123456   # change to match your printer's access code
 ```
 
-Everything else has a safe default.
+Everything else has a safe default. See [README.md](../README.md#configuration-reference)
+for the full variable reference.
 
 ## Re-deploying after a code change
 
@@ -59,4 +63,4 @@ Back it up by copying `/var/lib/docker/volumes/<stack_prefix>_sentinel-data`.
 
 ## Troubleshooting
 
-See `docs/troubleshooting.md` for common issues.
+See [docs/troubleshooting.md](troubleshooting.md) for common issues.
