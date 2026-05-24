@@ -95,9 +95,7 @@ async def _run(args: argparse.Namespace) -> None:
         bot = BotRunner(settings, handler)
         await bot.start()
 
-    watcher_task: asyncio.Task[None] = asyncio.create_task(
-        watcher.run_forever(), name="watcher"
-    )
+    watcher_task: asyncio.Task[None] = asyncio.create_task(watcher.run_forever(), name="watcher")
 
     try:
         await server.serve()
