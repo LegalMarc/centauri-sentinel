@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
@@ -13,7 +12,6 @@ import pytest
 from sentinel.config import Settings
 from sentinel.watcher.state import WatcherState
 from sentinel.web.app import create_app
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -51,8 +49,13 @@ def mock_db() -> AsyncMock:
     db = AsyncMock()
     db.get_heartbeat.return_value = _fresh_ts()
     db.get_recent_detections.return_value = [
-        {"id": 1, "ts": "2026-01-01T00:00:00Z", "score": 0.85, "action": "pause",
-         "snapshot_id": None},
+        {
+            "id": 1,
+            "ts": "2026-01-01T00:00:00Z",
+            "score": 0.85,
+            "action": "pause",
+            "snapshot_id": None,
+        },
     ]
     db.get_recent_pauses.return_value = [
         {"id": 1, "started_at": "2026-01-01T00:00:00Z", "ended_at": None, "reason": "detection"},
@@ -177,9 +180,7 @@ async def test_snapshot_returns_jpeg(app: object, mock_camera: AsyncMock) -> Non
     assert r.content == _FAKE_JPEG
 
 
-async def test_snapshot_503_on_camera_error(
-    mock_db: AsyncMock, mock_watcher: MagicMock
-) -> None:
+async def test_snapshot_503_on_camera_error(mock_db: AsyncMock, mock_watcher: MagicMock) -> None:
     cam = AsyncMock()
     cam.grab.side_effect = RuntimeError("camera down")
     broken_app = create_app(_base_settings(), db=mock_db, watcher=mock_watcher, camera=cam)
@@ -204,9 +205,7 @@ async def test_readyz_no_heartbeat_returns_503(
     mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: AsyncMock
 ) -> None:
     mock_db.get_heartbeat.return_value = None
-    stalled_app = create_app(
-        _base_settings(), db=mock_db, watcher=mock_watcher, camera=mock_camera
-    )
+    stalled_app = create_app(_base_settings(), db=mock_db, watcher=mock_watcher, camera=mock_camera)
     async with _client(stalled_app) as c:
         r = await c.get("/readyz")
     assert r.status_code == 503
@@ -219,9 +218,7 @@ async def test_readyz_stale_heartbeat_returns_503(
     mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: AsyncMock
 ) -> None:
     mock_db.get_heartbeat.return_value = _stale_ts()
-    stalled_app = create_app(
-        _base_settings(), db=mock_db, watcher=mock_watcher, camera=mock_camera
-    )
+    stalled_app = create_app(_base_settings(), db=mock_db, watcher=mock_watcher, camera=mock_camera)
     async with _client(stalled_app) as c:
         r = await c.get("/readyz")
     assert r.status_code == 503
@@ -242,9 +239,7 @@ async def test_readyz_db_write_failure_returns_503(
     mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: AsyncMock
 ) -> None:
     mock_db.set_setting.side_effect = RuntimeError("disk full")
-    failing_app = create_app(
-        _base_settings(), db=mock_db, watcher=mock_watcher, camera=mock_camera
-    )
+    failing_app = create_app(_base_settings(), db=mock_db, watcher=mock_watcher, camera=mock_camera)
     async with _client(failing_app) as c:
         r = await c.get("/readyz")
     assert r.status_code == 503

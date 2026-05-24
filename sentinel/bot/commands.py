@@ -158,9 +158,7 @@ class BotCommandHandler:
         user = update.message.from_user
         assert user is not None
         self._pending_stops[user.id] = time.monotonic()
-        await update.message.reply_text(
-            "Reply /confirm within 30 s to cancel the print."
-        )
+        await update.message.reply_text("Reply /confirm within 30 s to cancel the print.")
 
     async def cmd_confirm(self, update: Update, context: Any) -> None:
         if not self._authorized(update):
@@ -226,9 +224,7 @@ class BotCommandHandler:
         elif data == "stop":
             user = cq.from_user
             self._pending_stops[user.id] = time.monotonic()
-            await cq.edit_message_text(
-                "Reply /confirm within 30 s to cancel the print."
-            )
+            await cq.edit_message_text("Reply /confirm within 30 s to cancel the print.")
 
         elif data == "snooze":
             await self._db.set_setting("detection_enabled", "false")

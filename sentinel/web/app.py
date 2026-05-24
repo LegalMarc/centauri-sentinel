@@ -50,9 +50,7 @@ def create_app(
         """Single-use JPEG endpoint for the Obico ML API URL-fetch flow."""
         jpeg = get_nonce_store().pop(nonce)
         if jpeg is None:
-            raise HTTPException(
-                status_code=404, detail="Snapshot not found or already consumed"
-            )
+            raise HTTPException(status_code=404, detail="Snapshot not found or already consumed")
         return Response(content=jpeg, media_type="image/jpeg")
 
     app.add_middleware(AuthMiddleware, settings=settings)
