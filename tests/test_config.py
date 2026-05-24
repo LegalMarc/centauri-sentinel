@@ -56,6 +56,10 @@ def test_telegram_disabled_by_default() -> None:
     assert not Settings().telegram_enabled
 
 
+def test_telegram_disabled_when_empty_string() -> None:
+    assert not Settings(telegram_bot_token="").telegram_enabled
+
+
 def test_telegram_enabled_all_fields() -> None:
     s = Settings(
         telegram_bot_token="tok",
@@ -72,6 +76,10 @@ def test_telegram_enabled_token_only() -> None:
 
 def test_ntfy_disabled_by_default() -> None:
     assert not Settings().ntfy_enabled
+
+
+def test_ntfy_disabled_when_empty_string() -> None:
+    assert not Settings(ntfy_url="").ntfy_enabled
 
 
 def test_ntfy_enabled() -> None:
