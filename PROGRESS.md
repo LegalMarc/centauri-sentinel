@@ -62,10 +62,10 @@
 
 ## Ticket #12 — Docker Compose stack
 - Status: done
-- PRs: #41 (stack), #43 (obico-ml fix)
+- PRs: #41 (stack), #43 (obico-ml CUDA fix), #44 (obico-ml CPU-only rewrite)
 - Started: 2026-05-24T01:00:00Z
-- Finished: 2026-05-24T03:30:00Z
-- Notes: Three-service Docker Compose stack (token-init → obico-ml → sentinel). GHCR CI workflow for obico-ml (build-obico-ml.yml). Two fixes required: (1) removed build: section from obico-ml so it pulls from GHCR; (2) obico-ml Dockerfile needed model weights downloaded at build time (base image does not include them) and ml_api source copied to /app (model.meta hardcodes /app/model/names). Stack deployed and verified healthy on Coolify host (5.161.127.252). Coolify queue system was non-functional (application_deployment_queues table empty, Horizon jobs stuck in reserved queue since March 2026); deployed directly via docker compose on host. Sentinel accessible at http://5.161.127.252:8010/healthz → {"status":"ok"}.
+- Finished: 2026-05-24T16:10:00Z
+- Notes: Three-service Docker Compose stack (token-init → obico-ml → sentinel). GHCR CI workflow for obico-ml (build-obico-ml.yml). Deployment via homelab Coolify (coolify.example.com, 192.168.1.50) using the /api/v1/applications/public endpoint with build_pack=dockercompose (the /dockercompose endpoint is absent in this Coolify build). App UUID: app-uuid-redacted. Three fixes required during deployment: (1) obico-ml source copy path and CMD fixed in PR #43; (2) 5 GB CUDA base image replaced with python:3.10-slim + onnxruntime CPU in PR #44 — the homelab VM has no NVIDIA GPU and only 1.9 GB free disk; (3) Coolify env vars set: PRINTER_IP, PRINTER_ACCESS_CODE, EXTERNAL_BIND_ALLOWED=true, SENTINEL_PORT=18000. Sentinel live with SSL via Traefik at https://sentinel.example.com/healthz → {"status":"ok"}. Both sentinel and obico-ml containers running:healthy.
 
 ## Ticket #13 — Documentation
 - Status: done
