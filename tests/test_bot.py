@@ -161,8 +161,16 @@ async def test_cmd_help_lists_commands() -> None:
     await handler.cmd_help(update, None)
     update.message.reply_text.assert_called_once()
     text: str = update.message.reply_text.call_args[0][0]
-    for cmd in ("/status", "/snapshot", "/pause", "/resume",
-                "/stop", "/confirm", "/enable", "/disable"):
+    for cmd in (
+        "/status",
+        "/snapshot",
+        "/pause",
+        "/resume",
+        "/stop",
+        "/confirm",
+        "/enable",
+        "/disable",
+    ):
         assert cmd in text
 
 
