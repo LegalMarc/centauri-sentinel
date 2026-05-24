@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -49,8 +49,12 @@ class Settings(BaseSettings):
     ntfy_token: str | None = None
 
     # Auth
+    # Set either AUTH_PASSWORD_BCRYPT (a bcrypt hash starting with $2b$) or the
+    # plain-text AUTH_PASSWORD — the latter is hashed at startup and then cleared
+    # from memory so it never persists beyond process launch.
     auth_username: str | None = None
     auth_password_bcrypt: str | None = None
+    auth_password: str | None = None
 
     # Web server
     bind_host: str = "0.0.0.0"
@@ -71,7 +75,19 @@ class Settings(BaseSettings):
 
     @property
     def auth_enabled(self) -> bool:
-        return self.auth_username is not None
+        return bool(self.auth_username)
+
+    @model_validator(mode="after")
+    def _hash_plain_password(self) -> Settings:
+        """Hash AUTH_PASSWORD into AUTH_PASSWORD_BCRYPT at startup, then clear it."""
+        if self.auth_password and not self.auth_password_bcrypt:
+            import bcrypt  # lazy import — only needed when plain password is provided
+
+            self.auth_password_bcrypt = bcrypt.hashpw(
+                self.auth_password.encode(), bcrypt.gensalt()
+            ).decode()
+        self.auth_password = None
+        return self
 
     @field_validator("log_level")
     @classmethod
