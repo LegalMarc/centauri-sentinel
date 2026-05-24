@@ -24,6 +24,9 @@ class Database:
         self._lock = asyncio.Lock()
 
     async def connect(self) -> None:
+        from sentinel.db.migrate import migrate
+
+        await migrate(self._path)
         self._conn = await aiosqlite.connect(self._path)
         self._conn.row_factory = aiosqlite.Row
         await self._conn.execute("PRAGMA journal_mode=WAL")
