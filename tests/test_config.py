@@ -88,6 +88,33 @@ def test_auth_enabled() -> None:
     assert s.auth_enabled
 
 
+def test_auth_disabled_when_username_empty_string() -> None:
+    s = Settings(auth_username="")
+    assert not s.auth_enabled
+
+
+def test_auth_plain_password_is_hashed() -> None:
+    import bcrypt
+
+    s = Settings(auth_username="admin", auth_password="secret")
+    assert s.auth_password is None  # cleared after hashing
+    assert s.auth_password_bcrypt is not None
+    assert s.auth_password_bcrypt.startswith("$2b$")
+    assert bcrypt.checkpw(b"secret", s.auth_password_bcrypt.encode())
+
+
+def test_auth_plain_password_does_not_override_existing_bcrypt() -> None:
+    import bcrypt
+
+    existing_hash = bcrypt.hashpw(b"original", bcrypt.gensalt()).decode()
+    s = Settings(
+        auth_username="admin",
+        auth_password="ignored",
+        auth_password_bcrypt=existing_hash,
+    )
+    assert s.auth_password_bcrypt == existing_hash
+
+
 def test_external_bind_allowed_default() -> None:
     assert not Settings().external_bind_allowed
 
