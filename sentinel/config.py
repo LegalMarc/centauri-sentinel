@@ -67,11 +67,11 @@ class Settings(BaseSettings):
 
     @property
     def telegram_enabled(self) -> bool:
-        return self.telegram_bot_token is not None
+        return bool(self.telegram_bot_token)
 
     @property
     def ntfy_enabled(self) -> bool:
-        return self.ntfy_url is not None
+        return bool(self.ntfy_url)
 
     @property
     def auth_enabled(self) -> bool:
