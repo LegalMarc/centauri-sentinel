@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import Response
 from fastapi.templating import Jinja2Templates
 
@@ -19,6 +20,8 @@ if TYPE_CHECKING:
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 
+logger = logging.getLogger(__name__)
+
 
 def create_app(
     settings: Settings,
@@ -26,6 +29,7 @@ def create_app(
     db: Database | None = None,
     watcher: Any = None,
     camera: Any = None,
+    auth_secret: bytes | None = None,
 ) -> FastAPI:
     """Create and configure the FastAPI application."""
     app = FastAPI(title="centauri-sentinel", version="0.1.0")
@@ -46,13 +50,20 @@ def create_app(
         return {"status": "ok"}
 
     @app.get("/__internal_snapshot/{nonce}")
-    async def internal_snapshot(nonce: str) -> Response:
+    async def internal_snapshot(nonce: str, request: Request) -> Response:
         """Single-use JPEG endpoint for the Obico ML API URL-fetch flow."""
         jpeg = get_nonce_store().pop(nonce)
         if jpeg is None:
+            client = request.client.host if request.client else "unknown"
+            logger.warning(
+                "Snapshot nonce not found or expired (prefix=%s, requester=%s) — "
+                "check that obico-ml can reach the sentinel bind_host:bind_port",
+                nonce[:8],
+                client,
+            )
             raise HTTPException(status_code=404, detail="Snapshot not found or already consumed")
         return Response(content=jpeg, media_type="image/jpeg")
 
-    app.add_middleware(AuthMiddleware, settings=settings)
+    app.add_middleware(AuthMiddleware, settings=settings, secret=auth_secret)
 
     return app

@@ -29,7 +29,7 @@ def _parse_user_ids(raw: str | None) -> frozenset[int]:
         try:
             result.add(int(part.strip()))
         except ValueError:
-            logger.warning("Invalid telegram_user_ids entry: %r", part)
+            logger.warning("Invalid telegram_user_ids entry: %r (raw=%r)", part, raw)
     return frozenset(result)
 
 
@@ -44,6 +44,12 @@ class TelegramNotifier:
         self._bot = Bot(token=settings.telegram_bot_token or "")
         self._chat_id = settings.telegram_chat_id or ""
         self._allowed_users = _parse_user_ids(settings.telegram_user_ids)
+        if not self._allowed_users:
+            raise ValueError(
+                "TELEGRAM_USER_IDS is required when Telegram is enabled but is empty or "
+                "contains no valid integer IDs. Bot command authorization will deny everyone. "
+                f"Raw value: {settings.telegram_user_ids!r}"
+            )
 
     def is_authorized(self, chat_id: int | str, user_id: int) -> bool:
         """Return True iff chat_id matches and user_id is in the allowlist."""

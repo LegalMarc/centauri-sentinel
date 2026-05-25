@@ -46,6 +46,8 @@ def main() -> None:
 
 
 async def _run(args: argparse.Namespace) -> None:
+    import os
+
     import uvicorn
 
     from sentinel.bot.commands import BotCommandHandler
@@ -70,6 +72,20 @@ async def _run(args: argparse.Namespace) -> None:
     db = Database(settings.db_path)
     await db.connect()
 
+    # Persist auth cookie secret across restarts so sessions survive reloads.
+    auth_secret = await db.get_auth_secret()
+    if auth_secret is None:
+        auth_secret = os.urandom(32)
+        await db.set_auth_secret(auth_secret)
+
+    # Initialise detection_enabled on first run; preserve the operator's
+    # intent on subsequent starts by reading from DB rather than config.
+    if await db.get_setting("detection_enabled") is None:
+        await db.set_setting(
+            "detection_enabled",
+            "true" if settings.detection_enabled_default else "false",
+        )
+
     camera = MjpegGrabber(settings)
     printer = PrinterClient(settings)
     ml = MlClient(settings)
@@ -77,14 +93,19 @@ async def _run(args: argparse.Namespace) -> None:
     notifiers: list[Notifier] = []
     telegram: TelegramNotifier | None = None
     if settings.telegram_enabled:
-        telegram = TelegramNotifier(settings)
-        notifiers.append(telegram)
+        try:
+            telegram = TelegramNotifier(settings)
+            notifiers.append(telegram)
+        except ValueError:
+            raise  # configuration error (e.g. empty TELEGRAM_USER_IDS) — abort startup
+        except Exception:
+            logger.exception("Telegram notifier failed to initialise — notifications disabled")
     if settings.ntfy_enabled:
         notifiers.append(NtfyNotifier(settings))
 
     watcher = WatcherLoop(settings, printer, camera, ml, db, notifiers)
 
-    app = create_app(settings, db=db, watcher=watcher, camera=camera)
+    app = create_app(settings, db=db, watcher=watcher, camera=camera, auth_secret=auth_secret)
 
     config = uvicorn.Config(app, host=host, port=port, log_level=settings.log_level.lower())
     server = uvicorn.Server(config)
@@ -93,7 +114,11 @@ async def _run(args: argparse.Namespace) -> None:
     if telegram is not None:
         handler = BotCommandHandler(settings, printer, camera, db, watcher, telegram)
         bot = BotRunner(settings, handler)
-        await bot.start()
+        try:
+            await bot.start()
+        except Exception:
+            logger.exception("Telegram bot failed to start — bot commands disabled")
+            bot = None
 
     watcher_task: asyncio.Task[None] = asyncio.create_task(watcher.run_forever(), name="watcher")
 

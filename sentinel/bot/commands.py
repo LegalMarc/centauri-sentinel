@@ -133,12 +133,16 @@ class BotCommandHandler:
             return
         assert update.message is not None
         try:
-            await self._printer.pause()
-            await self._db.record_pause(reason="telegram")
-            await update.message.reply_text("Print paused.")
+            sent = await self._printer.pause()
         except Exception:
             logger.exception("Pause failed via Telegram command")
             await update.message.reply_text("Pause failed — check the printer.")
+            return
+        if sent:
+            await self._db.record_pause(reason="telegram")
+            await update.message.reply_text("Print paused.")
+        else:
+            await update.message.reply_text("Printer is already paused.")
 
     async def cmd_resume(self, update: Update, context: Any) -> None:
         if not self._authorized(update):

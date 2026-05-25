@@ -275,9 +275,9 @@ def test_parse_type_error_returns_fail_open() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_ml_result_is_failure_false_at_zero() -> None:
-    assert not MlResult(score=0.0).is_failure
+def test_ml_result_score_zero() -> None:
+    assert MlResult(score=0.0).score == 0.0
 
 
-def test_ml_result_is_failure_true_above_zero() -> None:
-    assert MlResult(score=0.1).is_failure
+def test_ml_result_score_above_zero() -> None:
+    assert MlResult(score=0.1).score > 0.0

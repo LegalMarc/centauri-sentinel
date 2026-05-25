@@ -57,10 +57,18 @@ class WatcherLoop:
         self._db = db
         self._notifiers = notifiers
 
-        self.state = WatcherState.IDLE
+        self._state = WatcherState.IDLE
         self._confirm_count = 0
         self._print_start: datetime | None = None
         self._running = False
+
+    @property
+    def state(self) -> WatcherState:
+        return self._state
+
+    @state.setter
+    def state(self, value: WatcherState) -> None:
+        self._state = value
 
     # ------------------------------------------------------------------
     # Public
@@ -104,7 +112,9 @@ class WatcherLoop:
         await self._update_state(printer_status)
 
         if self.state == WatcherState.ARMED:
-            await self._check_frame()
+            detection_enabled = await self._db.get_setting("detection_enabled", "true")
+            if detection_enabled == "true":
+                await self._check_frame()
 
     async def _update_state(self, status: PrinterStatus) -> None:
         if not status.printing:
@@ -165,14 +175,21 @@ class WatcherLoop:
 
     async def _on_confirmed_detection(self, result: MlResult) -> None:
         logger.warning("CONFIRMED DETECTION score=%.2f — pausing printer", result.score)
-        self.state = WatcherState.PAUSED
         self._confirm_count = 0
         snapshot_id: str | None = None
 
+        # Shield the pause publish so that a task cancellation arriving mid-call
+        # still lets the MQTT command complete before propagating CancelledError.
+        # State is only set to PAUSED after a successful publish; on failure the
+        # watcher stays ARMED and the next tick will retry.
         pause_ok = False
         try:
-            await self._printer.pause()
+            await asyncio.shield(self._printer.pause())
             pause_ok = True
+            self.state = WatcherState.PAUSED
+        except asyncio.CancelledError:
+            self.state = WatcherState.PAUSED  # pause was sent; mark state before re-raising
+            raise
         except Exception:
             logger.exception("Printer pause failed — notifying anyway")
 

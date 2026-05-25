@@ -173,3 +173,36 @@ async def test_retry_exhausted_reraises() -> None:
 
     with pytest.raises(Exception, match="always fails"):
         await notifier.send_text("hello")
+
+
+# ---------------------------------------------------------------------------
+# Startup validation — fail loudly on empty or invalid user IDs
+# ---------------------------------------------------------------------------
+
+
+def test_init_raises_if_telegram_enabled_with_empty_user_ids() -> None:
+    settings = Settings(
+        printer_ip="10.0.0.1",
+        telegram_bot_token="tok",
+        telegram_chat_id="99",
+        telegram_user_ids="",
+    )
+    with (
+        patch("sentinel.notify.telegram.Bot"),
+        pytest.raises(ValueError, match="TELEGRAM_USER_IDS"),
+    ):
+        TelegramNotifier(settings)
+
+
+def test_init_raises_if_all_user_ids_are_invalid() -> None:
+    settings = Settings(
+        printer_ip="10.0.0.1",
+        telegram_bot_token="tok",
+        telegram_chat_id="99",
+        telegram_user_ids="not_a_number,also_bad",
+    )
+    with (
+        patch("sentinel.notify.telegram.Bot"),
+        pytest.raises(ValueError, match="TELEGRAM_USER_IDS"),
+    ):
+        TelegramNotifier(settings)

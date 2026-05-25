@@ -44,6 +44,16 @@ def _base_settings(**kwargs: object) -> Settings:
 # ---------------------------------------------------------------------------
 
 
+def _make_db_execute_cm() -> AsyncMock:
+    """Return an async context manager mock for db._db.execute()."""
+    cursor = AsyncMock()
+    cursor.fetchone = AsyncMock(return_value=(1,))
+    cm = AsyncMock()
+    cm.__aenter__ = AsyncMock(return_value=cursor)
+    cm.__aexit__ = AsyncMock(return_value=False)
+    return cm
+
+
 @pytest.fixture
 def mock_db() -> AsyncMock:
     db = AsyncMock()
@@ -61,6 +71,9 @@ def mock_db() -> AsyncMock:
         {"id": 1, "started_at": "2026-01-01T00:00:00Z", "ended_at": None, "reason": "detection"},
     ]
     db.set_setting.return_value = None
+    # _db is the raw aiosqlite connection; routes.py uses it for SELECT 1 in /readyz
+    db._db = MagicMock()
+    db._db.execute.return_value = _make_db_execute_cm()
     return db
 
 
@@ -238,13 +251,13 @@ async def test_readyz_no_db_returns_503() -> None:
 async def test_readyz_db_write_failure_returns_503(
     mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: AsyncMock
 ) -> None:
-    mock_db.set_setting.side_effect = RuntimeError("disk full")
+    mock_db._db.execute.side_effect = RuntimeError("disk full")
     failing_app = create_app(_base_settings(), db=mock_db, watcher=mock_watcher, camera=mock_camera)
     async with _client(failing_app) as c:
         r = await c.get("/readyz")
     assert r.status_code == 503
     body = r.json()
-    assert any("writable" in reason for reason in body["reasons"])
+    assert any("reachable" in reason for reason in body["reasons"])
 
 
 # ---------------------------------------------------------------------------
@@ -325,3 +338,182 @@ async def test_internal_snapshot_unknown_nonce(app: object) -> None:
     async with _client(app) as c:
         r = await c.get("/__internal_snapshot/doesnotexist")
     assert r.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# / — status page with no deps (503)
+# ---------------------------------------------------------------------------
+
+
+async def test_status_page_no_db_returns_503() -> None:
+    no_dep_app = create_app(_base_settings())
+    async with _client(no_dep_app) as c:
+        r = await c.get("/")
+    assert r.status_code == 503
+
+
+# ---------------------------------------------------------------------------
+# /snapshot — no camera (503)
+# ---------------------------------------------------------------------------
+
+
+async def test_snapshot_no_camera_returns_503(
+    mock_db: AsyncMock, mock_watcher: MagicMock
+) -> None:
+    no_cam_app = create_app(_base_settings(), db=mock_db, watcher=mock_watcher)
+    async with _client(no_cam_app) as c:
+        r = await c.get("/snapshot")
+    assert r.status_code == 503
+
+
+# ---------------------------------------------------------------------------
+# /stream — MJPEG multipart
+# ---------------------------------------------------------------------------
+
+
+async def test_stream_no_camera_returns_503(
+    mock_db: AsyncMock, mock_watcher: MagicMock
+) -> None:
+    no_cam_app = create_app(_base_settings(), db=mock_db, watcher=mock_watcher)
+    async with _client(no_cam_app) as c:
+        r = await c.get("/stream")
+    assert r.status_code == 503
+
+
+async def test_stream_returns_multipart(
+    mock_db: AsyncMock, mock_watcher: MagicMock
+) -> None:
+    async def _gen() -> object:
+        yield _FAKE_JPEG
+        yield _FAKE_JPEG
+
+    cam = AsyncMock()
+    cam.stream_proxy = _gen
+    stream_app = create_app(_base_settings(), db=mock_db, watcher=mock_watcher, camera=cam)
+    async with _client(stream_app) as c:
+        r = await c.get("/stream")
+    assert r.status_code == 200
+    assert "multipart/x-mixed-replace" in r.headers["content-type"]
+
+
+# ---------------------------------------------------------------------------
+# _age_seconds — invalid timestamp → None
+# ---------------------------------------------------------------------------
+
+
+async def test_readyz_invalid_heartbeat_format(
+    mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: AsyncMock
+) -> None:
+    mock_db.get_heartbeat.return_value = "not-a-timestamp"
+    bad_ts_app = create_app(_base_settings(), db=mock_db, watcher=mock_watcher, camera=mock_camera)
+    async with _client(bad_ts_app) as c:
+        r = await c.get("/readyz")
+    # Invalid timestamp: age is None, treated as no heartbeat → 503
+    assert r.status_code == 503
+
+
+# ---------------------------------------------------------------------------
+# AuthMiddleware — unit-level edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_auth_bad_base64_sets_empty_credentials(auth_app: object) -> None:
+    """Malformed Base64 in Authorization header must not crash; results in 401."""
+    import asyncio
+
+    import httpx
+
+    async def _run() -> httpx.Response:
+        async with _client(auth_app) as c:
+            r = await c.get(
+                "/",
+                headers={"Authorization": "Basic !!!not-base64!!!"},
+            )
+            return r
+
+    r = asyncio.get_event_loop().run_until_complete(_run())
+    assert r.status_code == 401
+
+
+def _make_auth_middleware() -> object:
+    from sentinel.web.auth import AuthMiddleware
+
+    async def _dummy_app(scope: object, receive: object, send: object) -> None:
+        pass
+
+    return AuthMiddleware(
+        _dummy_app,
+        _base_settings(auth_username="admin", auth_password_bcrypt=_HASHED_PASS),
+        secret=b"\x00" * 32,
+    )
+
+
+def test_verify_token_wrong_part_count() -> None:
+    from sentinel.web.auth import AuthMiddleware
+
+    mw = _make_auth_middleware()
+    assert isinstance(mw, AuthMiddleware)
+    assert mw._verify_token("only.three.parts", "ua") is False
+
+
+def test_verify_token_expired() -> None:
+    import time
+
+    from sentinel.web.auth import AuthMiddleware, _TTL
+
+    mw = _make_auth_middleware()
+    assert isinstance(mw, AuthMiddleware)
+    old_ts = str(int(time.time()) - _TTL - 10)
+    token = mw._make_cookie.__func__(mw, "ua").replace(
+        mw._make_cookie.__func__(mw, "ua").split(".")[0], old_ts
+    )
+    # Build an expired token manually
+    import hashlib
+    import hmac
+    import secrets
+
+    rnd = secrets.token_hex(8)
+    ua_hash = mw._ua_hash("ua")
+    msg = f"{old_ts}.{rnd}.{ua_hash}".encode()
+    sig = hmac.new(mw._secret, msg, hashlib.sha256).hexdigest()
+    expired_token = f"{old_ts}.{rnd}.{ua_hash}.{sig}"
+    assert mw._verify_token(expired_token, "ua") is False
+
+
+def test_verify_token_ua_mismatch() -> None:
+    from sentinel.web.auth import AuthMiddleware
+
+    mw = _make_auth_middleware()
+    assert isinstance(mw, AuthMiddleware)
+    cookie = mw._make_cookie("original-ua")
+    assert mw._verify_token(cookie, "different-ua") is False
+
+
+def test_verify_token_garbage_raises_false() -> None:
+    from sentinel.web.auth import AuthMiddleware
+
+    mw = _make_auth_middleware()
+    assert isinstance(mw, AuthMiddleware)
+    # Four parts but ts is not an integer
+    assert mw._verify_token("notint.rnd.uah.sig", "ua") is False
+
+
+def test_check_credentials_bcrypt_exception() -> None:
+    """bcrypt.checkpw on a garbage hash must not raise; returns False."""
+    from sentinel.config import Settings
+    from sentinel.web.auth import AuthMiddleware
+
+    async def _dummy(s: object, r: object, send: object) -> None:
+        pass
+
+    mw = AuthMiddleware(
+        _dummy,
+        Settings(
+            printer_ip="127.0.0.1",
+            auth_username="admin",
+            auth_password_bcrypt="$garbage$not_a_real_hash",
+        ),
+        secret=b"\x00" * 32,
+    )
+    result = mw._check_credentials("admin", "password")
+    assert result is False
