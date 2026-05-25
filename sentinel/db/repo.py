@@ -127,6 +127,24 @@ class Database:
             )
 
     # ------------------------------------------------------------------
+    # Auth session secret
+    # ------------------------------------------------------------------
+
+    async def get_auth_secret(self) -> bytes | None:
+        """Return the persisted HMAC secret, or None if not yet generated."""
+        val = await self.get_setting("auth_cookie_secret")
+        if val is None:
+            return None
+        try:
+            return bytes.fromhex(val)
+        except ValueError:
+            return None
+
+    async def set_auth_secret(self, secret: bytes) -> None:
+        """Persist the HMAC secret so sessions survive restarts."""
+        await self.set_setting("auth_cookie_secret", secret.hex())
+
+    # ------------------------------------------------------------------
     # Watcher heartbeat
     # ------------------------------------------------------------------
 

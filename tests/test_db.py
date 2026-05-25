@@ -201,3 +201,26 @@ async def test_update_heartbeat_upserts(db: Database) -> None:
     await db.update_heartbeat("2026-05-23T13:00:00Z")
     ts = await db.get_heartbeat()
     assert ts == "2026-05-23T13:00:00Z"
+
+
+# ---------------------------------------------------------------------------
+# Auth secret persistence
+# ---------------------------------------------------------------------------
+
+
+async def test_get_auth_secret_none_when_not_set(db: Database) -> None:
+    result = await db.get_auth_secret()
+    assert result is None
+
+
+async def test_set_and_get_auth_secret(db: Database) -> None:
+    secret = bytes(range(32))
+    await db.set_auth_secret(secret)
+    result = await db.get_auth_secret()
+    assert result == secret
+
+
+async def test_get_auth_secret_invalid_hex_returns_none(db: Database) -> None:
+    await db.set_setting("auth_cookie_secret", "not_valid_hex!")
+    result = await db.get_auth_secret()
+    assert result is None

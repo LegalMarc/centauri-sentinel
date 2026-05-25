@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 import uuid
 from typing import TYPE_CHECKING, Any, TypeVar
 
@@ -36,6 +37,7 @@ logger = logging.getLogger(__name__)
 _TIMEOUT_S = 5.0
 _RETRY_ATTEMPTS = 3
 _RETRY_WAIT = tenacity.wait_exponential(multiplier=0.5, min=0.5, max=4)
+_PAUSE_DEBOUNCE_S = 30.0  # minimum seconds between successive pause() publishes
 
 
 def _parse_status(payload: dict[str, Any]) -> PrinterStatus:
@@ -69,6 +71,7 @@ class PrinterClient:
         self._port = settings.printer_mqtt_port
         self._access_code = settings.printer_access_code
         self._client_id = f"sentinel-{uuid.uuid4().hex[:8]}"
+        self._last_pause_at: float = 0.0
 
     # ------------------------------------------------------------------
     # Public API
@@ -88,14 +91,21 @@ class PrinterClient:
     async def print_elapsed_seconds(self) -> float:
         return (await self.status()).elapsed_seconds
 
-    async def pause(self) -> None:
+    async def pause(self) -> bool:
         """Send pause command.
 
-        NOTE: Only call when the user has explicitly requested a pause.
-        Never call autonomously in response to a detection event without
-        user confirmation — safety constraint from project initiation.
+        Returns True if the command was published, False if the debounce window
+        was active (a pause was already sent within _PAUSE_DEBOUNCE_S seconds).
+        _last_pause_at is only updated on a successful publish so a failed
+        attempt does not block the next retry.
         """
+        now = time.monotonic()
+        if now - self._last_pause_at < _PAUSE_DEBOUNCE_S:
+            logger.debug("pause() called within debounce window — skipping duplicate publish")
+            return False
         await self._with_retry(lambda: self._send_command({"method": 1001}))
+        self._last_pause_at = time.monotonic()
+        return True
 
     async def resume(self) -> None:
         """Send resume command."""
@@ -147,6 +157,8 @@ class PrinterClient:
                 password=self._access_code,
                 identifier=self._client_id,
             ) as client:
+                # TODO(L2): topic uses printer IP as serial; replace with actual
+                # serial number once one full print cycle has been observed.
                 topic = f"elegoo/{self._host}/{self._client_id}/api_request"
                 async with asyncio.timeout(_TIMEOUT_S):
                     await client.publish(topic, json.dumps(msg))

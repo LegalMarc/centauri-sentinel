@@ -101,9 +101,10 @@ def make_router(
             reasons.append(f"watcher stalled ({age:.0f}s since last tick)")
 
         try:
-            await db.set_setting("_readyz", "1")
+            async with db._db.execute("SELECT 1") as cur:
+                await cur.fetchone()
         except Exception:
-            reasons.append("db not writable")
+            reasons.append("db not reachable")
 
         if reasons:
             body = json.dumps({"status": "not ready", "reasons": reasons})

@@ -263,6 +263,81 @@ async def test_stop_publishes_command() -> None:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# PrinterClient.pause() — bool return and debounce
+# ---------------------------------------------------------------------------
+
+
+async def test_pause_returns_true_on_success() -> None:
+    cm, _ = await _make_publish_client()
+    with patch("sentinel.printer.client.aiomqtt.Client", return_value=cm):
+        client = PrinterClient(_SETTINGS)
+        result = await client.pause()
+    assert result is True
+
+
+async def test_pause_returns_false_within_debounce_window() -> None:
+    cm, mock_client = await _make_publish_client()
+    with patch("sentinel.printer.client.aiomqtt.Client", return_value=cm):
+        client = PrinterClient(_SETTINGS)
+        first = await client.pause()
+        second = await client.pause()
+    assert first is True
+    assert second is False
+    assert mock_client.publish.call_count == 1  # only one actual publish
+
+
+async def test_pause_failure_does_not_lock_debounce() -> None:
+    """A failed publish must not set _last_pause_at; next call should retry."""
+    client = PrinterClient(_SETTINGS)
+
+    async def _always_fail(msg: dict[str, Any]) -> None:
+        raise PrinterTimeoutError("mqtt down")
+
+    with (
+        patch.object(client, "_send_command", side_effect=_always_fail),
+        pytest.raises(PrinterTimeoutError),
+    ):
+        await client.pause()
+
+    assert client._last_pause_at == pytest.approx(0.0)
+
+
+# ---------------------------------------------------------------------------
+# PrinterClient._fetch_status — stream ends without a 6000 push
+# ---------------------------------------------------------------------------
+
+
+async def test_status_stream_ends_without_status_message() -> None:
+    cm, _ = _make_mqtt_cm([])
+    with (
+        patch("sentinel.printer.client.aiomqtt.Client", return_value=cm),
+        pytest.raises(PrinterProtocolError, match="stream ended"),
+    ):
+        await PrinterClient(_SETTINGS)._fetch_status()
+
+
+# ---------------------------------------------------------------------------
+# PrinterClient._send_command — timeout
+# ---------------------------------------------------------------------------
+
+
+async def test_send_command_timeout_raises_printer_timeout_error() -> None:
+    cm = AsyncMock()
+    cm.__aenter__ = AsyncMock(side_effect=TimeoutError("publish timed out"))
+    cm.__aexit__ = AsyncMock(return_value=False)
+    with (
+        patch("sentinel.printer.client.aiomqtt.Client", return_value=cm),
+        pytest.raises(PrinterTimeoutError),
+    ):
+        await PrinterClient(_SETTINGS)._send_command({"method": 1001})
+
+
+# ---------------------------------------------------------------------------
+# Protocol error (bad JSON)
+# ---------------------------------------------------------------------------
+
+
 async def test_bad_json_raises_protocol_error() -> None:
     bad_msg = MagicMock()
     bad_msg.payload = b"not json"

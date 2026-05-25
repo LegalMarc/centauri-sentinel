@@ -109,5 +109,6 @@ class MlClient:
                     return MlResult(score=float(data["score"]))
             return _FAIL_OPEN
         except (TypeError, ValueError, KeyError):
-            logger.warning("Cannot parse ML response: %s", data)
+            keys = list(data.keys()) if isinstance(data, dict) else type(data).__name__
+            logger.warning("Cannot parse ML response (shape: %s)", keys)
             return _FAIL_OPEN

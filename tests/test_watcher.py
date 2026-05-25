@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -230,7 +231,8 @@ async def test_pause_fails_notifier_still_fires() -> None:
 
     await watcher.tick()
 
-    assert watcher.state == WatcherState.PAUSED
+    # Pause failed → state stays ARMED so the next tick can retry.
+    assert watcher.state == WatcherState.ARMED
     notifier.send_detection_alert.assert_called_once()
 
 
@@ -352,3 +354,133 @@ async def test_watchdog_no_alert_when_no_heartbeat() -> None:
 
     assert watcher.state == WatcherState.IDLE
     notifier.send_stall_alert.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# run_forever — TaskGroup lifecycle
+# ---------------------------------------------------------------------------
+
+_FAST_SETTINGS = Settings(
+    printer_ip="10.0.0.1",
+    detection_warmup_seconds=0,
+    ml_confirm_count=1,
+    ml_score_threshold=0.4,
+    ml_poll_interval_seconds=0,
+    watcher_stall_seconds=0,
+)
+
+
+async def test_run_forever_cancels_cleanly() -> None:
+    watcher, *_ = await _make_watcher(settings=_FAST_SETTINGS)
+    task = asyncio.create_task(watcher.run_forever())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+# ---------------------------------------------------------------------------
+# _loop — non-CancelledError exceptions are swallowed
+# ---------------------------------------------------------------------------
+
+
+async def test_loop_swallows_unexpected_exceptions() -> None:
+    watcher, *_ = await _make_watcher(settings=_FAST_SETTINGS)
+    watcher._running = True
+    call_count = 0
+
+    async def _patched_tick() -> None:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise RuntimeError("unexpected!")
+        watcher._running = False  # exit loop after recovering
+
+    with patch.object(watcher, "_tick", side_effect=_patched_tick):
+        await watcher._loop()
+
+    assert call_count == 2  # loop executed twice despite exception on first
+
+
+# ---------------------------------------------------------------------------
+# Notifier exception swallowing — camera offline, detection, stall
+# ---------------------------------------------------------------------------
+
+
+async def test_camera_offline_notifier_exception_swallowed() -> None:
+    notifier = _make_notifier()
+    notifier.send_camera_offline_alert = AsyncMock(side_effect=Exception("send failed"))
+    watcher, _, camera, _, _ = await _make_watcher(
+        printer_status=_printing_status(), notifiers=[notifier]
+    )
+    camera.grab = AsyncMock(side_effect=CameraOfflineError("offline"))
+    await watcher.tick()  # must not raise
+    assert watcher.state == WatcherState.CAMERA_OFFLINE
+
+
+async def test_detection_notifier_exception_swallowed() -> None:
+    notifier = _make_notifier()
+    notifier.send_detection_alert = AsyncMock(side_effect=Exception("telegram down"))
+    watcher, _, _, _, _ = await _make_watcher(
+        printer_status=_printing_status(), ml_score=0.9, notifiers=[notifier]
+    )
+    watcher._settings = Settings(
+        printer_ip="10.0.0.1",
+        detection_warmup_seconds=0,
+        ml_confirm_count=1,
+        ml_score_threshold=0.4,
+        ml_poll_interval_seconds=10,
+        watcher_stall_seconds=60,
+    )
+    await watcher.tick()  # must not raise
+    assert watcher.state == WatcherState.PAUSED
+
+
+async def test_watchdog_notifier_exception_swallowed() -> None:
+    notifier = _make_notifier()
+    notifier.send_stall_alert = AsyncMock(side_effect=Exception("ntfy down"))
+    watcher, _, _, _, db = await _make_watcher(notifiers=[notifier])
+    stale_ts = (datetime.now(tz=UTC) - timedelta(seconds=120)).isoformat()
+    await db.update_heartbeat(stale_ts)
+    await watcher._watchdog_tick(db)  # must not raise
+    assert watcher.state == WatcherState.STALLED
+
+
+# ---------------------------------------------------------------------------
+# _on_confirmed_detection — CancelledError sets PAUSED before re-raising
+# ---------------------------------------------------------------------------
+
+
+async def test_cancelled_during_pause_sets_paused_state() -> None:
+    watcher, _, _, _, _ = await _make_watcher()
+
+    async def _raise_cancelled() -> bool:
+        raise asyncio.CancelledError
+
+    watcher._printer = MagicMock()
+    watcher._printer.pause = _raise_cancelled
+
+    with pytest.raises(asyncio.CancelledError):
+        await watcher._on_confirmed_detection(MlResult(score=0.9))
+
+    assert watcher.state == WatcherState.PAUSED
+
+
+# ---------------------------------------------------------------------------
+# _watchdog — loop execution (covers the while-loop lines)
+# ---------------------------------------------------------------------------
+
+
+async def test_watchdog_loop_fires_on_stale_heartbeat() -> None:
+    notifier = _make_notifier()
+    watcher, _, _, _, db = await _make_watcher(settings=_FAST_SETTINGS, notifiers=[notifier])
+    stale_ts = (datetime.now(tz=UTC) - timedelta(seconds=120)).isoformat()
+    await db.update_heartbeat(stale_ts)
+
+    watcher._running = True
+    task = asyncio.create_task(watcher._watchdog())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+    notifier.send_stall_alert.assert_called()
