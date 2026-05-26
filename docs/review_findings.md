@@ -11,17 +11,24 @@
 | Severity | Count | Status |
 |---|---|---|
 | CRITICAL | 2 | Resolved |
-| HIGH | 9 | Resolved |
+| HIGH | 10 | Resolved |
 | MEDIUM | 14 | Resolved |
 | LOW | 10 | Resolved |
 
-**Total findings: 35 (0 remaining, 35 resolved)**
+**Total findings: 36 (0 remaining, 36 resolved)**
 
-**Go/No-Go: GO** — All 35 findings (including the 2 CRITICAL ship-blockers, 9 HIGH-severity lifecycle and safety issues, and all 24 medium/low items) have been successfully resolved, tested, and verified. The codebase is fully formatted, passes strict `ruff` linter checks and `mypy` type-checking, and passes all 270 unit and integration tests with **95.12% total coverage**.
+**Go/No-Go: GO** — All 36 findings (including the 2 CRITICAL ship-blockers, 10 HIGH-severity lifecycle and safety issues, and all 24 medium/low items) have been successfully resolved, tested, and verified. The codebase is fully formatted, passes strict `ruff` linter checks and `mypy` type-checking, and passes all 272 unit and integration tests with **95.04% total coverage**.
 
 ---
 
 ## Pass 1 — Correctness & Logic
+
+### [PASS 1] [HIGH] Watcher state trapped in PAUSED after manual resume
+**File:** sentinel/bot/commands.py (lines 165–167, 234–236)
+**Issue:** When the printer is paused due to a confirmed detection, the watcher transitions to the `PAUSED` state. However, when the operator manually resumes the print (via `/resume` or the inline "Resume" button), the bot only sends the MQTT resume command to the printer. The watcher remains stuck in the `PAUSED` state. In this state, the watcher loop refuses to call `_check_frame()`, meaning failure detection is silently disabled for the remainder of the active print.
+**Impact:** A print resumed after a false positive or temporary issue runs completely unmonitored, defeating the safety guarantees of sentinel.
+**Fix:** Modify `cmd_resume` and `handle_callback` in `sentinel/bot/commands.py` to check if the watcher is in the `PAUSED` state and transition it back to `ARMED` upon successful resumption of the print.
+**Status:** Resolved
 
 ### [PASS 1] [HIGH] CAMERA_OFFLINE state has no recovery path
 **File:** sentinel/watcher/loop.py (line 119–133)

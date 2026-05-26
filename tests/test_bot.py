@@ -237,9 +237,11 @@ async def test_cmd_pause_calls_printer() -> None:
 async def test_cmd_resume_calls_printer() -> None:
     printer = AsyncMock()
     handler = _make_handler(printer=printer)
+    handler._watcher.state = WatcherState.PAUSED
     update = _make_update()
     await handler.cmd_resume(update, None)
     printer.resume.assert_called_once()
+    assert handler._watcher.state == WatcherState.ARMED
     update.message.reply_text.assert_called_once()
     assert "resumed" in update.message.reply_text.call_args[0][0].lower()
 
@@ -349,9 +351,11 @@ async def test_cmd_disable_sets_db_setting() -> None:
 async def test_callback_resume_calls_printer() -> None:
     printer = AsyncMock()
     handler = _make_handler(printer=printer)
+    handler._watcher.state = WatcherState.PAUSED
     update = _make_update(callback_data="resume")
     await handler.handle_callback(update, None)
     printer.resume.assert_called_once()
+    assert handler._watcher.state == WatcherState.ARMED
     update.callback_query.edit_message_text.assert_called_once()
     assert "resumed" in update.callback_query.edit_message_text.call_args[0][0].lower()
 

@@ -3,7 +3,7 @@
 # ---------------------------------------------------------------------------
 # Stage 1 — builder: install dependencies with uv
 # ---------------------------------------------------------------------------
-FROM python:3.12-slim AS builder
+FROM python:3.12.8-slim AS builder
 
 RUN pip install --no-cache-dir uv==0.7.0
 
@@ -16,7 +16,7 @@ RUN uv sync --frozen --no-dev --no-install-project
 # ---------------------------------------------------------------------------
 # Stage 2 — runtime: copy venv + source, run as non-root
 # ---------------------------------------------------------------------------
-FROM python:3.12-slim AS runtime
+FROM python:3.12.8-slim AS runtime
 
 # Non-root user + su-exec for privilege drop in entrypoint
 RUN apt-get update -qq \
@@ -45,7 +45,8 @@ RUN mkdir -p /data/snapshots && chown -R sentinel:sentinel /data /app
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
-USER sentinel
+# USER sentinel directive removed to allow entrypoint.sh to run as root and fix permissions.
+# entrypoint.sh will drop privileges to sentinel via su-exec.
 
 EXPOSE 8000
 

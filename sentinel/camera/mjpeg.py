@@ -30,6 +30,7 @@ _OFFLINE_THRESHOLD = 3
 _BACKOFF_BASE = 0.5
 _BACKOFF_CAP = 30.0
 _READ_TIMEOUT = 10.0
+_MAX_BUF_BYTES = 10 * 1024 * 1024  # 10 MB limit to prevent OOM on unbounded stream
 
 
 def _extract_jpeg(buf: bytes) -> bytes | None:
@@ -92,6 +93,8 @@ class MjpegGrabber:
                 async with asyncio.timeout(_READ_TIMEOUT):
                     async for chunk in resp.aiter_bytes(_CHUNK_SIZE):
                         buf += chunk
+                        if len(buf) > _MAX_BUF_BYTES:
+                            raise CameraReadError("Buffer size limit exceeded 10 MB")
                         frame = _extract_jpeg(buf)
                         if frame is not None:
                             return frame
@@ -116,6 +119,8 @@ class MjpegGrabber:
                     buf = b""
                     async for chunk in resp.aiter_bytes(_CHUNK_SIZE):
                         buf += chunk
+                        if len(buf) > _MAX_BUF_BYTES:
+                            raise CameraReadError("Buffer size limit exceeded 10 MB")
                         while True:
                             start = buf.find(_SOI)
                             if start == -1:

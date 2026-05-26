@@ -162,6 +162,9 @@ class BotCommandHandler:
         assert update.message is not None
         try:
             await self._printer.resume()
+            from sentinel.watcher.state import WatcherState
+            if self._watcher.state == WatcherState.PAUSED:
+                self._watcher.state = WatcherState.ARMED
             await update.message.reply_text("Print resumed.")
         except Exception:
             logger.exception("Resume failed via Telegram command")
@@ -232,6 +235,9 @@ class BotCommandHandler:
         if data == "resume":
             try:
                 await self._printer.resume()
+                from sentinel.watcher.state import WatcherState
+                if self._watcher.state == WatcherState.PAUSED:
+                    self._watcher.state = WatcherState.ARMED
                 await cq.edit_message_text("Print resumed.")
             except Exception:
                 logger.exception("Resume failed via inline keyboard")

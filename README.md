@@ -178,6 +178,7 @@ python3 -c "import bcrypt; print(bcrypt.hashpw(b'yourpassword', bcrypt.gensalt()
 | `/confirm` | Confirm a pending `/stop` |
 | `/enable` | Re-enable failure detection |
 | `/disable` | Disable detection (or use the snooze button in alert messages) |
+| `/help` | List available commands |
 
 ---
 

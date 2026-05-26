@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.12.8-slim
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
