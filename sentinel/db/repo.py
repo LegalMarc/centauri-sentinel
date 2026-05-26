@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import aiosqlite
 
@@ -39,6 +39,8 @@ class Database:
 
     @asynccontextmanager
     async def _write(self) -> AsyncGenerator[aiosqlite.Connection, None]:
+        # Reads do NOT need this lock: aiosqlite serialises via its own
+        # connection thread and SQLite WAL provides snapshot isolation.
         async with self._lock:
             assert self._conn is not None, "Database.connect() was not called"
             yield self._conn
@@ -49,6 +51,15 @@ class Database:
         assert self._conn is not None, "Database.connect() was not called"
         return self._conn
 
+    async def ping(self) -> bool:
+        """Return True if the DB connection is live (used by /readyz)."""
+        try:
+            async with self._db.execute("SELECT 1") as cur:
+                await cur.fetchone()
+            return True
+        except Exception:
+            return False
+
     # ------------------------------------------------------------------
     # Detection events
     # ------------------------------------------------------------------
@@ -56,20 +67,22 @@ class Database:
     async def record_detection(
         self,
         score: float,
-        snapshot_id: str | None = None,
-        action: str = "alert",
+        consecutive: int,
+        confirmed: int,
+        snapshot_path: str | None = None,
     ) -> int:
         """Insert a detection event; returns the new row id."""
         async with self._write() as db:
             cursor = await db.execute(
-                "INSERT INTO detection_events (score, snapshot_id, action) VALUES (?, ?, ?)",
-                (score, snapshot_id, action),
+                "INSERT INTO detection_events (score, consecutive, confirmed, snapshot_path)"
+                " VALUES (?, ?, ?, ?)",
+                (score, consecutive, confirmed, snapshot_path),
             )
             return cursor.lastrowid or 0
 
     async def get_recent_detections(self, limit: int = 50) -> list[dict[str, object]]:
         async with self._db.execute(
-            "SELECT id, ts, score, snapshot_id, action"
+            "SELECT id, ts_utc, score, consecutive, confirmed, snapshot_path"
             " FROM detection_events ORDER BY id DESC LIMIT ?",
             (limit,),
         ) as cur:
@@ -77,52 +90,45 @@ class Database:
             return [dict(r) for r in rows]
 
     async def get_snapshots_for_cleanup(self, keep_limit: int = 50) -> list[str]:
-        """Return snapshot_ids of old detection events that should be deleted."""
+        """Return snapshot_paths of old detection events that should be deleted."""
         async with self._db.execute(
-            "SELECT snapshot_id FROM detection_events WHERE snapshot_id IS NOT NULL"
+            "SELECT snapshot_path FROM detection_events WHERE snapshot_path IS NOT NULL"
             " ORDER BY id DESC"
         ) as cur:
             rows = list(await cur.fetchall())
             if len(rows) <= keep_limit:
                 return []
-            return [row["snapshot_id"] for row in rows[keep_limit:]]
+            return [row["snapshot_path"] for row in rows[keep_limit:]]
 
-    async def delete_old_snapshots(self, snapshot_ids: list[str]) -> None:
-        """Clear snapshot_id fields for deleted snapshots."""
-        if not snapshot_ids:
+    async def delete_old_snapshots(self, snapshot_paths: list[str]) -> None:
+        """Clear snapshot_path fields for deleted snapshots."""
+        if not snapshot_paths:
             return
         async with self._write() as db:
-            placeholders = ",".join("?" for _ in snapshot_ids)
+            placeholders = ",".join("?" for _ in snapshot_paths)
             query = (
-                "UPDATE detection_events SET snapshot_id = NULL"
-                f" WHERE snapshot_id IN ({placeholders})"
+                "UPDATE detection_events SET snapshot_path = NULL"
+                f" WHERE snapshot_path IN ({placeholders})"
             )
-            await db.execute(query, snapshot_ids)
+            await db.execute(query, snapshot_paths)
 
     # ------------------------------------------------------------------
     # Pause history
     # ------------------------------------------------------------------
 
-    async def record_pause(self, reason: str = "detection") -> int:
+    async def record_pause(self, source: str, result: str, error_message: str | None = None) -> int:
         """Open a new pause entry; returns the new row id."""
         async with self._write() as db:
             cursor = await db.execute(
-                "INSERT INTO pause_history (reason) VALUES (?)",
-                (reason,),
+                "INSERT INTO pause_history (source, result, error_message) VALUES (?, ?, ?)",
+                (source, result, error_message),
             )
             return cursor.lastrowid or 0
 
-    async def end_pause(self, pause_id: int) -> None:
-        async with self._write() as db:
-            await db.execute(
-                "UPDATE pause_history SET ended_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
-                " WHERE id = ? AND ended_at IS NULL",
-                (pause_id,),
-            )
-
     async def get_recent_pauses(self, limit: int = 50) -> list[dict[str, object]]:
         async with self._db.execute(
-            "SELECT id, started_at, ended_at, reason FROM pause_history ORDER BY id DESC LIMIT ?",
+            "SELECT id, ts_utc, source, result, error_message"
+            " FROM pause_history ORDER BY id DESC LIMIT ?",
             (limit,),
         ) as cur:
             rows = await cur.fetchall()
@@ -171,15 +177,18 @@ class Database:
     # Watcher heartbeat
     # ------------------------------------------------------------------
 
-    async def update_heartbeat(self, ts: str) -> None:
+    async def update_heartbeat(self, ts: str, state: str) -> None:
         async with self._write() as db:
             await db.execute(
-                "INSERT INTO watcher_heartbeat (id, last_beat) VALUES (1, ?)"
-                " ON CONFLICT(id) DO UPDATE SET last_beat = excluded.last_beat",
-                (ts,),
+                "INSERT INTO watcher_heartbeat (id, last_tick_utc, state) VALUES (1, ?, ?)"
+                " ON CONFLICT(id) DO UPDATE SET"
+                " last_tick_utc = excluded.last_tick_utc, state = excluded.state",
+                (ts, state),
             )
 
-    async def get_heartbeat(self) -> str | None:
-        async with self._db.execute("SELECT last_beat FROM watcher_heartbeat WHERE id = 1") as cur:
+    async def get_heartbeat(self) -> dict[str, Any] | None:
+        async with self._db.execute(
+            "SELECT last_tick_utc, state FROM watcher_heartbeat WHERE id = 1"
+        ) as cur:
             row = await cur.fetchone()
-            return str(row["last_beat"]) if row else None
+            return dict(row) if row else None

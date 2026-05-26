@@ -14,3 +14,7 @@ htmlcov/
 .coverage
 data/
 mjpeg_soak_*.log
+
+# Project-internal prompt files
+INITIATION_PROMPT.md
+SYSTEM_PROMPT.md

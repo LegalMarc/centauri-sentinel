@@ -359,3 +359,52 @@ async def test_bad_json_raises_protocol_error() -> None:
         pytest.raises(PrinterProtocolError),
     ):
         await PrinterClient(_SETTINGS)._fetch_status()
+
+
+# ---------------------------------------------------------------------------
+# Serial Number Extraction and Command Topic Routing
+# ---------------------------------------------------------------------------
+
+
+async def test_serial_number_extraction_and_usage() -> None:
+    payload = _status_payload()
+    msg = MagicMock()
+    msg.payload = json.dumps(payload).encode()
+    msg.topic = "elegoo/SERIAL123/api_status"
+
+    client = PrinterClient(_SETTINGS)
+
+    async def _aiter_messages() -> Any:
+        yield msg
+
+    client_mock_status = AsyncMock()
+    client_mock_status.subscribe = AsyncMock()
+    client_mock_status.messages.__aiter__ = lambda _: _aiter_messages()
+
+    cm_status = AsyncMock()
+    cm_status.__aenter__ = AsyncMock(return_value=client_mock_status)
+    cm_status.__aexit__ = AsyncMock(return_value=False)
+
+    with patch("sentinel.printer.client.aiomqtt.Client", return_value=cm_status):
+        await client.status()
+
+    # Assert serial number got extracted
+    assert client._serial_number == "SERIAL123"
+
+    # Mock client publish for sending command
+    client_mock_cmd = AsyncMock()
+    client_mock_cmd.publish = AsyncMock()
+
+    cm_cmd = AsyncMock()
+    cm_cmd.__aenter__ = AsyncMock(return_value=client_mock_cmd)
+    cm_cmd.__aexit__ = AsyncMock(return_value=False)
+
+    with patch("sentinel.printer.client.aiomqtt.Client", return_value=cm_cmd):
+        await client.pause()
+
+    # Assert that it published to the topic containing the serial number instead of IP
+    client_mock_cmd.publish.assert_called_once()
+    call_args = client_mock_cmd.publish.call_args
+    topic_published = call_args[0][0]
+    assert topic_published.startswith("elegoo/SERIAL123/")
+    assert topic_published.endswith("/api_request")

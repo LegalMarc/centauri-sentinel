@@ -72,6 +72,7 @@ class PrinterClient:
         self._access_code = settings.printer_access_code
         self._client_id = f"sentinel-{uuid.uuid4().hex[:8]}"
         self._last_pause_at: float = 0.0
+        self._serial_number: str | None = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -127,21 +128,28 @@ class PrinterClient:
         """Connect, wait for one status push, return parsed status."""
         try:
             client_id = f"{self._client_id}-status-{uuid.uuid4().hex[:8]}"
-            async with aiomqtt.Client(
-                hostname=self._host,
-                port=self._port,
-                username="elegoo",
-                password=self._access_code,
-                identifier=client_id,
-            ) as client:
-                await client.subscribe("elegoo/+/api_status")
-                async with asyncio.timeout(_TIMEOUT_S):
+            async with asyncio.timeout(_TIMEOUT_S):
+                async with aiomqtt.Client(
+                    hostname=self._host,
+                    port=self._port,
+                    username="elegoo",
+                    password=self._access_code,
+                    identifier=client_id,
+                ) as client:
+                    await client.subscribe("elegoo/+/api_status")
                     async for message in client.messages:
                         try:
                             payload: dict[str, Any] = json.loads(message.payload)
                         except json.JSONDecodeError as exc:
                             raise PrinterProtocolError(f"Bad JSON: {exc}") from exc
                         if payload.get("method") == METHOD_STATUS_PUSH:
+                            # Split topic: elegoo/<serial>/api_status
+                            parts = str(message.topic).split("/")
+                            if len(parts) >= 2:
+                                self._serial_number = parts[1]
+                                logger.debug(
+                                    "Resolved printer serial number: %s", self._serial_number
+                                )
                             return _parse_status(payload)
         except TimeoutError as exc:
             raise PrinterTimeoutError("Status request timed out") from exc
@@ -152,17 +160,16 @@ class PrinterClient:
         """Publish a command and return; does not wait for an ack."""
         try:
             client_id = f"{self._client_id}-cmd-{uuid.uuid4().hex[:8]}"
-            async with aiomqtt.Client(
-                hostname=self._host,
-                port=self._port,
-                username="elegoo",
-                password=self._access_code,
-                identifier=client_id,
-            ) as client:
-                # TODO(L2): topic uses printer IP as serial; replace with actual
-                # serial number once one full print cycle has been observed.
-                topic = f"elegoo/{self._host}/{self._client_id}/api_request"
-                async with asyncio.timeout(_TIMEOUT_S):
+            async with asyncio.timeout(_TIMEOUT_S):
+                async with aiomqtt.Client(
+                    hostname=self._host,
+                    port=self._port,
+                    username="elegoo",
+                    password=self._access_code,
+                    identifier=client_id,
+                ) as client:
+                    serial = self._serial_number or self._host
+                    topic = f"elegoo/{serial}/{self._client_id}/api_request"
                     await client.publish(topic, json.dumps(msg))
         except TimeoutError as exc:
             raise PrinterTimeoutError("Command publish timed out") from exc

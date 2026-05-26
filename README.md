@@ -116,9 +116,10 @@ Disabled if `AUTH_USERNAME` is unset.
 | Variable | Default | Purpose |
 |---|---|---|
 | `AUTH_USERNAME` | — | HTTP Basic Auth username |
-| `AUTH_PASSWORD_BCRYPT` | — | Bcrypt hash of the password |
+| `AUTH_PASSWORD` | — | Plaintext password — hashed with bcrypt at startup (use instead of `AUTH_PASSWORD_BCRYPT` for convenience) |
+| `AUTH_PASSWORD_BCRYPT` | — | Pre-computed bcrypt hash — takes precedence over `AUTH_PASSWORD` |
 
-Generate the hash:
+Generate a pre-computed hash:
 ```sh
 python3 -c "import bcrypt; print(bcrypt.hashpw(b'yourpassword', bcrypt.gensalt()).decode())"
 ```
@@ -128,7 +129,8 @@ python3 -c "import bcrypt; print(bcrypt.hashpw(b'yourpassword', bcrypt.gensalt()
 | Variable | Default | Purpose |
 |---|---|---|
 | `BIND_HOST` | `0.0.0.0` | Address to bind on |
-| `BIND_PORT` | `8000` | Port to bind on |
+| `BIND_PORT` | `8000` | Port to bind on (inside the container) |
+| `SENTINEL_PORT` | `8000` | Host-side port published by Docker Compose |
 | `EXTERNAL_BIND_ALLOWED` | `false` | Set `true` only with auth + TLS at reverse proxy |
 
 ### Misc
@@ -145,7 +147,9 @@ python3 -c "import bcrypt; print(bcrypt.hashpw(b'yourpassword', bcrypt.gensalt()
 1. Open [@BotFather](https://t.me/BotFather) on Telegram and send `/newbot`. Follow the prompts.
    Copy the **bot token** — this is `TELEGRAM_BOT_TOKEN`.
 
-2. Start a chat with your new bot (or add it to a group). Send `/start`.
+2. **Start a chat with your bot first.** Open Telegram, search for your bot by its username,
+   and send `/start`. Without this step `getUpdates` will return an empty list and you cannot
+   retrieve your chat ID.
 
 3. Find your **chat ID**:
    ```

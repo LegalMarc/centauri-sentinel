@@ -25,7 +25,9 @@ snapshot, and camera stream.
 
 **Mitigation (optional):** Set `AUTH_USERNAME` and `AUTH_PASSWORD_BCRYPT` to enable HTTP Basic
 Auth. The service issues an HMAC-SHA256 signed session cookie (1-hour TTL) on successful login,
-so the password is sent only once per session.
+so the password is sent only once per session. The cookie carries `SameSite=Strict; HttpOnly`.
+When `EXTERNAL_BIND_ALLOWED=true` the `Secure` flag is added automatically so the cookie is
+only transmitted over HTTPS.
 
 **Safety guard:** If `EXTERNAL_BIND_ALLOWED` is `false` (default) and the service detects it
 is reachable on a non-loopback interface without auth configured, it refuses to start. This
@@ -118,3 +120,4 @@ but worth noting explicitly.
 - Add ML-reachability ping to `/readyz`.
 - Replace session cookie HMAC with proper JWT (rotate on password change).
 - Audit log: record all bot commands and who sent them to the database.
+- Evaluate MQTT 5 TLS for Carbon 2 when firmware support lands.

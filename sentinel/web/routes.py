@@ -5,12 +5,15 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, Response, StreamingResponse
+
+_SNAPSHOT_ID_RE = re.compile(r"^[a-f0-9]{32}$")
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -48,9 +51,24 @@ def make_router(
         if db is None or templates is None or watcher is None:
             raise HTTPException(status_code=503, detail="Service not initialised")
         heartbeat = await db.get_heartbeat()
-        age = _age_seconds(heartbeat)
+        last_tick_utc = heartbeat.get("last_tick_utc") if heartbeat else None
+        age = _age_seconds(last_tick_utc)
         detections = await db.get_recent_detections(limit=10)
         pauses = await db.get_recent_pauses(limit=10)
+
+        # Map snapshot_path to snapshot_id for the Jinja template
+        for d in detections:
+            path_str = d.get("snapshot_path")
+            d["snapshot_id"] = Path(str(path_str)).stem if path_str else None
+
+        # Expose printer state and elapsed print time
+        p_status = watcher.last_printer_status
+        printer_state = "Idle"
+        print_elapsed = "—"
+        if p_status:
+            printer_state = "Printing" if p_status.printing else "Idle"
+            print_elapsed = f"{p_status.elapsed_seconds:.0f}s" if p_status.printing else "—"
+
         return templates.TemplateResponse(
             request,
             "status.html",
@@ -60,6 +78,8 @@ def make_router(
                 "tick_age_stale": age is not None and age > stall_seconds,
                 "detections": detections,
                 "pauses": pauses,
+                "printer_state": printer_state,
+                "print_elapsed": print_elapsed,
             },
         )
 
@@ -77,8 +97,15 @@ def make_router(
     async def get_saved_snapshot(snapshot_id: str) -> Response:
         if db is None:
             raise HTTPException(status_code=503, detail="Service not initialised")
+        # Strict validation: snapshot IDs are always uuid4().hex (32 lowercase hex chars).
+        # Reject anything else to prevent path traversal attacks.
+        if not _SNAPSHOT_ID_RE.fullmatch(snapshot_id):
+            raise HTTPException(status_code=404, detail="Snapshot not found")
         snapshots_dir = Path(db._path).parent / "snapshots"
-        p = snapshots_dir / f"{snapshot_id}.jpg"
+        p = (snapshots_dir / f"{snapshot_id}.jpg").resolve()
+        # Second guard: resolved path must stay inside snapshots_dir
+        if not str(p).startswith(str(snapshots_dir.resolve())):
+            raise HTTPException(status_code=404, detail="Snapshot not found")
         if not p.exists():
             raise HTTPException(status_code=404, detail="Snapshot not found")
         try:
@@ -110,16 +137,15 @@ def make_router(
             return Response(content=body, status_code=503, media_type="application/json")
 
         heartbeat = await db.get_heartbeat()
-        age = _age_seconds(heartbeat)
+        last_tick = heartbeat.get("last_tick_utc") if heartbeat else None
+        age = _age_seconds(last_tick)
+
         if age is None:
             reasons.append("no heartbeat recorded")
         elif age > stall_seconds:
             reasons.append(f"watcher stalled ({age:.0f}s since last tick)")
 
-        try:
-            async with db._db.execute("SELECT 1") as cur:
-                await cur.fetchone()
-        except Exception:
+        if not await db.ping():
             reasons.append("db not reachable")
 
         if reasons:

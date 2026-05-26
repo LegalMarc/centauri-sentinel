@@ -4,6 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+
+# ---------------------------------------------------------------------------
+# Test fixtures
+# ---------------------------------------------------------------------------
+import shutil
+import tempfile
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -18,9 +24,16 @@ from sentinel.printer.types import PrinterStatus
 from sentinel.watcher.loop import WatcherLoop
 from sentinel.watcher.state import WatcherState
 
-# ---------------------------------------------------------------------------
-# Test fixtures
-# ---------------------------------------------------------------------------
+_temp_dirs: list[str] = []
+
+
+@pytest.fixture(autouse=True)
+def cleanup_temp_dirs() -> Any:
+    yield
+    for d in _temp_dirs:
+        shutil.rmtree(d, ignore_errors=True)
+    _temp_dirs.clear()
+
 
 _SETTINGS = Settings(
     printer_ip="10.0.0.1",
@@ -73,11 +86,11 @@ async def _make_watcher(
     notifiers: list[Any] | None = None,
 ) -> tuple[WatcherLoop, MagicMock, MagicMock, MagicMock, Database]:
     import os
-    import tempfile
 
     from sentinel.db.migrate import migrate
 
     temp_dir = tempfile.mkdtemp()
+    _temp_dirs.append(temp_dir)
     db_path = os.path.join(temp_dir, "sentinel.db")
     await migrate(db_path)
     db = Database(db_path)
@@ -326,7 +339,7 @@ async def test_watchdog_fires_on_stale_heartbeat() -> None:
     watcher, _, _, _, db = await _make_watcher(notifiers=[notifier])
 
     stale_ts = (datetime.now(tz=UTC) - timedelta(seconds=120)).isoformat()
-    await db.update_heartbeat(stale_ts)
+    await db.update_heartbeat(stale_ts, "ARMED")
 
     await watcher._watchdog_tick(db)
 
@@ -339,7 +352,7 @@ async def test_watchdog_no_alert_when_fresh() -> None:
     watcher, _, _, _, db = await _make_watcher(notifiers=[notifier])
 
     fresh_ts = datetime.now(tz=UTC).isoformat()
-    await db.update_heartbeat(fresh_ts)
+    await db.update_heartbeat(fresh_ts, "ARMED")
 
     await watcher._watchdog_tick(db)
 
@@ -443,7 +456,7 @@ async def test_watchdog_notifier_exception_swallowed() -> None:
     notifier.send_stall_alert = AsyncMock(side_effect=Exception("ntfy down"))
     watcher, _, _, _, db = await _make_watcher(notifiers=[notifier])
     stale_ts = (datetime.now(tz=UTC) - timedelta(seconds=120)).isoformat()
-    await db.update_heartbeat(stale_ts)
+    await db.update_heartbeat(stale_ts, "ARMED")
     await watcher._watchdog_tick(db)  # must not raise
     assert watcher.state == WatcherState.STALLED
 
@@ -456,7 +469,22 @@ async def test_watchdog_notifier_exception_swallowed() -> None:
 async def test_cancelled_during_pause_sets_paused_state() -> None:
     watcher, _, _, _, _ = await _make_watcher()
 
-    async def _raise_cancelled() -> bool:
+    async def _cancel_and_complete() -> None:
+        asyncio.current_task().cancel()
+
+    watcher._printer = MagicMock()
+    watcher._printer.pause = _cancel_and_complete
+
+    with pytest.raises(asyncio.CancelledError):
+        await watcher._on_confirmed_detection(MlResult(score=0.9), b"\xff\xd8\xff\xd9")
+
+    assert watcher.state == WatcherState.PAUSED
+
+
+async def test_cancelled_before_pause_does_not_set_paused_state() -> None:
+    watcher, _, _, _, _ = await _make_watcher()
+
+    async def _raise_cancelled() -> None:
         raise asyncio.CancelledError
 
     watcher._printer = MagicMock()
@@ -465,7 +493,7 @@ async def test_cancelled_during_pause_sets_paused_state() -> None:
     with pytest.raises(asyncio.CancelledError):
         await watcher._on_confirmed_detection(MlResult(score=0.9), b"\xff\xd8\xff\xd9")
 
-    assert watcher.state == WatcherState.PAUSED
+    assert watcher.state != WatcherState.PAUSED
 
 
 # ---------------------------------------------------------------------------
@@ -474,6 +502,8 @@ async def test_cancelled_during_pause_sets_paused_state() -> None:
 
 
 async def test_snapshot_saving_and_cleanup() -> None:
+    from pathlib import Path
+
     watcher, _printer, camera, _ml, db = await _make_watcher(
         printer_status=_printing_status(),
         ml_score=0.9,
@@ -495,14 +525,15 @@ async def test_snapshot_saving_and_cleanup() -> None:
     # Check that a snapshot was recorded in DB
     recent = await db.get_recent_detections(limit=1)
     assert len(recent) == 1
-    snapshot_id = recent[0]["snapshot_id"]
+    snapshot_path = recent[0]["snapshot_path"]
+    assert snapshot_path is not None
+    snapshot_id = Path(snapshot_path).stem
     assert snapshot_id is not None
 
     # Check that snapshot was saved to disk
-    from pathlib import Path
-
     snapshots_dir = Path(db._path).parent / "snapshots"
     p = snapshots_dir / f"{snapshot_id}.jpg"
+
     assert p.exists()
     assert p.read_bytes() == b"my_custom_jpeg_bytes"
 
@@ -539,12 +570,90 @@ async def test_watchdog_loop_fires_on_stale_heartbeat() -> None:
     notifier = _make_notifier()
     watcher, _, _, _, db = await _make_watcher(settings=_FAST_SETTINGS, notifiers=[notifier])
     stale_ts = (datetime.now(tz=UTC) - timedelta(seconds=120)).isoformat()
-    await db.update_heartbeat(stale_ts)
+    await db.update_heartbeat(stale_ts, "ARMED")
 
     watcher._running = True
-    task = asyncio.create_task(watcher._watchdog())
-    await asyncio.sleep(0.05)
-    task.cancel()
-    await asyncio.gather(task, return_exceptions=True)
+
+    # Mock asyncio.sleep to yield and immediately exit the loop
+    original_sleep = asyncio.sleep
+
+    async def mock_sleep(delay: float) -> None:
+        watcher._running = False
+        await original_sleep(0)
+
+    with patch("sentinel.watcher.loop.asyncio.sleep", side_effect=mock_sleep):
+        await watcher._watchdog()
 
     notifier.send_stall_alert.assert_called()
+
+
+# ---------------------------------------------------------------------------
+# M14 — PAUSED state persists across ticks
+# ---------------------------------------------------------------------------
+
+
+async def test_paused_state_stays_paused_when_printer_printing() -> None:
+    """Once PAUSED the watcher must NOT re-arm automatically on subsequent ticks."""
+    watcher, *_ = await _make_watcher(printer_status=_printing_status())
+    watcher.state = WatcherState.PAUSED
+
+    await watcher.tick()
+
+    assert watcher.state == WatcherState.PAUSED
+
+
+async def test_paused_state_returns_to_idle_when_printer_idle() -> None:
+    """PAUSED does reset to IDLE when the printer stops (user cancelled / done)."""
+    watcher, *_ = await _make_watcher(printer_status=_idle_status())
+    watcher.state = WatcherState.PAUSED
+
+    await watcher.tick()
+
+    assert watcher.state == WatcherState.IDLE
+
+
+# ---------------------------------------------------------------------------
+# M1 — confirm_count reset when detection is disabled
+# ---------------------------------------------------------------------------
+
+
+async def test_confirm_count_reset_when_detection_disabled() -> None:
+    """Disabling detection mid-sequence must reset confirm_count to 0."""
+    watcher, _, _, _, db = await _make_watcher(printer_status=_printing_status(), ml_score=0.9)
+    # Arm the counter with 2 confirmations
+    watcher._confirm_count = 2
+
+    # Now disable detection in DB
+    await db.set_setting("detection_enabled", "false")
+    await watcher.tick()
+
+    assert watcher._confirm_count == 0
+
+
+async def test_confirm_count_preserved_when_detection_enabled() -> None:
+    """Confirm count must NOT be touched when detection is still enabled."""
+    watcher, _, _, _, _ = await _make_watcher(printer_status=_printing_status(), ml_score=0.9)
+    await watcher.tick()
+    count_after_first = watcher._confirm_count
+    assert count_after_first == 1
+
+
+# ---------------------------------------------------------------------------
+# H1 — CAMERA_OFFLINE recovery on next tick
+# ---------------------------------------------------------------------------
+
+
+async def test_camera_offline_recovers_on_next_tick_if_printer_still_printing() -> None:
+    """CAMERA_OFFLINE must transition back to ARMED on the next tick while printing."""
+    watcher, _, camera, ml, _ = await _make_watcher(printer_status=_printing_status())
+    # Put into CAMERA_OFFLINE state
+    camera.grab = AsyncMock(side_effect=CameraOfflineError("down"))
+    await watcher.tick()
+    assert watcher.state == WatcherState.CAMERA_OFFLINE
+
+    # Restore camera and tick again — should recover
+    camera.grab = AsyncMock(return_value=b"\xff\xd8\xff\xd9")
+    ml.detect = AsyncMock(return_value=MlResult(score=0.1))
+    await watcher.tick()
+
+    assert watcher.state == WatcherState.ARMED

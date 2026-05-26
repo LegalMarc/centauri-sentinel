@@ -6,13 +6,15 @@ Usage (from Dockerfile / compose healthcheck):
 
 from __future__ import annotations
 
+import os
 import sys
 import urllib.request
 
 
 def main() -> None:
     try:
-        with urllib.request.urlopen("http://localhost:8000/healthz", timeout=5) as resp:
+        port = os.getenv("BIND_PORT", "8000")
+        with urllib.request.urlopen(f"http://localhost:{port}/healthz", timeout=5) as resp:
             sys.exit(0 if resp.status == 200 else 1)
     except Exception:
         sys.exit(1)

@@ -11,6 +11,8 @@ logger = logging.getLogger(__name__)
 
 
 def main() -> None:
+    from sentinel import __version__
+
     parser = argparse.ArgumentParser(
         prog="sentinel",
         description="centauri-sentinel: failure detection for the Elegoo Centauri Carbon 2",
@@ -18,7 +20,7 @@ def main() -> None:
     parser.add_argument(
         "--version",
         action="version",
-        version="%(prog)s 0.1.0",
+        version=f"%(prog)s {__version__}",
     )
     subparsers = parser.add_subparsers(dest="command")
 

@@ -18,8 +18,11 @@ RUN uv sync --frozen --no-dev --no-install-project
 # ---------------------------------------------------------------------------
 FROM python:3.12-slim AS runtime
 
-# Non-root user
-RUN useradd --uid 1000 --create-home --shell /bin/sh sentinel
+# Non-root user + su-exec for privilege drop in entrypoint
+RUN apt-get update -qq \
+    && apt-get install -y --no-install-recommends su-exec \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --uid 1000 --create-home --shell /bin/sh sentinel
 
 # Copy the virtualenv from builder
 COPY --from=builder /build/.venv /app/.venv
@@ -33,14 +36,21 @@ ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-# Data directory (mounted as named volume in compose)
+# Data directory — pre-create so permissions are correct when mount is empty.
+# The entrypoint.sh script re-chowns on every startup to handle first-mount
+# race where Docker creates the volume as root.
 RUN mkdir -p /data/snapshots && chown -R sentinel:sentinel /data /app
+
+# Entrypoint: fixes /data ownership then drops to sentinel user
+COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
 
 USER sentinel
 
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')" || exit 1
+    CMD python -m sentinel.healthcheck || exit 1
 
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["python", "-m", "sentinel", "run"]

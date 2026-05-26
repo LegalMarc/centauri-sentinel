@@ -167,10 +167,16 @@ class TelegramNotifier:
         await self._send_with_retry_fn(_send)
 
     async def _send_with_retry_fn(self, fn: Callable[[], Awaitable[None]]) -> None:
+        from telegram.error import NetworkError, RetryAfter, TimedOut
+
+        # Only retry on transient network-level errors.
+        # Permanent failures (invalid token, chat not found, etc.) are not
+        # retried — they will re-raise immediately so the watcher loop can log
+        # them without spending 3x the send time on certain failures.
         retryer = tenacity.AsyncRetrying(
             stop=tenacity.stop_after_attempt(_RETRIES),
             wait=tenacity.wait_exponential(multiplier=0.5, min=0.5, max=8),
-            retry=tenacity.retry_if_exception_type(Exception),
+            retry=tenacity.retry_if_exception_type((NetworkError, TimedOut, RetryAfter)),
             reraise=True,
         )
         async for attempt in retryer:

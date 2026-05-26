@@ -57,6 +57,10 @@ class AuthMiddleware:
         # secret must be provided by caller (loaded from DB); fall back to
         # ephemeral random only if no DB is available (e.g. tests).
         self._secret = secret if secret is not None else os.urandom(32)
+        # Add Secure flag only when the service is expected to run behind TLS.
+        # For LAN-only deployments without a reverse proxy we omit it so the
+        # browser doesn't block the cookie over plain HTTP.
+        self._secure = settings.external_bind_allowed
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if not self._enabled or scope["type"] != "http":
@@ -64,7 +68,7 @@ class AuthMiddleware:
             return
 
         path: str = scope.get("path", "")
-        if path.startswith("/__internal_snapshot/") or path == "/healthz":
+        if path.startswith("/__internal_snapshot/") or path in ("/healthz", "/readyz"):
             await self._app(scope, receive, send)
             return
 
@@ -86,13 +90,14 @@ class AuthMiddleware:
 
             if self._check_credentials(username, password):
                 cookie = self._make_cookie(user_agent)
+                secure_flag = "; Secure" if self._secure else ""
                 response = Response(
                     status_code=302,
                     headers={
                         "Location": path,
                         "Set-Cookie": (
                             f"{_COOKIE_NAME}={cookie}; Path=/; HttpOnly; "
-                            f"SameSite=Lax; Max-Age={_TTL}"
+                            f"SameSite=Strict{secure_flag}; Max-Age={_TTL}"
                         ),
                     },
                 )

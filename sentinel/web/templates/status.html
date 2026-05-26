@@ -37,6 +37,18 @@ footer a{color:#666}
   </div>
   <div class="card">
     <dl>
+      <dt>Printer state</dt>
+      <dd>{{ printer_state }}</dd>
+    </dl>
+  </div>
+  <div class="card">
+    <dl>
+      <dt>Print elapsed</dt>
+      <dd>{{ print_elapsed }}</dd>
+    </dl>
+  </div>
+  <div class="card">
+    <dl>
       <dt>Last tick</dt>
       <dd class="{% if tick_age_stale %}stale{% endif %}">{{ tick_age }}</dd>
     </dl>
@@ -51,12 +63,12 @@ footer a{color:#666}
 <h2>Recent detections</h2>
 {% if detections %}
 <table>
-  <thead><tr><th>#</th><th>Time</th><th>Score</th><th>Action</th></tr></thead>
+  <thead><tr><th>#</th><th>Time</th><th>Score</th><th>Consecutive</th><th>Action</th></tr></thead>
   <tbody>
   {% for d in detections %}
     <tr>
       <td>{{ d.id }}</td>
-      <td>{{ d.ts }}</td>
+      <td>{{ d.ts_utc }}</td>
       <td>
         {% if d.snapshot_id %}
           <a href="/snapshot/{{ d.snapshot_id }}" target="_blank">{{ "%.3f"|format(d.score) }}</a>
@@ -64,7 +76,8 @@ footer a{color:#666}
           {{ "%.3f"|format(d.score) }}
         {% endif %}
       </td>
-      <td>{{ d.action }}</td>
+      <td>{{ d.consecutive }}</td>
+      <td>{{ 'paused' if d.confirmed else 'alert' }}</td>
     </tr>
   {% endfor %}
   </tbody>
@@ -76,14 +89,15 @@ footer a{color:#666}
 <h2>Recent pauses</h2>
 {% if pauses %}
 <table>
-  <thead><tr><th>#</th><th>Started</th><th>Ended</th><th>Reason</th></tr></thead>
+  <thead><tr><th>#</th><th>Time</th><th>Source</th><th>Result</th><th>Error Message</th></tr></thead>
   <tbody>
   {% for p in pauses %}
     <tr>
       <td>{{ p.id }}</td>
-      <td>{{ p.started_at }}</td>
-      <td>{{ p.ended_at or "—" }}</td>
-      <td>{{ p.reason }}</td>
+      <td>{{ p.ts_utc }}</td>
+      <td>{{ p.source }}</td>
+      <td>{{ p.result }}</td>
+      <td>{{ p.error_message or "—" }}</td>
     </tr>
   {% endfor %}
   </tbody>
@@ -93,8 +107,9 @@ footer a{color:#666}
 {% endif %}
 
 <footer>
-  <a href="/docs/threat-model.md">Threat model</a> &mdash;
+  <a href="https://github.com/legalmarc/centauri-sentinel/blob/main/docs/threat-model.md" target="_blank">Threat model</a> &mdash;
   centauri-sentinel v0.1
 </footer>
 </body>
+
 </html>

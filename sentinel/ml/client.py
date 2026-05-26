@@ -44,6 +44,13 @@ class MlClient:
         self._store = nonce_store if nonce_store is not None else get_nonce_store()
         self._token: str | None = None
         self._token_mtime: float = 0.0
+        if not self._token_file.exists():
+            logger.warning(
+                "ML API token file not found: %s — "
+                "requests will be sent without authentication. "
+                "Ensure token-init has run before the first detection.",
+                self._token_file,
+            )
 
     # ------------------------------------------------------------------
     # Public API

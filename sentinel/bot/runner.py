@@ -58,10 +58,20 @@ class BotRunner:
     async def stop(self) -> None:
         if self._app is None:
             return
+        import asyncio
+
+        # Cancel any pending background tasks (e.g. snooze tasks)
+        self._handler.cancel_background_tasks()
+
         app: Any = self._app
-        if app.updater is not None and app.updater.running:
-            await app.updater.stop()
-        await app.stop()
-        await app.shutdown()
-        self._app = None
-        logger.info("Telegram bot stopped")
+        try:
+            async with asyncio.timeout(5.0):
+                if app.updater is not None and app.updater.running:
+                    await app.updater.stop()
+                await app.stop()
+                await app.shutdown()
+        except TimeoutError:
+            logger.warning("Telegram bot shutdown timed out after 5.0s")
+        finally:
+            self._app = None
+            logger.info("Telegram bot stopped")

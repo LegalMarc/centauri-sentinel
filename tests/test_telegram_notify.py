@@ -164,13 +164,15 @@ async def test_send_text_calls_bot() -> None:
 
 
 async def test_retry_on_transient_failure() -> None:
+    from telegram.error import NetworkError
+
     call_count = 0
 
     async def _flaky_send(**kwargs: object) -> None:
         nonlocal call_count
         call_count += 1
         if call_count < 2:
-            raise Exception("network blip")
+            raise NetworkError("network blip")
 
     notifier, mock_bot = _make_notifier_enabled()
     mock_bot.send_message.side_effect = _flaky_send
@@ -180,10 +182,12 @@ async def test_retry_on_transient_failure() -> None:
 
 
 async def test_retry_exhausted_reraises() -> None:
-    notifier, mock_bot = _make_notifier_enabled()
-    mock_bot.send_message = AsyncMock(side_effect=Exception("always fails"))
+    from telegram.error import NetworkError
 
-    with pytest.raises(Exception, match="always fails"):
+    notifier, mock_bot = _make_notifier_enabled()
+    mock_bot.send_message = AsyncMock(side_effect=NetworkError("always fails"))
+
+    with pytest.raises(NetworkError, match="always fails"):
         await notifier.send_text("hello")
 
 

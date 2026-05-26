@@ -18,7 +18,7 @@ import logging
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from sentinel.camera.errors import CameraOfflineError
 from sentinel.watcher.state import WatcherState
@@ -45,15 +45,28 @@ class Notifier(Protocol):
     async def send_camera_offline_alert(self) -> None: ...
 
 
+class Printer(Protocol):
+    async def status(self) -> PrinterStatus: ...
+    async def pause(self) -> bool: ...
+
+
+class Camera(Protocol):
+    async def grab(self) -> bytes: ...
+
+
+class MLClient(Protocol):
+    async def detect(self, jpeg: bytes) -> MlResult: ...
+
+
 class WatcherLoop:
     """Core detection loop with injected dependencies (testable)."""
 
     def __init__(
         self,
         settings: Settings,
-        printer: Any,
-        camera: Any,
-        ml: Any,
+        printer: Printer,
+        camera: Camera,
+        ml: MLClient,
         db: Database,
         notifiers: list[Notifier],
     ) -> None:
@@ -68,6 +81,7 @@ class WatcherLoop:
         self._confirm_count = 0
         self._print_start: datetime | None = None
         self._running = False
+        self.last_printer_status: PrinterStatus | None = None
 
     @property
     def state(self) -> WatcherState:
@@ -108,10 +122,11 @@ class WatcherLoop:
 
     async def _tick(self) -> None:
         ts = datetime.now(tz=UTC).isoformat()
-        await self._db.update_heartbeat(ts)
+        await self._db.update_heartbeat(ts, self.state.name)
 
         try:
             printer_status: PrinterStatus = await self._printer.status()
+            self.last_printer_status = printer_status
         except Exception:
             logger.warning("Could not get printer status; staying in current state")
             return
@@ -122,6 +137,12 @@ class WatcherLoop:
             detection_enabled = await self._db.get_setting("detection_enabled", "true")
             if detection_enabled == "true":
                 await self._check_frame()
+            else:
+                # Reset the confirm counter so that re-enabling detection
+                # does not carry stale consecutive hits into the new window.
+                if self._confirm_count > 0:
+                    logger.debug("Detection disabled — resetting confirm counter")
+                    self._confirm_count = 0
 
     async def _update_state(self, status: PrinterStatus) -> None:
         if not status.printing:
@@ -144,7 +165,12 @@ class WatcherLoop:
         else:
             if self.state in (WatcherState.IDLE, WatcherState.WARMUP):
                 logger.info("Printer armed for detection (elapsed=%.0fs)", elapsed)
-            if self.state != WatcherState.PAUSED:
+            # Recover from CAMERA_OFFLINE once printer is still printing —
+            # the next _check_frame call will attempt a fresh grab.
+            if self.state == WatcherState.CAMERA_OFFLINE:
+                logger.info("Camera offline — retrying grab on next tick")
+                self.state = WatcherState.ARMED
+            elif self.state != WatcherState.PAUSED:
                 self.state = WatcherState.ARMED
 
     async def _check_frame(self) -> None:
@@ -182,38 +208,57 @@ class WatcherLoop:
 
     async def _on_confirmed_detection(self, result: MlResult, jpeg: bytes) -> None:
         logger.warning("CONFIRMED DETECTION score=%.2f — pausing printer", result.score)
+        consecutive_count = self._confirm_count
         self._confirm_count = 0
         snapshot_id: str | None = uuid.uuid4().hex
 
         snapshots_dir = Path(self._db._path).parent / "snapshots"
+        snapshot_path = None
         try:
             await asyncio.to_thread(snapshots_dir.mkdir, parents=True, exist_ok=True)
-            snapshot_path = snapshots_dir / f"{snapshot_id}.jpg"
-            await asyncio.to_thread(snapshot_path.write_bytes, jpeg)
+            p = snapshots_dir / f"{snapshot_id}.jpg"
+            await asyncio.to_thread(p.write_bytes, jpeg)
+            snapshot_path = str(p)
         except Exception:
             logger.exception("Failed to save snapshot file to disk")
             snapshot_id = None
+            snapshot_path = None
 
         # Shield the pause publish so that a task cancellation arriving mid-call
         # still lets the MQTT command complete before propagating CancelledError.
         # State is only set to PAUSED after a successful publish; on failure the
         # watcher stays ARMED and the next tick will retry.
         pause_ok = False
+        pause_sent = False
+
+        async def _do_pause() -> None:
+            nonlocal pause_sent
+            await self._printer.pause()
+            pause_sent = True
+
         try:
-            await asyncio.shield(self._printer.pause())
+            await asyncio.shield(_do_pause())
             pause_ok = True
             self.state = WatcherState.PAUSED
         except asyncio.CancelledError:
-            self.state = WatcherState.PAUSED  # pause was sent; mark state before re-raising
+            if pause_sent:
+                self.state = WatcherState.PAUSED
+            else:
+                logger.critical("Watcher cancelled before printer pause completed")
             raise
         except Exception:
             logger.exception("Printer pause failed — notifying anyway")
 
-        pause_id = await self._db.record_pause(reason="detection")
+        pause_id = await self._db.record_pause(
+            source="auto",
+            result="ok" if pause_ok else "error",
+            error_message=None if pause_ok else "Printer pause failed",
+        )
         await self._db.record_detection(
             score=result.score,
-            snapshot_id=snapshot_id,
-            action="paused" if pause_ok else "alert",
+            consecutive=consecutive_count,
+            confirmed=1,
+            snapshot_path=snapshot_path,
         )
 
         for n in self._notifiers:
@@ -224,13 +269,13 @@ class WatcherLoop:
 
         # Cleanup old snapshots (keep last 50)
         try:
-            old_ids = await self._db.get_snapshots_for_cleanup(keep_limit=50)
-            if old_ids:
-                await self._db.delete_old_snapshots(old_ids)
+            old_paths = await self._db.get_snapshots_for_cleanup(keep_limit=50)
+            if old_paths:
+                await self._db.delete_old_snapshots(old_paths)
 
                 def _delete_files() -> None:
-                    for sid in old_ids:
-                        p = snapshots_dir / f"{sid}.jpg"
+                    for path_str in old_paths:
+                        p = Path(path_str)
                         if p.exists():
                             try:
                                 p.unlink()
@@ -241,25 +286,27 @@ class WatcherLoop:
         except Exception:
             logger.exception("Failed to clean up old snapshots")
 
-        _ = pause_id  # will be used later when resume is wired up
-
-    # ------------------------------------------------------------------
-    # Watchdog
-    # ------------------------------------------------------------------
+        # pause_id is available for future audit-log / resume-wiring use.
+        del pause_id
 
     async def _watchdog(self) -> None:
-        stall_s = self._settings.watcher_stall_seconds
+        # Sleep for half the stall window so the maximum alert latency is
+        # 1.5x stall_seconds rather than 2x (sleep-before-check pattern).
+        half = max(15, self._settings.watcher_stall_seconds // 2)
         while self._running:
-            await asyncio.sleep(stall_s)
+            await asyncio.sleep(half)
             await self._watchdog_tick(self._db)
 
     async def _watchdog_tick(self, db: Database) -> None:
         stall_s = self._settings.watcher_stall_seconds
-        last = await db.get_heartbeat()
-        if last is None:
+        heartbeat = await db.get_heartbeat()
+        if heartbeat is None:
+            return
+        last = heartbeat.get("last_tick_utc")
+        if not last:
             return
         age = (datetime.now(tz=UTC) - datetime.fromisoformat(last)).total_seconds()
-        if age > stall_s:
+        if age > stall_s and self.state != WatcherState.STALLED:
             logger.error("Heartbeat stale (age=%.0fs) — watcher stalled", age)
             self.state = WatcherState.STALLED
             for n in self._notifiers:

@@ -32,7 +32,9 @@ def create_app(
     auth_secret: bytes | None = None,
 ) -> FastAPI:
     """Create and configure the FastAPI application."""
-    app = FastAPI(title="centauri-sentinel", version="0.1.0")
+    from sentinel import __version__
+
+    app = FastAPI(title="centauri-sentinel", version=__version__)
 
     templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 

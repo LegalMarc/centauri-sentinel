@@ -65,11 +65,15 @@ def _make_handler(
         notifier = _make_notifier()
     if db is None:
         db = AsyncMock()
-        db.get_heartbeat.return_value = "2026-01-01T00:00:00+00:00"
+        db.get_heartbeat.return_value = {
+            "last_tick_utc": "2026-01-01T00:00:00+00:00",
+            "state": "ARMED",
+        }
         db.get_recent_detections.return_value = []
         db.get_setting.return_value = "true"
         db.set_setting.return_value = None
         db.record_pause.return_value = 1
+
     if printer is None:
         printer = AsyncMock()
     if camera is None:
@@ -384,3 +388,43 @@ async def test_callback_unauthorized_no_action() -> None:
     printer.resume.assert_not_called()
     update.callback_query.answer.assert_called_once()
     update.callback_query.edit_message_text.assert_not_called()
+
+
+async def test_pending_stops_leak_cleanup() -> None:
+    handler = _make_handler()
+    # Plant an expired stop and a valid stop
+    handler._pending_stops[111] = time.monotonic() - 35.0
+    handler._pending_stops[222] = time.monotonic() - 5.0
+
+    # Authorized checks must trigger cleanup
+    update = _make_update(user_id=_AUTHORIZED_USER)
+    assert handler._authorized(update) is True
+
+    assert 111 not in handler._pending_stops
+    assert 222 in handler._pending_stops
+
+
+async def test_cancel_background_tasks() -> None:
+    import contextlib
+
+    from sentinel.bot.commands import _background_tasks
+
+    handler = _make_handler()
+
+    # Create a dummy running task
+    async def dummy() -> None:
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.sleep(10.0)
+
+    task = asyncio.create_task(dummy())
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+    # Cancel all
+    handler.cancel_background_tasks()
+
+    # Yield control to let the cancellation propagate
+    await asyncio.sleep(0.01)
+
+    assert task.cancelled()
+    assert task not in _background_tasks

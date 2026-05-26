@@ -1,3 +1,6 @@
-"""centauri-sentinel — failure detection for the Elegoo Centauri Carbon 2."""
+import importlib.metadata
 
-__version__ = "0.1.0"
+try:
+    __version__ = importlib.metadata.version("centauri-sentinel")
+except importlib.metadata.PackageNotFoundError:
+    __version__ = "0.1.0"

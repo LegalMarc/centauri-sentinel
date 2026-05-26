@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
 import bcrypt
@@ -12,6 +13,9 @@ import pytest
 from sentinel.config import Settings
 from sentinel.watcher.state import WatcherState
 from sentinel.web.app import create_app
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -57,18 +61,25 @@ def _make_db_execute_cm() -> AsyncMock:
 @pytest.fixture
 def mock_db() -> AsyncMock:
     db = AsyncMock()
-    db.get_heartbeat.return_value = _fresh_ts()
+    db.get_heartbeat.return_value = {"last_tick_utc": _fresh_ts(), "state": "ARMED"}
     db.get_recent_detections.return_value = [
         {
             "id": 1,
-            "ts": "2026-01-01T00:00:00Z",
+            "ts_utc": "2026-01-01T00:00:00Z",
             "score": 0.85,
-            "action": "pause",
-            "snapshot_id": None,
+            "consecutive": 1,
+            "confirmed": 0,
+            "snapshot_path": None,
         },
     ]
     db.get_recent_pauses.return_value = [
-        {"id": 1, "started_at": "2026-01-01T00:00:00Z", "ended_at": None, "reason": "detection"},
+        {
+            "id": 1,
+            "ts_utc": "2026-01-01T00:00:00Z",
+            "source": "auto",
+            "result": "ok",
+            "error_message": None,
+        },
     ]
     db.set_setting.return_value = None
     # _db is the raw aiosqlite connection; routes.py uses it for SELECT 1 in /readyz
@@ -81,6 +92,7 @@ def mock_db() -> AsyncMock:
 def mock_watcher() -> MagicMock:
     w = MagicMock()
     w.state = WatcherState.ARMED
+    w.last_printer_status = None
     return w
 
 
@@ -209,35 +221,27 @@ async def test_get_saved_snapshot_not_found(app: object) -> None:
 
 
 async def test_get_saved_snapshot_success(
-    mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: AsyncMock
+    mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: MagicMock, tmp_path: Path
 ) -> None:
-    import os
-    import tempfile
-    from pathlib import Path
+    # snapshot_id must be a valid uuid4().hex (32 lowercase hex chars)
+    snap_id = "a" * 32
 
-    # We need a real temp directory for db path so snapshots directory exists
-    temp_dir = tempfile.mkdtemp()
-    db_path = os.path.join(temp_dir, "sentinel.db")
-    mock_db._path = db_path
+    db_path = tmp_path / "sentinel.db"
+    mock_db._path = str(db_path)
 
-    snapshots_dir = Path(temp_dir) / "snapshots"
+    snapshots_dir = tmp_path / "snapshots"
     snapshots_dir.mkdir()
-    (snapshots_dir / "snap123.jpg").write_bytes(b"saved_jpeg_data")
+    (snapshots_dir / f"{snap_id}.jpg").write_bytes(b"saved_jpeg_data")
 
     app_with_real_paths = create_app(
         _base_settings(), db=mock_db, watcher=mock_watcher, camera=mock_camera
     )
     async with _client(app_with_real_paths) as c:
-        r = await c.get("/snapshot/snap123")
+        r = await c.get(f"/snapshot/{snap_id}")
 
     assert r.status_code == 200
     assert r.content == b"saved_jpeg_data"
     assert r.headers["content-type"] == "image/jpeg"
-
-    # cleanup
-    (snapshots_dir / "snap123.jpg").unlink()
-    snapshots_dir.rmdir()
-    os.rmdir(temp_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -268,7 +272,7 @@ async def test_readyz_no_heartbeat_returns_503(
 async def test_readyz_stale_heartbeat_returns_503(
     mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: AsyncMock
 ) -> None:
-    mock_db.get_heartbeat.return_value = _stale_ts()
+    mock_db.get_heartbeat.return_value = {"last_tick_utc": _stale_ts(), "state": "ARMED"}
     stalled_app = create_app(_base_settings(), db=mock_db, watcher=mock_watcher, camera=mock_camera)
     async with _client(stalled_app) as c:
         r = await c.get("/readyz")
@@ -289,7 +293,8 @@ async def test_readyz_no_db_returns_503() -> None:
 async def test_readyz_db_write_failure_returns_503(
     mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: AsyncMock
 ) -> None:
-    mock_db._db.execute.side_effect = RuntimeError("disk full")
+    # Simulate db.ping() returning False (e.g. connection closed / disk full)
+    mock_db.ping.return_value = False
     failing_app = create_app(_base_settings(), db=mock_db, watcher=mock_watcher, camera=mock_camera)
     async with _client(failing_app) as c:
         r = await c.get("/readyz")
@@ -436,7 +441,7 @@ async def test_stream_returns_multipart(mock_db: AsyncMock, mock_watcher: MagicM
 async def test_readyz_invalid_heartbeat_format(
     mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: AsyncMock
 ) -> None:
-    mock_db.get_heartbeat.return_value = "not-a-timestamp"
+    mock_db.get_heartbeat.return_value = {"last_tick_utc": "not-a-timestamp", "state": "ARMED"}
     bad_ts_app = create_app(_base_settings(), db=mock_db, watcher=mock_watcher, camera=mock_camera)
     async with _client(bad_ts_app) as c:
         r = await c.get("/readyz")

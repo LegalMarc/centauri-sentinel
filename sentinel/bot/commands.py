@@ -55,6 +55,14 @@ class BotCommandHandler:
     # ------------------------------------------------------------------
 
     def _authorized(self, update: Update) -> bool:
+        # Clean up expired pending stop requests to prevent memory leaks (M10)
+        now = time.monotonic()
+        expired = [
+            uid for uid, ts in list(self._pending_stops.items()) if now - ts > _STOP_CONFIRM_WINDOW
+        ]
+        for uid in expired:
+            self._pending_stops.pop(uid, None)
+
         if update.message is not None:
             user = update.message.from_user
             chat_id: int | str = update.message.chat_id
@@ -111,10 +119,10 @@ class BotCommandHandler:
         lines = [
             f"Watcher: {self._watcher.state.name}",
             f"Detection: {'enabled' if detection_enabled == 'true' else 'disabled'}",
-            f"Last heartbeat: {heartbeat or 'never'}",
+            f"Last heartbeat: {heartbeat.get('last_tick_utc') if heartbeat else 'never'}",
         ]
         if last_det:
-            lines.append(f"Last detection: score={last_det['score']:.2f} at {last_det['ts']}")
+            lines.append(f"Last detection: score={last_det['score']:.2f} at {last_det['ts_utc']}")
         await update.message.reply_text("\n".join(lines))
 
     async def cmd_snapshot(self, update: Update, context: Any) -> None:
@@ -134,14 +142,18 @@ class BotCommandHandler:
         assert update.message is not None
         try:
             sent = await self._printer.pause()
-        except Exception:
+        except Exception as exc:
             logger.exception("Pause failed via Telegram command")
+            await self._db.record_pause(source="telegram", result="error", error_message=str(exc))
             await update.message.reply_text("Pause failed — check the printer.")
             return
         if sent:
-            await self._db.record_pause(reason="telegram")
+            await self._db.record_pause(source="telegram", result="ok")
             await update.message.reply_text("Print paused.")
         else:
+            await self._db.record_pause(
+                source="telegram", result="error", error_message="Printer already paused"
+            )
             await update.message.reply_text("Printer is already paused.")
 
     async def cmd_resume(self, update: Update, context: Any) -> None:
@@ -242,3 +254,10 @@ class BotCommandHandler:
         await self._db.set_setting("detection_enabled", "true")
         await self._notifier.send_text("Detection re-enabled after snooze.")
         logger.info("Detection re-enabled after %.0fs snooze", delay)
+
+    def cancel_background_tasks(self) -> None:
+        """Cancel all pending snooze / background tasks (M9)."""
+        if _background_tasks:
+            logger.info("Cancelling %d background bot tasks", len(_background_tasks))
+            for task in list(_background_tasks):
+                task.cancel()
