@@ -1,7 +1,7 @@
 # centauri-sentinel — Pre-Publication Review Findings
 
 **Review date:** 2026-05-26
-**Reviewed by:** Antigravity code review loop
+**Reviewed by:** Antigravity Code Review Loop (Gemini 3.5 Flash)
 **Passes completed:** 8/8
 
 ---
@@ -12,12 +12,12 @@
 |---|---|---|
 | CRITICAL | 2 | Resolved |
 | HIGH | 10 | Resolved |
-| MEDIUM | 14 | Resolved |
+| MEDIUM | 15 | Resolved |
 | LOW | 10 | Resolved |
 
-**Total findings: 36 (0 remaining, 36 resolved)**
+**Total findings: 37 (0 remaining, 37 resolved)**
 
-**Go/No-Go: GO** — All 36 findings (including the 2 CRITICAL ship-blockers, 10 HIGH-severity lifecycle and safety issues, and all 24 medium/low items) have been successfully resolved, tested, and verified. The codebase is fully formatted, passes strict `ruff` linter checks and `mypy` type-checking, and passes all 272 unit and integration tests with **95.04% total coverage**.
+**Go/No-Go: GO** — All 37 findings (including 2 CRITICAL, 10 HIGH, 15 MEDIUM, and 10 LOW items) have been successfully resolved, tested, and verified. The codebase passes all checks and tests with **95.05% total coverage**.
 
 ---
 
@@ -107,6 +107,13 @@
 **Issue:** `_last_pause_at` is an instance attribute, initialised to `0.0`. Tests that reuse a `PrinterClient` instance across subtests may observe debounce state from a previous subtest.
 **Impact:** Sporadic test failures if test order changes and a client instance is shared. Not currently an issue since each test creates a fresh `PrinterClient`, but worth documenting.
 **Fix:** Not a code bug — just a documentation note. Add a comment in the test fixture and in `PrinterClient.__init__` noting the per-instance debounce state.
+
+### [PASS 1] [MEDIUM] Camera offline notification spam on persistent failure
+**File:** sentinel/watcher/loop.py (lines 176–187)
+**Issue:** When the camera goes offline, the state transitions to `CAMERA_OFFLINE` and sends a notification. On the next tick, `_update_state` transitions it back to `ARMED` to retry. If it is persistently offline, every tick (default 10s) transitions `ARMED -> CAMERA_OFFLINE` and triggers a new notification, spamming the user.
+**Impact:** User is spammed with camera offline notifications every 10 seconds.
+**Fix:** Pass `prev_state` to `_check_frame` and suppress `send_camera_offline_alert()` if `prev_state == WatcherState.CAMERA_OFFLINE`.
+**Status:** Resolved
 
 ---
 
@@ -434,6 +441,7 @@ Run this entrypoint as root and have it `exec` the sentinel as the sentinel user
 **Issue:** The threat model states: "The session cookie uses `Secure; HttpOnly; SameSite=Strict`." The actual implementation uses `HttpOnly; SameSite=Lax` without `Secure`. This is a documentation inaccuracy that provides false security assurance to operators.
 **Impact:** An operator reading the threat model believes the cookie is protected by `Secure` and `SameSite=Strict`, but it is not. This matters if the service is inadvertently exposed over plain HTTP.
 **Fix:** Correct the threat model to reflect the actual implementation. Better: fix the implementation to add `Secure` and `SameSite=Strict`, then the doc will be accurate (see Pass 2 finding).
+**Status:** Resolved
 
 ---
 
@@ -442,6 +450,7 @@ Run this entrypoint as root and have it `exec` the sentinel as the sentinel user
 **Issue:** Step 2 says "Start a chat with your new bot and send `/start`." Step 3 says to call `getUpdates` to find the chat ID. However, `getUpdates` only returns updates from the **most recent 24 hours** and only if the user has interacted with the bot. If the user calls `getUpdates` before sending `/start`, the response is `{"ok":true,"result":[]}` with no useful data. The prerequisite ordering is correct (send /start first, then getUpdates), but it is not stated explicitly enough.
 **Impact:** New users who skim and call `getUpdates` before sending `/start` will see an empty result and be confused.
 **Fix:** Add a bold note before Step 3: "⚠️ You must complete Step 2 (send `/start`) before Step 3 will work. `getUpdates` only returns messages from the last 24 hours."
+**Status:** Resolved
 
 ---
 
@@ -450,6 +459,7 @@ Run this entrypoint as root and have it `exec` the sentinel as the sentinel user
 **Issue:** The README auth configuration table shows only `AUTH_USERNAME` and `AUTH_PASSWORD_BCRYPT`. `AUTH_PASSWORD` (the plaintext option that is hashed at startup) is not documented in the README or `.env.example`. Users who don't want to generate a bcrypt hash manually have no documented path.
 **Impact:** Reduced usability for quick-start scenarios. Users may conclude bcrypt generation is mandatory.
 **Fix:** Add `AUTH_PASSWORD` to the README table with a note: "Alternative to `AUTH_PASSWORD_BCRYPT` — hashed at startup and discarded. Not recommended for production (the plaintext password appears in environment variable listings)."
+**Status:** Resolved
 
 ---
 
@@ -458,6 +468,7 @@ Run this entrypoint as root and have it `exec` the sentinel as the sentinel user
 **Issue:** The README "Short version" says "All three services become healthy in under 90 s." PROGRESS.md notes that during initial Coolify deployment, three separate PR fixes were needed before it worked (obico-ml source path, CUDA base image, env vars). The "under 90 s" claim may be optimistic for new deployments.
 **Impact:** New users may have a worse-than-expected first-run experience.
 **Fix:** Keep the 90 s claim as the happy-path target, but add a "Troubleshooting" callout that says "If any service stays unhealthy after 2 minutes, see docs/troubleshooting.md."
+**Status:** Resolved
 
 ---
 
@@ -466,6 +477,7 @@ Run this entrypoint as root and have it `exec` the sentinel as the sentinel user
 **Issue:** `docs/verified-assumptions.md` (9818 bytes, contains key spike findings) is not linked from the README. `docs/printer-setup.md` is also not linked. New users who discover these files by browsing the repo may not know they exist.
 **Impact:** Reduced discoverability of important technical documentation.
 **Fix:** Add a "Development notes" section to the README linking to `verified-assumptions.md` and noting that it documents the MQTT protocol reverse-engineering findings.
+**Status:** Resolved
 
 ---
 
@@ -474,6 +486,7 @@ Run this entrypoint as root and have it `exec` the sentinel as the sentinel user
 **Issue:** There is no `CHANGELOG.md` or equivalent release notes document. PROGRESS.md serves this role informally.
 **Impact:** GitHub users browsing the releases page will not have a standard changelog. PROGRESS.md is suitable as an alternative but is formatted for development tracking, not user-facing release notes.
 **Fix:** Convert PROGRESS.md to CHANGELOG.md with a standard format (Keep a Changelog), or keep PROGRESS.md and add a CHANGELOG.md summarising v0.1.0 user-facing changes. Create a v0.1.0 GitHub Release with release notes.
+**Status:** Resolved
 
 ---
 
@@ -482,6 +495,7 @@ Run this entrypoint as root and have it `exec` the sentinel as the sentinel user
 **Issue:** The README acknowledges the MIT license for the sentinel code but does not mention the Obico ML model's license. The Obico server (TheSpaghettiDetective/obico-server) is AGPL-3.0 licensed. Using and distributing a containerised version of the ML API may have licensing implications.
 **Impact:** Legal risk if the AGPL-3.0 copyleft requirement is not met. AGPL requires distributing source code to users who interact with the software over a network.
 **Fix:** Add a "License acknowledgements" section to the README noting that the `obico-ml` container is derived from the Obico server project (AGPL-3.0). Include a link to the source. Consult the AGPL terms — since obico-ml is run as a Docker service and users interact with sentinel (not obico-ml directly), AGPL compliance may require publishing the ml_api source, which it already is via the GitHub link. Make this explicit.
+**Status:** Resolved
 
 ---
 
@@ -492,6 +506,7 @@ Run this entrypoint as root and have it `exec` the sentinel as the sentinel user
 **Issue:** `async def get_heartbeat(self) -> dict[str, Any] | None:` uses `Any` but `Any` is imported only inside `if TYPE_CHECKING:` block (it's not there at all — checking the imports, `Any` comes from `typing` but is not imported at runtime or in TYPE_CHECKING). The ruff check confirms: `F821 Undefined name 'Any'` at line 175. mypy also reports: `error: Name "Any" is not defined [name-defined]`. This breaks the CI pipeline if it runs `ruff check` (which it does).
 **Impact:** CI is currently broken (or has been patched to skip this file). The `F821` error will cause `ruff check` to exit with code 1, failing the CI `test` job.
 **Fix:** Add `from typing import Any` to the imports in `repo.py`. Since `Any` is used at runtime in the function signature (not just for type checking), it cannot be in a `TYPE_CHECKING` block.
+**Status:** Resolved
 
 ---
 
@@ -500,6 +515,7 @@ Run this entrypoint as root and have it `exec` the sentinel as the sentinel user
 **Issue:** `ruff format --check` reports 11 files that would be reformatted. The CI `test` job runs `ruff format --check sentinel/ tests/` which will exit with code 1 for these files, causing CI to fail.
 **Impact:** CI is currently failing on the format check step. Publishing while CI is broken is a red flag.
 **Fix:** Run `uv run ruff format sentinel/ tests/` to auto-format all files. Commit the result. This is a mechanical fix with no semantic changes.
+**Status:** Resolved
 
 ---
 
@@ -508,6 +524,7 @@ Run this entrypoint as root and have it `exec` the sentinel as the sentinel user
 **Issue:** `ruff check` reports `SIM102: Use a single if statement instead of nested if statements` for the stale-heartbeat detection. This is a minor style issue but fails CI.
 **Impact:** CI failure on lint step.
 **Fix:** Combine: `if age > stall_s and self.state != WatcherState.STALLED:`.
+**Status:** Resolved
 
 ---
 
@@ -516,6 +533,7 @@ Run this entrypoint as root and have it `exec` the sentinel as the sentinel user
 **Issue:** `mypy` reports `error: Argument 1 to "Path" has incompatible type "object"; expected "str | PathLike[str]"` at line 59: `d["snapshot_id"] = Path(path_str).stem if path_str else None`. The type of `path_str` from `dict[str, object]` is `object`, not `str`. mypy cannot narrow this.
 **Impact:** mypy `--strict` CI failure.
 **Fix:** Add an explicit type assertion: `assert isinstance(path_str, str)` or cast: `Path(str(path_str)).stem`. Better: type the dict return from `get_recent_detections` as `list[dict[str, str | int | None]]`.
+**Status:** Resolved
 
 ---
 
@@ -524,6 +542,7 @@ Run this entrypoint as root and have it `exec` the sentinel as the sentinel user
 **Issue:** `_ = pause_id  # will be used later when resume is wired up`. The `pause_id` is the DB row ID for the pause event. The plan is to use it for resume correlation. This `_ =` pattern suppresses linter warnings but documents an unimplemented feature in shipped code.
 **Impact:** The assign-to-underscore pattern is accepted by ruff but confusing. The `pause_id` return value from `record_pause` is computed and discarded on every detection event.
 **Fix:** Since `pause_id` is returned by `record_pause` but not used, change `pause_id = await self._db.record_pause(...)` to `await self._db.record_pause(...)` (drop the assignment entirely). Create a GitHub issue for the resume-correlation feature. The comment can be preserved as a standalone comment above the `record_pause` call.
+**Status:** Resolved
 
 ---
 
@@ -532,6 +551,7 @@ Run this entrypoint as root and have it `exec` the sentinel as the sentinel user
 **Issue:** The watcher accepts `printer: Any`, `camera: Any`, `ml: Any`. This means mypy provides no coverage for calls to `self._printer.status()`, `self._camera.grab()`, `self._ml.detect()`. The `Notifier` Protocol is well-defined but the three primary dependencies are typed as `Any`.
 **Impact:** mypy cannot catch calls to non-existent methods or argument type mismatches. This is a significant blind spot in the type safety of the most critical code path.
 **Fix:** Define `PrinterProtocol`, `CameraProtocol`, and `MlProtocol` using `typing.Protocol` (following the existing `Notifier` pattern). Annotate the constructor parameters with these protocols. This also improves documentation of the expected interface for each dependency.
+**Status:** Resolved
 
 ---
 
@@ -540,6 +560,7 @@ Run this entrypoint as root and have it `exec` the sentinel as the sentinel user
 **Issue:** `version = "0.1.0"` appears in both `pyproject.toml` (hatchling package version) and `__main__.py` (`version="%(prog)s 0.1.0"`). Also, `create_app` in `web/app.py` hardcodes `version="0.1.0"`.
 **Impact:** A version bump requires touching 3 files. Easy to forget one.
 **Fix:** Use `importlib.metadata.version("centauri-sentinel")` at runtime to read the version from the installed package metadata. Fall back to a constant for dev installs. Or use hatchling's `hatch-vcs` plugin to read version from git tags.
+**Status:** Resolved
 
 ---
 
@@ -548,6 +569,7 @@ Run this entrypoint as root and have it `exec` the sentinel as the sentinel user
 **Issue:** `conftest.py` is 148 bytes with no shared fixtures. Common patterns (temp DB creation, `_make_watcher()`, `_base_settings()`) are duplicated across multiple test files.
 **Impact:** DRY violation — changes to the test infrastructure require edits in multiple places.
 **Fix:** Move `_make_watcher()`, `_base_settings()`, and the common `Settings` factory functions to `conftest.py` as fixtures. This also improves test isolation since pytest will manage fixture lifecycle.
+**Status:** Resolved
 
 ---
 
@@ -556,6 +578,7 @@ Run this entrypoint as root and have it `exec` the sentinel as the sentinel user
 **Issue:** `INITIATION_PROMPT.md` is a development artefact (AI prompting instructions) and is tracked in git. It is excluded from the Docker build context by `.dockerignore` (via `*.md`), but will be visible in the published GitHub repository.
 **Impact:** Reveals the AI-assisted development methodology. May confuse new contributors who see it as a spec document.
 **Fix:** Add `INITIATION_PROMPT.md` to `.gitignore` and remove from git history via `git rm --cached INITIATION_PROMPT.md`. Or move to `docs/dev/` with a clear label that it is a development process document.
+**Status:** Resolved
 
 ---
 
@@ -564,6 +587,7 @@ Run this entrypoint as root and have it `exec` the sentinel as the sentinel user
 **Issue:** `pyproject.toml` defines `[project.optional-dependencies] dev = [...]` AND `[dependency-groups] dev = [...]`. Both sections define dev dependencies (ruff, mypy, pytest, etc.) with slightly different version constraints. The `[dependency-groups]` section is newer (PEP 735) while `[project.optional-dependencies]` is the classic pip extras format. `uv sync` uses `[dependency-groups]` by default.
 **Impact:** Confusion for contributors who try `pip install .[dev]` — they get different dependency versions than `uv sync`. The two lists may drift.
 **Fix:** Remove `[project.optional-dependencies]` entirely and keep only `[dependency-groups]`. Document in the README that `uv` is the required tool for development.
+**Status:** Resolved
 
 ---
 

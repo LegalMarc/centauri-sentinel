@@ -639,7 +639,7 @@ async def test_confirm_count_preserved_when_detection_enabled() -> None:
 
 
 # ---------------------------------------------------------------------------
-# H1 — CAMERA_OFFLINE recovery on next tick
+# H1 — CAMERA_OFFLINE recovery on next tick & spam protection
 # ---------------------------------------------------------------------------
 
 
@@ -657,3 +657,23 @@ async def test_camera_offline_recovers_on_next_tick_if_printer_still_printing() 
     await watcher.tick()
 
     assert watcher.state == WatcherState.ARMED
+
+
+async def test_camera_offline_alert_only_sent_once() -> None:
+    """Camera offline alert should not spam on subsequent ticks if offline persists."""
+    notifier = _make_notifier()
+    watcher, _, camera, _, _ = await _make_watcher(
+        printer_status=_printing_status(), notifiers=[notifier]
+    )
+    camera.grab = AsyncMock(side_effect=CameraOfflineError("down"))
+
+    # First tick: transition to CAMERA_OFFLINE, alert sent
+    await watcher.tick()
+    assert watcher.state == WatcherState.CAMERA_OFFLINE
+    assert notifier.send_camera_offline_alert.call_count == 1
+
+    # Second tick: still offline, state returns to CAMERA_OFFLINE, alert NOT sent again
+    await watcher.tick()
+    assert watcher.state == WatcherState.CAMERA_OFFLINE
+    assert notifier.send_camera_offline_alert.call_count == 1
+

@@ -131,12 +131,13 @@ class WatcherLoop:
             logger.warning("Could not get printer status; staying in current state")
             return
 
+        prev_state = self.state
         await self._update_state(printer_status)
 
         if self.state == WatcherState.ARMED:
             detection_enabled = await self._db.get_setting("detection_enabled", "true")
             if detection_enabled == "true":
-                await self._check_frame()
+                await self._check_frame(prev_state)
             else:
                 # Reset the confirm counter so that re-enabling detection
                 # does not carry stale consecutive hits into the new window.
@@ -173,17 +174,18 @@ class WatcherLoop:
             elif self.state != WatcherState.PAUSED:
                 self.state = WatcherState.ARMED
 
-    async def _check_frame(self) -> None:
+    async def _check_frame(self, prev_state: WatcherState) -> None:
         try:
             jpeg = await self._camera.grab()
         except CameraOfflineError:
             self.state = WatcherState.CAMERA_OFFLINE
             logger.warning("Camera offline — suspending detection")
-            for n in self._notifiers:
-                try:
-                    await n.send_camera_offline_alert()
-                except Exception:
-                    logger.exception("Notifier camera_offline_alert failed")
+            if prev_state != WatcherState.CAMERA_OFFLINE:
+                for n in self._notifiers:
+                    try:
+                        await n.send_camera_offline_alert()
+                    except Exception:
+                        logger.exception("Notifier camera_offline_alert failed")
             return
         except Exception:
             logger.warning("Camera grab failed; skipping this tick")

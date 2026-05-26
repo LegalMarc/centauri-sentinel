@@ -261,3 +261,7 @@ uv run pytest --cov=sentinel --cov-fail-under=85
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+### Third-party license acknowledgements
+
+The `obico-ml` container is derived from the [Obico Server](https://github.com/TheSpaghettiDetective/obico-server) project, which is licensed under the GNU Affero General Public License v3.0 (AGPL-3.0). In accordance with the AGPL-3.0, the source code of the modified `ml_api` service is made available in this repository under the `docker/obico-ml/` directory.
