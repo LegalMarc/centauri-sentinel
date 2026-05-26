@@ -348,8 +348,9 @@ async def test_auth_cookie_grants_access(auth_app: object) -> None:
         r1 = await c.get("/", auth=("admin", "testpass"), follow_redirects=False)
         cookie = r1.cookies.get("sentinel_session")
         assert cookie is not None
-        # Use the cookie on the next request
-        r2 = await c.get("/", cookies={"sentinel_session": cookie})
+        # Use the cookie on the client instance
+        c.cookies.set("sentinel_session", cookie)
+        r2 = await c.get("/")
     assert r2.status_code == 200
 
 
@@ -454,19 +455,13 @@ async def test_readyz_invalid_heartbeat_format(
 # ---------------------------------------------------------------------------
 
 
-def test_auth_bad_base64_sets_empty_credentials(auth_app: object) -> None:
+async def test_auth_bad_base64_sets_empty_credentials(auth_app: object) -> None:
     """Malformed Base64 in Authorization header must not crash; results in 401."""
-    import asyncio
-
-    async def _run() -> httpx.Response:
-        async with _client(auth_app) as c:
-            r = await c.get(
-                "/",
-                headers={"Authorization": "Basic !!!not-base64!!!"},
-            )
-            return r
-
-    r = asyncio.get_event_loop().run_until_complete(_run())
+    async with _client(auth_app) as c:
+        r = await c.get(
+            "/",
+            headers={"Authorization": "Basic !!!not-base64!!!"},
+        )
     assert r.status_code == 401
 
 
@@ -551,3 +546,22 @@ def test_check_credentials_bcrypt_exception() -> None:
     mw._password_hash = "$garbage$not_a_real_hash"
     result = mw._check_credentials("admin", "password")
     assert result is False
+
+
+async def test_status_page_renders_all_states(
+    mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: AsyncMock
+) -> None:
+    """Verify that the status page renders cleanly without template errors
+    for all watcher states.
+    """
+    from sentinel.watcher.state import WatcherState
+
+    for state in WatcherState:
+        mock_watcher.state = state
+        app_state = create_app(
+            _base_settings(), db=mock_db, watcher=mock_watcher, camera=mock_camera
+        )
+        async with _client(app_state) as c:
+            r = await c.get("/")
+        assert r.status_code == 200
+        assert state.name in r.text

@@ -18,9 +18,9 @@ RUN uv sync --frozen --no-dev --no-install-project
 # ---------------------------------------------------------------------------
 FROM python:3.12.8-slim AS runtime
 
-# Non-root user + su-exec for privilege drop in entrypoint
+# Non-root user + gosu for privilege drop in entrypoint
 RUN apt-get update -qq \
-    && apt-get install -y --no-install-recommends su-exec \
+    && apt-get install -y --no-install-recommends gosu \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --uid 1000 --create-home --shell /bin/sh sentinel
 
@@ -46,7 +46,7 @@ COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
 # USER sentinel directive removed to allow entrypoint.sh to run as root and fix permissions.
-# entrypoint.sh will drop privileges to sentinel via su-exec.
+# entrypoint.sh will drop privileges to sentinel via gosu.
 
 EXPOSE 8000
 

@@ -15,4 +15,4 @@ set -eu
 # chown is idempotent — safe to run even when ownership is already correct.
 chown -R sentinel:sentinel /data 2>/dev/null || true
 
-exec su-exec sentinel "$@"
+exec gosu sentinel "$@"

@@ -25,11 +25,16 @@ from sentinel.watcher.loop import WatcherLoop
 from sentinel.watcher.state import WatcherState
 
 _temp_dirs: list[str] = []
+_active_dbs: list[Database] = []
 
 
 @pytest.fixture(autouse=True)
-def cleanup_temp_dirs() -> Any:
+async def cleanup_resources() -> Any:
     yield
+    for db in _active_dbs:
+        with contextlib.suppress(Exception):
+            await db.close()
+    _active_dbs.clear()
     for d in _temp_dirs:
         shutil.rmtree(d, ignore_errors=True)
     _temp_dirs.clear()
@@ -95,6 +100,7 @@ async def _make_watcher(
     await migrate(db_path)
     db = Database(db_path)
     await db.connect()
+    _active_dbs.append(db)
 
     printer = MagicMock()
     printer.status = AsyncMock(return_value=printer_status or _idle_status())

@@ -188,3 +188,46 @@ async def test_detection_alert_with_photo_uploads() -> None:
     headers = call_kwargs.get("headers", {})
     assert headers.get("X-Filename") == "snapshot.jpg"
     assert "85%" in headers.get("X-Message", "")
+
+
+async def test_detection_alert_loads_photo_from_disk(tmp_path) -> None:
+    db_path = str(tmp_path / "sentinel.db")
+    settings = Settings(
+        printer_ip="10.0.0.1",
+        ntfy_url="https://ntfy.sh/test",
+        db_path=db_path,
+    )
+    # Save a fake snapshot file
+    snapshots_dir = tmp_path / "snapshots"
+    snapshots_dir.mkdir()
+    (snapshots_dir / "mysnap.jpg").write_bytes(b"disk_jpeg_data")
+
+    mock_client = _make_http_client()
+    with patch("sentinel.notify.ntfy.httpx.AsyncClient", return_value=mock_client):
+        notifier = NtfyNotifier(settings)
+        await notifier.send_detection_alert(0.85, snapshot_id="mysnap")
+
+    mock_client.post.assert_called_once()
+    call_kwargs = mock_client.post.call_args.kwargs
+    assert call_kwargs.get("content") == b"disk_jpeg_data"
+
+
+async def test_detection_alert_disk_read_failure(tmp_path) -> None:
+    db_path = str(tmp_path / "sentinel.db")
+    settings = Settings(
+        printer_ip="10.0.0.1",
+        ntfy_url="https://ntfy.sh/test",
+        db_path=db_path,
+    )
+    # Don't create the file, so it fails to find/read it.
+    mock_client = _make_http_client()
+    with patch("sentinel.notify.ntfy.httpx.AsyncClient", return_value=mock_client):
+        notifier = NtfyNotifier(settings)
+        await notifier.send_detection_alert(0.85, snapshot_id="nonexistent")
+
+    mock_client.post.assert_called_once()
+    call_kwargs = mock_client.post.call_args.kwargs
+    # Content should default to message because snapshot read failed
+    headers = call_kwargs.get("headers", {})
+    assert "X-Filename" not in headers
+    assert call_kwargs.get("content") == "Confidence 85%."
