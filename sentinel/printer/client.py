@@ -126,12 +126,13 @@ class PrinterClient:
     async def _fetch_status(self) -> PrinterStatus:
         """Connect, wait for one status push, return parsed status."""
         try:
+            client_id = f"{self._client_id}-status-{uuid.uuid4().hex[:8]}"
             async with aiomqtt.Client(
                 hostname=self._host,
                 port=self._port,
                 username="elegoo",
                 password=self._access_code,
-                identifier=self._client_id,
+                identifier=client_id,
             ) as client:
                 await client.subscribe("elegoo/+/api_status")
                 async with asyncio.timeout(_TIMEOUT_S):
@@ -150,12 +151,13 @@ class PrinterClient:
     async def _send_command(self, msg: dict[str, Any]) -> None:
         """Publish a command and return; does not wait for an ack."""
         try:
+            client_id = f"{self._client_id}-cmd-{uuid.uuid4().hex[:8]}"
             async with aiomqtt.Client(
                 hostname=self._host,
                 port=self._port,
                 username="elegoo",
                 password=self._access_code,
-                identifier=self._client_id,
+                identifier=client_id,
             ) as client:
                 # TODO(L2): topic uses printer IP as serial; replace with actual
                 # serial number once one full print cycle has been observed.

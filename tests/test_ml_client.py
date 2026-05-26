@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -12,6 +13,9 @@ from sentinel.config import Settings
 from sentinel.ml.client import MlClient
 from sentinel.ml.nonce import NonceStore
 from sentinel.ml.types import MlResult
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 _SETTINGS = Settings(printer_ip="10.0.0.1")
 _JPEG = b"\xff\xd8\xff\xd9"  # minimal JPEG
@@ -195,7 +199,7 @@ async def test_nonce_cleaned_up_on_error() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_token_loaded_from_file(tmp_path: pytest.TempPathFactory) -> None:  # type: ignore[type-arg]
+async def test_token_loaded_from_file(tmp_path: Path) -> None:
     token_file = tmp_path / "token"
     token_file.write_text("my-secret-token")
 
@@ -205,7 +209,7 @@ async def test_token_loaded_from_file(tmp_path: pytest.TempPathFactory) -> None:
     assert token == "my-secret-token"
 
 
-async def test_token_reloads_on_mtime_change(tmp_path: pytest.TempPathFactory) -> None:  # type: ignore[type-arg]
+async def test_token_reloads_on_mtime_change(tmp_path: Path) -> None:
     token_file = tmp_path / "token"
     token_file.write_text("token-v1")
 
@@ -231,7 +235,7 @@ def test_token_missing_file_returns_none() -> None:
     assert ml._load_token() is None
 
 
-def test_token_os_error_returns_none(tmp_path: pytest.TempPathFactory) -> None:  # type: ignore[type-arg]
+def test_token_os_error_returns_none(tmp_path: Path) -> None:
     token_file = tmp_path / "token"
     token_file.write_text("tok")
     settings = Settings(printer_ip="10.0.0.1", ml_api_token_file=str(token_file))
@@ -242,7 +246,7 @@ def test_token_os_error_returns_none(tmp_path: pytest.TempPathFactory) -> None: 
 
 
 async def test_detect_with_token_sends_auth_header(
-    tmp_path: pytest.TempPathFactory,  # type: ignore[type-arg]
+    tmp_path: Path,
 ) -> None:
     token_file = tmp_path / "token"
     token_file.write_text("my-token")

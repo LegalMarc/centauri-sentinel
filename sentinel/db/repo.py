@@ -76,6 +76,29 @@ class Database:
             rows = await cur.fetchall()
             return [dict(r) for r in rows]
 
+    async def get_snapshots_for_cleanup(self, keep_limit: int = 50) -> list[str]:
+        """Return snapshot_ids of old detection events that should be deleted."""
+        async with self._db.execute(
+            "SELECT snapshot_id FROM detection_events WHERE snapshot_id IS NOT NULL"
+            " ORDER BY id DESC"
+        ) as cur:
+            rows = list(await cur.fetchall())
+            if len(rows) <= keep_limit:
+                return []
+            return [row["snapshot_id"] for row in rows[keep_limit:]]
+
+    async def delete_old_snapshots(self, snapshot_ids: list[str]) -> None:
+        """Clear snapshot_id fields for deleted snapshots."""
+        if not snapshot_ids:
+            return
+        async with self._write() as db:
+            placeholders = ",".join("?" for _ in snapshot_ids)
+            query = (
+                "UPDATE detection_events SET snapshot_id = NULL"
+                f" WHERE snapshot_id IN ({placeholders})"
+            )
+            await db.execute(query, snapshot_ids)
+
     # ------------------------------------------------------------------
     # Pause history
     # ------------------------------------------------------------------

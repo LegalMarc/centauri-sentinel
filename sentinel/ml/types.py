@@ -14,4 +14,3 @@ class MlResult:
 
     score: float
     """Spaghetti/failure confidence in [0.0, 1.0]."""
-

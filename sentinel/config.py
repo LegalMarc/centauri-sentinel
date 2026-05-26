@@ -78,10 +78,35 @@ class Settings(BaseSettings):
         return bool(self.auth_username)
 
     @model_validator(mode="after")
-    def _hash_plain_password(self) -> Settings:
-        """Hash AUTH_PASSWORD into AUTH_PASSWORD_BCRYPT at startup, then clear it."""
+    def _validate_settings(self) -> Settings:
+        """Validate config variables and hash plain AUTH_PASSWORD if provided."""
+        # 1. Telegram checks
+        if self.telegram_bot_token:
+            if not self.telegram_chat_id or not self.telegram_chat_id.strip():
+                raise ValueError("TELEGRAM_CHAT_ID is required when TELEGRAM_BOT_TOKEN is set")
+            if not self.telegram_user_ids or not self.telegram_user_ids.strip():
+                raise ValueError("TELEGRAM_USER_IDS is required when TELEGRAM_BOT_TOKEN is set")
+
+        # 2. Auth checks
+        if self.auth_username:
+            if not self.auth_password_bcrypt and not self.auth_password:
+                raise ValueError(
+                    "AUTH_PASSWORD or AUTH_PASSWORD_BCRYPT is required when AUTH_USERNAME is set"
+                )
+            if self.auth_password_bcrypt and not (
+                self.auth_password_bcrypt.startswith("$2a$")
+                or self.auth_password_bcrypt.startswith("$2b$")
+                or self.auth_password_bcrypt.startswith("$2y$")
+            ):
+                msg = (
+                    "AUTH_PASSWORD_BCRYPT must be a valid bcrypt hash starting with "
+                    "$2a$, $2b$, or $2y$"
+                )
+                raise ValueError(msg)
+
+        # 3. Hash plain password
         if self.auth_password and not self.auth_password_bcrypt:
-            import bcrypt  # lazy import — only needed when plain password is provided
+            import bcrypt  # lazy import
 
             self.auth_password_bcrypt = bcrypt.hashpw(
                 self.auth_password.encode(), bcrypt.gensalt()
@@ -97,6 +122,36 @@ class Settings(BaseSettings):
             msg = f"LOG_LEVEL must be one of {valid}"
             raise ValueError(msg)
         return v.upper()
+
+    @field_validator("printer_ip")
+    @classmethod
+    def _validate_printer_ip(cls, v: str) -> str:
+        v_str = v.strip()
+        if not v_str:
+            raise ValueError("printer_ip cannot be empty")
+
+        # Check if IP address
+        import ipaddress
+
+        try:
+            ipaddress.ip_address(v_str)
+            return v_str
+        except ValueError:
+            pass
+
+        # Check if domain/hostname
+        import re
+
+        hostname_regex = re.compile(
+            r"^(?:[a-zA-Z0-9]"
+            r"(?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)*"
+            r"[a-zA-Z0-9]"
+            r"(?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$"
+        )
+        if not hostname_regex.match(v_str):
+            raise ValueError(f"printer_ip must be a valid IP address or hostname: {v_str}")
+
+        return v_str
 
 
 @lru_cache

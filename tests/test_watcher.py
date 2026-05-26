@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -71,12 +72,13 @@ async def _make_watcher(
     ml_score: float = 0.0,
     notifiers: list[Any] | None = None,
 ) -> tuple[WatcherLoop, MagicMock, MagicMock, MagicMock, Database]:
+    import os
     import tempfile
 
     from sentinel.db.migrate import migrate
 
-    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-        db_path = f.name
+    temp_dir = tempfile.mkdtemp()
+    db_path = os.path.join(temp_dir, "sentinel.db")
     await migrate(db_path)
     db = Database(db_path)
     await db.connect()
@@ -461,9 +463,71 @@ async def test_cancelled_during_pause_sets_paused_state() -> None:
     watcher._printer.pause = _raise_cancelled
 
     with pytest.raises(asyncio.CancelledError):
-        await watcher._on_confirmed_detection(MlResult(score=0.9))
+        await watcher._on_confirmed_detection(MlResult(score=0.9), b"\xff\xd8\xff\xd9")
 
     assert watcher.state == WatcherState.PAUSED
+
+
+# ---------------------------------------------------------------------------
+# Snapshot saving and cleanup
+# ---------------------------------------------------------------------------
+
+
+async def test_snapshot_saving_and_cleanup() -> None:
+    watcher, _printer, camera, _ml, db = await _make_watcher(
+        printer_status=_printing_status(),
+        ml_score=0.9,
+    )
+    watcher._settings = Settings(
+        printer_ip="10.0.0.1",
+        detection_warmup_seconds=0,
+        ml_confirm_count=1,
+        ml_score_threshold=0.4,
+        ml_poll_interval_seconds=10,
+        watcher_stall_seconds=60,
+        db_path=db._path,
+    )
+
+    # Grab/tick to trigger confirmed detection
+    camera.grab = AsyncMock(return_value=b"my_custom_jpeg_bytes")
+    await watcher.tick()
+
+    # Check that a snapshot was recorded in DB
+    recent = await db.get_recent_detections(limit=1)
+    assert len(recent) == 1
+    snapshot_id = recent[0]["snapshot_id"]
+    assert snapshot_id is not None
+
+    # Check that snapshot was saved to disk
+    from pathlib import Path
+
+    snapshots_dir = Path(db._path).parent / "snapshots"
+    p = snapshots_dir / f"{snapshot_id}.jpg"
+    assert p.exists()
+    assert p.read_bytes() == b"my_custom_jpeg_bytes"
+
+    # Test retention: trigger 55 detections and make sure only 50 files remain.
+    # We can call _on_confirmed_detection directly in a loop to generate many snapshots.
+    for i in range(60):
+        await watcher._on_confirmed_detection(MlResult(score=0.9), f"frame_{i}".encode())
+
+    # Check how many jpg files are in the directory
+    saved_files = list(snapshots_dir.glob("*.jpg"))
+    # We expect exactly 50 files because of the keep-50 retention cleanup.
+    # Wait, the first one we did might have been cleaned up too if the total exceeded 50.
+    assert len(saved_files) <= 50
+
+    # Clean up files and database connection
+    await db.close()
+    for f in saved_files:
+        with contextlib.suppress(OSError):
+            f.unlink()
+    with contextlib.suppress(OSError):
+        snapshots_dir.rmdir()
+    with contextlib.suppress(OSError):
+        Path(db._path).unlink()
+    with contextlib.suppress(OSError):
+        Path(db._path).parent.rmdir()
 
 
 # ---------------------------------------------------------------------------

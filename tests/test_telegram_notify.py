@@ -30,6 +30,7 @@ def _enabled_settings() -> Settings:
 def _make_notifier_enabled() -> tuple[TelegramNotifier, MagicMock]:
     mock_bot = MagicMock()
     mock_bot.send_message = AsyncMock()
+    mock_bot.send_photo = AsyncMock()
 
     with patch("sentinel.notify.telegram.Bot", return_value=mock_bot):
         notifier = TelegramNotifier(_enabled_settings())
@@ -124,6 +125,17 @@ async def test_send_detection_alert_calls_bot() -> None:
     mock_bot.send_message.assert_called_once()
     call_kwargs = mock_bot.send_message.call_args
     assert "85%" in call_kwargs.kwargs.get("text", "")
+    assert "reply_markup" in call_kwargs.kwargs
+
+
+async def test_send_detection_alert_with_photo_calls_bot() -> None:
+    notifier, mock_bot = _make_notifier_enabled()
+    await notifier.send_detection_alert(score=0.85, jpeg=b"fake_jpeg")
+    mock_bot.send_photo.assert_called_once()
+    call_kwargs = mock_bot.send_photo.call_args
+    assert call_kwargs.kwargs.get("photo") == b"fake_jpeg"
+    assert "85%" in call_kwargs.kwargs.get("caption", "")
+    assert "reply_markup" in call_kwargs.kwargs
 
 
 async def test_send_stall_alert_calls_bot() -> None:
@@ -181,17 +193,15 @@ async def test_retry_exhausted_reraises() -> None:
 
 
 def test_init_raises_if_telegram_enabled_with_empty_user_ids() -> None:
-    settings = Settings(
-        printer_ip="10.0.0.1",
-        telegram_bot_token="tok",
-        telegram_chat_id="99",
-        telegram_user_ids="",
-    )
-    with (
-        patch("sentinel.notify.telegram.Bot"),
-        pytest.raises(ValueError, match="TELEGRAM_USER_IDS"),
-    ):
-        TelegramNotifier(settings)
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="TELEGRAM_USER_IDS"):
+        Settings(
+            printer_ip="10.0.0.1",
+            telegram_bot_token="tok",
+            telegram_chat_id="99",
+            telegram_user_ids="",
+        )
 
 
 def test_init_raises_if_all_user_ids_are_invalid() -> None:

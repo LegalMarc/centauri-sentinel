@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import aiosqlite
 import pytest
 
 from sentinel.db.migrate import CURRENT_VERSION, migrate
 from sentinel.db.repo import Database
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator
+    from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -14,12 +20,12 @@ from sentinel.db.repo import Database
 
 
 @pytest.fixture
-async def db(tmp_path: pytest.TempPathFactory) -> Database:  # type: ignore[type-arg]
+async def db(tmp_path: Path) -> AsyncGenerator[Database, None]:
     path = str(tmp_path / "test.db")
     await migrate(path)
     database = Database(path)
     await database.connect()
-    yield database  # type: ignore[misc]
+    yield database
     await database.close()
 
 
@@ -28,7 +34,7 @@ async def db(tmp_path: pytest.TempPathFactory) -> Database:  # type: ignore[type
 # ---------------------------------------------------------------------------
 
 
-async def test_migrate_creates_tables(tmp_path: pytest.TempPathFactory) -> None:  # type: ignore[type-arg]
+async def test_migrate_creates_tables(tmp_path: Path) -> None:
     path = str(tmp_path / "m.db")
     await migrate(path)
 
@@ -47,7 +53,7 @@ async def test_migrate_creates_tables(tmp_path: pytest.TempPathFactory) -> None:
     assert expected <= tables
 
 
-async def test_migrate_idempotent(tmp_path: pytest.TempPathFactory) -> None:  # type: ignore[type-arg]
+async def test_migrate_idempotent(tmp_path: Path) -> None:
     path = str(tmp_path / "m.db")
     await migrate(path)
     await migrate(path)  # second call must not raise
@@ -61,7 +67,7 @@ async def test_migrate_idempotent(tmp_path: pytest.TempPathFactory) -> None:  # 
         assert row[0] == 1
 
 
-async def test_migrate_version(tmp_path: pytest.TempPathFactory) -> None:  # type: ignore[type-arg]
+async def test_migrate_version(tmp_path: Path) -> None:
     path = str(tmp_path / "m.db")
     await migrate(path)
 
@@ -224,3 +230,35 @@ async def test_get_auth_secret_invalid_hex_returns_none(db: Database) -> None:
     await db.set_setting("auth_cookie_secret", "not_valid_hex!")
     result = await db.get_auth_secret()
     assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Snapshot cleanup and deletion
+# ---------------------------------------------------------------------------
+
+
+async def test_snapshot_cleanup_and_deletion(db: Database) -> None:
+    # Set up some detections with snapshot_ids
+    for i in range(10):
+        await db.record_detection(score=0.9, snapshot_id=f"snap_{i}")
+
+    # We want to keep 4. It should return oldest 6.
+    old_snaps = await db.get_snapshots_for_cleanup(keep_limit=4)
+    # The list is ordered by ID DESC, so newest first.
+    # The newest 4 are snap_9, snap_8, snap_7, snap_6.
+    # The old ones returned should be snap_5, snap_4, ..., snap_0.
+    assert len(old_snaps) == 6
+    assert "snap_0" in old_snaps
+    assert "snap_5" in old_snaps
+    assert "snap_6" not in old_snaps
+
+    # Let's delete them (clear snapshot_id fields)
+    await db.delete_old_snapshots(old_snaps)
+
+    # Get remaining snapshot_ids
+    recent = await db.get_recent_detections(limit=10)
+    for row in recent:
+        if row["snapshot_id"]:
+            assert row["snapshot_id"] in {"snap_6", "snap_7", "snap_8", "snap_9"}
+        else:
+            assert isinstance(row["id"], int) and row["id"] <= 6

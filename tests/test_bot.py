@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import time
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
 from sentinel.bot.commands import BotCommandHandler
 from sentinel.config import Settings
 from sentinel.watcher.state import WatcherState
+
+if TYPE_CHECKING:
+    import pytest
 
 # ---------------------------------------------------------------------------
 # Fixtures and helpers
@@ -142,7 +146,9 @@ async def test_unauthorized_chat_ignored() -> None:
     update.message.reply_text.assert_not_called()
 
 
-async def test_unauthorized_user_warning_logged(caplog) -> None:
+async def test_unauthorized_user_warning_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     handler = _make_handler()
     update = _make_update(user_id=_OTHER_USER)
     with caplog.at_level("WARNING", logger="sentinel.bot.commands"):

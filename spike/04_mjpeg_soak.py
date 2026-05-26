@@ -40,32 +40,31 @@ async def stream_once(url: str, stall_seconds: float, log) -> tuple[list[float],
     buf = bytearray()
 
     timeout = httpx.Timeout(connect=5.0, read=stall_seconds, write=5.0, pool=5.0)
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        async with client.stream("GET", url) as r:
-            log(f"connected status={r.status_code} ct={r.headers.get('content-type')}")
-            async for chunk in r.aiter_bytes():
-                now = time.perf_counter()
-                if now - last_byte_t > stall_seconds:
-                    log(f"stall detected: {now - last_byte_t:.1f}s without bytes")
-                last_byte_t = now
-                buf += chunk
-                # Extract complete JPEGs from buf.
-                while True:
-                    soi = buf.find(SOI)
-                    if soi < 0:
-                        buf.clear()
-                        break
-                    eoi = buf.find(EOI, soi + 2)
-                    if eoi < 0:
-                        if soi > 0:
-                            del buf[:soi]
-                        break
-                    frames += 1
-                    t = time.perf_counter()
-                    if last_frame_t is not None:
-                        intervals.append((t - last_frame_t) * 1000)
-                    last_frame_t = t
-                    del buf[: eoi + 2]
+    async with httpx.AsyncClient(timeout=timeout) as client, client.stream("GET", url) as r:
+        log(f"connected status={r.status_code} ct={r.headers.get('content-type')}")
+        async for chunk in r.aiter_bytes():
+            now = time.perf_counter()
+            if now - last_byte_t > stall_seconds:
+                log(f"stall detected: {now - last_byte_t:.1f}s without bytes")
+            last_byte_t = now
+            buf += chunk
+            # Extract complete JPEGs from buf.
+            while True:
+                soi = buf.find(SOI)
+                if soi < 0:
+                    buf.clear()
+                    break
+                eoi = buf.find(EOI, soi + 2)
+                if eoi < 0:
+                    if soi > 0:
+                        del buf[:soi]
+                    break
+                frames += 1
+                t = time.perf_counter()
+                if last_frame_t is not None:
+                    intervals.append((t - last_frame_t) * 1000)
+                last_frame_t = t
+                del buf[: eoi + 2]
     return intervals, frames
 
 
@@ -94,7 +93,7 @@ async def main(args: argparse.Namespace) -> None:
             all_intervals.extend(intervals)
             total_frames += frames
             log(f"stream ended cleanly: frames={frames} attempt={attempt}")
-        except (httpx.HTTPError, asyncio.TimeoutError) as e:
+        except (TimeoutError, httpx.HTTPError) as e:
             disconnects += 1
             log(f"disconnect: {e!r} attempt={attempt}")
         # Backoff before reconnect.

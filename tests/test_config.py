@@ -70,8 +70,8 @@ def test_telegram_enabled_all_fields() -> None:
 
 
 def test_telegram_enabled_token_only() -> None:
-    s = Settings(telegram_bot_token="tok")
-    assert s.telegram_enabled
+    with pytest.raises(ValueError):
+        Settings(telegram_bot_token="tok")
 
 
 def test_ntfy_disabled_by_default() -> None:
@@ -92,12 +92,12 @@ def test_auth_disabled_by_default() -> None:
 
 
 def test_auth_enabled() -> None:
-    s = Settings(auth_username="admin")
+    s = Settings(auth_username="admin", auth_password="pw")
     assert s.auth_enabled
 
 
 def test_auth_disabled_when_username_empty_string() -> None:
-    s = Settings(auth_username="")
+    s = Settings(auth_username="", auth_password="")
     assert not s.auth_enabled
 
 
@@ -142,3 +142,46 @@ def test_detection_warmup_default() -> None:
 def test_db_path_default() -> None:
     s = Settings()
     assert s.db_path == "/data/sentinel.db"
+
+
+# ---------------------------------------------------------------------------
+# Validation tests
+# ---------------------------------------------------------------------------
+
+
+def test_telegram_validation_missing_chat_id() -> None:
+    with pytest.raises(ValueError, match="TELEGRAM_CHAT_ID"):
+        Settings(telegram_bot_token="tok", telegram_user_ids="123")
+
+
+def test_telegram_validation_missing_user_ids() -> None:
+    with pytest.raises(ValueError, match="TELEGRAM_USER_IDS"):
+        Settings(telegram_bot_token="tok", telegram_chat_id="123")
+
+
+def test_auth_validation_missing_password() -> None:
+    with pytest.raises(ValueError, match="AUTH_PASSWORD"):
+        Settings(auth_username="admin")
+
+
+def test_auth_validation_invalid_bcrypt_hash() -> None:
+    with pytest.raises(ValueError, match="AUTH_PASSWORD_BCRYPT"):
+        Settings(auth_username="admin", auth_password_bcrypt="not_bcrypt_hash")
+
+
+def test_printer_ip_validation_valid_ip() -> None:
+    s = Settings(printer_ip="192.168.1.10")
+    assert s.printer_ip == "192.168.1.10"
+
+
+def test_printer_ip_validation_valid_hostname() -> None:
+    s = Settings(printer_ip="printer.local")
+    assert s.printer_ip == "printer.local"
+
+    s2 = Settings(printer_ip="localhost")
+    assert s2.printer_ip == "localhost"
+
+
+def test_printer_ip_validation_invalid() -> None:
+    with pytest.raises(ValueError, match="printer_ip must be a valid IP"):
+        Settings(printer_ip="invalid_ip_or_hostname_!!")

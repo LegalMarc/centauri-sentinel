@@ -101,16 +101,45 @@ class MjpegGrabber:
         raise CameraReadError("Stream ended without a complete JPEG frame")
 
     async def stream_proxy(self) -> AsyncIterator[bytes]:
-        """Yield JPEG frames continuously with exponential backoff on failure."""
+        """Yield JPEG frames continuously using a single persistent connection.
+
+        Attempts to reconnect with exponential backoff if the stream disconnects.
+        """
         delay = _BACKOFF_BASE
         while True:
             try:
-                frame = await self.grab()
-                delay = _BACKOFF_BASE  # reset on success
-                yield frame
-            except CameraOfflineError:
-                raise
-            except CameraReadError:
-                logger.debug("Backing off %.1fs before retry", delay)
+                async with (
+                    httpx.AsyncClient(timeout=_READ_TIMEOUT) as client,
+                    client.stream("GET", self._url) as resp,
+                ):
+                    resp.raise_for_status()
+                    buf = b""
+                    async for chunk in resp.aiter_bytes(_CHUNK_SIZE):
+                        buf += chunk
+                        while True:
+                            start = buf.find(_SOI)
+                            if start == -1:
+                                break
+                            end = buf.find(_EOI, start)
+                            if end == -1:
+                                break
+                            frame = buf[start : end + 2]
+                            self._consecutive_failures = 0
+                            self._last_success = datetime.now(tz=UTC)
+                            delay = _BACKOFF_BASE
+                            yield frame
+                            buf = buf[end + 2 :]
+            except (TimeoutError, httpx.HTTPError, OSError) as exc:
+                self._consecutive_failures += 1
+                logger.warning(
+                    "Stream proxy connection failed: %s (consecutive=%d)",
+                    exc,
+                    self._consecutive_failures,
+                )
+                if self._consecutive_failures >= _OFFLINE_THRESHOLD:
+                    raise CameraOfflineError(
+                        f"Camera offline after {self._consecutive_failures} consecutive failures"
+                    ) from exc
+                logger.debug("Backing off %.1fs before reconnecting", delay)
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, _BACKOFF_CAP)

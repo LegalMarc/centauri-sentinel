@@ -54,7 +54,7 @@ def test_extract_jpeg_trims_leading_garbage() -> None:
 def _make_stream_response(chunks: list[bytes]) -> MagicMock:
     """Mock httpx streaming response that yields chunks."""
 
-    async def _aiter_bytes(_size: int) -> AsyncIterator[bytes]:  # type: ignore[type-arg]
+    async def _aiter_bytes(_size: int) -> AsyncIterator[bytes]:
         for chunk in chunks:
             yield chunk
 
@@ -206,51 +206,49 @@ def test_last_success_utc_none_initially() -> None:
 
 
 async def test_stream_proxy_yields_frames() -> None:
+    resp = _make_stream_response([_JPEG, _JPEG, _JPEG])
+    mock_client = _make_httpx_client(resp)
+
     frames_captured: list[bytes] = []
-    call_count = 0
 
-    async def _mock_grab() -> bytes:
-        nonlocal call_count
-        call_count += 1
-        if call_count > 3:
-            raise CameraOfflineError("done")
-        return _JPEG
-
-    grabber = MjpegGrabber(_SETTINGS)
-    with (
-        patch.object(grabber, "grab", side_effect=_mock_grab),
-        pytest.raises(CameraOfflineError),
-    ):
+    with patch("sentinel.camera.mjpeg.httpx.AsyncClient", return_value=mock_client):
+        grabber = MjpegGrabber(_SETTINGS)
         async for frame in grabber.stream_proxy():
             frames_captured.append(frame)
+            if len(frames_captured) == 3:
+                break
 
     assert len(frames_captured) == 3
+    assert frames_captured == [_JPEG, _JPEG, _JPEG]
 
 
 async def test_stream_proxy_backs_off_on_read_error() -> None:
-    call_count = 0
-    sleep_calls: list[float] = []
+    mock_client1 = MagicMock()
+    mock_client1.stream = MagicMock(side_effect=httpx.ConnectError("refused"))
+    mock_client1.__aenter__ = AsyncMock(return_value=mock_client1)
+    mock_client1.__aexit__ = AsyncMock(return_value=False)
 
-    async def _mock_grab() -> bytes:
-        nonlocal call_count
-        call_count += 1
-        if call_count == 1:
-            raise CameraReadError("blip")
-        if call_count > 2:
-            raise CameraOfflineError("done")
-        return _JPEG
+    resp2 = _make_stream_response([_JPEG])
+    mock_client2 = _make_httpx_client(resp2)
+
+    client_calls = [mock_client1, mock_client2]
+
+    def _get_client(*args: object, **kwargs: object) -> MagicMock:
+        return client_calls.pop(0) if client_calls else mock_client1
+
+    sleep_calls: list[float] = []
 
     async def _mock_sleep(delay: float) -> None:
         sleep_calls.append(delay)
 
-    grabber = MjpegGrabber(_SETTINGS)
     with (
-        patch.object(grabber, "grab", side_effect=_mock_grab),
+        patch("sentinel.camera.mjpeg.httpx.AsyncClient", side_effect=_get_client),
         patch("sentinel.camera.mjpeg.asyncio.sleep", side_effect=_mock_sleep),
-        pytest.raises(CameraOfflineError),
     ):
-        async for _ in grabber.stream_proxy():
-            pass
+        grabber = MjpegGrabber(_SETTINGS)
+        async for frame in grabber.stream_proxy():
+            assert frame == _JPEG
+            break
 
     assert len(sleep_calls) == 1
     assert sleep_calls[0] == pytest.approx(0.5)

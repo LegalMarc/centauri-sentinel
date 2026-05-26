@@ -6,13 +6,17 @@ The bot token and chat/user IDs are set in settings.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import tenacity
-from telegram import Bot
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from sentinel.config import Settings
 
 logger = logging.getLogger(__name__)
@@ -44,6 +48,7 @@ class TelegramNotifier:
         self._bot = Bot(token=settings.telegram_bot_token or "")
         self._chat_id = settings.telegram_chat_id or ""
         self._allowed_users = _parse_user_ids(settings.telegram_user_ids)
+        self._snapshots_dir = Path(settings.db_path).parent / "snapshots"
         if not self._allowed_users:
             raise ValueError(
                 "TELEGRAM_USER_IDS is required when Telegram is enabled but is empty or "
@@ -57,29 +62,100 @@ class TelegramNotifier:
             return False
         return str(chat_id) == str(self._chat_id) and user_id in self._allowed_users
 
-    async def send_detection_alert(self, score: float, snapshot_id: str | None = None) -> None:
+    async def send_detection_alert(
+        self,
+        score: float,
+        snapshot_id: str | None = None,
+        jpeg: bytes | None = None,
+    ) -> None:
         if not self._enabled:
             return
-        text = f"⚠️ Failure detected — confidence {score:.0%}\nSnapshot: {snapshot_id or 'N/A'}"
-        await self._send_with_retry(text)
+
+        photo_bytes = jpeg
+        if not photo_bytes and snapshot_id:
+            p = self._snapshots_dir / f"{snapshot_id}.jpg"
+            if p.exists():
+                try:
+                    photo_bytes = await asyncio.to_thread(p.read_bytes)
+                except OSError:
+                    logger.exception("Failed to read snapshot file for Telegram: %s", p)
+
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("Resume", callback_data="resume"),
+                    InlineKeyboardButton("Stop", callback_data="stop"),
+                    InlineKeyboardButton("Snooze 10m", callback_data="snooze"),
+                ]
+            ]
+        )
+
+        caption = f"⚠️ Failure detected — confidence {score:.0%}"
+
+        if photo_bytes:
+
+            async def _attempt_photo() -> None:
+                await self._bot.send_photo(
+                    chat_id=self._chat_id,
+                    photo=photo_bytes,
+                    caption=caption,
+                    reply_markup=keyboard,
+                    read_timeout=_TIMEOUT,
+                    write_timeout=_TIMEOUT,
+                    connect_timeout=_TIMEOUT,
+                )
+
+            await self._send_with_retry_fn(_attempt_photo)
+        else:
+            caption_with_error = caption + "\n(Snapshot not available)"
+
+            async def _attempt_msg() -> None:
+                await self._bot.send_message(
+                    chat_id=self._chat_id,
+                    text=caption_with_error,
+                    reply_markup=keyboard,
+                    read_timeout=_TIMEOUT,
+                    write_timeout=_TIMEOUT,
+                    connect_timeout=_TIMEOUT,
+                )
+
+            await self._send_with_retry_fn(_attempt_msg)
 
     async def send_stall_alert(self) -> None:
         if not self._enabled:
             return
-        await self._send_with_retry("⚠️ Sentinel watcher stalled — please check the service.")
+
+        async def _send() -> None:
+            await self._bot.send_message(
+                chat_id=self._chat_id,
+                text="⚠️ Sentinel watcher stalled — please check the service.",
+                read_timeout=_TIMEOUT,
+                write_timeout=_TIMEOUT,
+                connect_timeout=_TIMEOUT,
+            )
+
+        await self._send_with_retry_fn(_send)
 
     async def send_camera_offline_alert(self) -> None:
         if not self._enabled:
             return
-        await self._send_with_retry("📷 Camera offline — detection suspended.")
+
+        async def _send() -> None:
+            await self._bot.send_message(
+                chat_id=self._chat_id,
+                text="📷 Camera offline — detection suspended.",
+                read_timeout=_TIMEOUT,
+                write_timeout=_TIMEOUT,
+                connect_timeout=_TIMEOUT,
+            )
+
+        await self._send_with_retry_fn(_send)
 
     async def send_text(self, text: str) -> None:
         if not self._enabled:
             return
-        await self._send_with_retry(text)
 
-    async def _send_with_retry(self, text: str) -> None:
-        async def _attempt() -> None:
+        async def _send() -> None:
             await self._bot.send_message(
                 chat_id=self._chat_id,
                 text=text,
@@ -88,6 +164,9 @@ class TelegramNotifier:
                 connect_timeout=_TIMEOUT,
             )
 
+        await self._send_with_retry_fn(_send)
+
+    async def _send_with_retry_fn(self, fn: Callable[[], Awaitable[None]]) -> None:
         retryer = tenacity.AsyncRetrying(
             stop=tenacity.stop_after_attempt(_RETRIES),
             wait=tenacity.wait_exponential(multiplier=0.5, min=0.5, max=8),
@@ -96,4 +175,4 @@ class TelegramNotifier:
         )
         async for attempt in retryer:
             with attempt:
-                await _attempt()
+                await fn()

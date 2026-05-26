@@ -110,14 +110,14 @@ def main() -> None:
 
     print("\n=== VERIFIED ASSUMPTION: pycentauri ===")
     print("Fill in for docs/verified-assumptions.md:")
-    print(f"  library_version:   <pip show pycentauri>")
+    print("  library_version:   <pip show pycentauri>")
     print(f"  client_class:      {type(client).__name__}")
-    print(f"  status_method:     status()  # confirm name")
-    print(f"  state_field:       <key in response, e.g. 'state'>")
+    print("  status_method:     status()  # confirm name")
+    print("  state_field:       <key in response, e.g. 'state'>")
     print(f"  state_strings:     {sorted(seen_states)}")
-    print(f"  blocking_io:       <yes | no — based on timings above>")
-    print(f"  pause/resume/stop: <method names + return shapes>")
-    print(f"  notes:             <protocol version field if exposed>")
+    print("  blocking_io:       <yes | no — based on timings above>")
+    print("  pause/resume/stop: <method names + return shapes>")
+    print("  notes:             <protocol version field if exposed>")
     print("===")
 
 

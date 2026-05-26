@@ -174,3 +174,17 @@ async def test_retry_exhausted_reraises() -> None:
         notifier = NtfyNotifier(_enabled_settings())
         with pytest.raises(httpx.ConnectError):
             await notifier.send_detection_alert(0.5)
+
+
+async def test_detection_alert_with_photo_uploads() -> None:
+    mock_client = _make_http_client()
+    with patch("sentinel.notify.ntfy.httpx.AsyncClient", return_value=mock_client):
+        notifier = NtfyNotifier(_enabled_settings())
+        await notifier.send_detection_alert(0.85, jpeg=b"test_image_data")
+
+    mock_client.post.assert_called_once()
+    call_kwargs = mock_client.post.call_args.kwargs
+    assert call_kwargs.get("content") == b"test_image_data"
+    headers = call_kwargs.get("headers", {})
+    assert headers.get("X-Filename") == "snapshot.jpg"
+    assert "85%" in headers.get("X-Message", "")

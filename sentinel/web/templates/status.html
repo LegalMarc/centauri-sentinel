@@ -57,7 +57,13 @@ footer a{color:#666}
     <tr>
       <td>{{ d.id }}</td>
       <td>{{ d.ts }}</td>
-      <td>{{ "%.3f"|format(d.score) }}</td>
+      <td>
+        {% if d.snapshot_id %}
+          <a href="/snapshot/{{ d.snapshot_id }}" target="_blank">{{ "%.3f"|format(d.score) }}</a>
+        {% else %}
+          {{ "%.3f"|format(d.score) }}
+        {% endif %}
+      </td>
       <td>{{ d.action }}</td>
     </tr>
   {% endfor %}

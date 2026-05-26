@@ -108,9 +108,7 @@ class AuthMiddleware:
 
     def _check_credentials(self, username: str, password: str) -> bool:
         # Constant-time username comparison prevents user-enumeration via timing.
-        username_ok = hmac.compare_digest(
-            username.encode("utf-8"), self._username.encode("utf-8")
-        )
+        username_ok = hmac.compare_digest(username.encode("utf-8"), self._username.encode("utf-8"))
         # Always run bcrypt even on a bad username so timing is indistinguishable.
         hash_to_check = (
             self._password_hash if (username_ok and self._password_hash) else _DUMMY_HASH
@@ -123,9 +121,7 @@ class AuthMiddleware:
 
     def _ua_hash(self, user_agent: str) -> str:
         """Return first 16 hex chars of HMAC(secret, user_agent)."""
-        return hmac.new(
-            self._secret, user_agent.encode("utf-8"), hashlib.sha256
-        ).hexdigest()[:16]
+        return hmac.new(self._secret, user_agent.encode("utf-8"), hashlib.sha256).hexdigest()[:16]
 
     def _make_cookie(self, user_agent: str) -> str:
         ts = str(int(time.time()))

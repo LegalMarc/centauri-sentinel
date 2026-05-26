@@ -22,7 +22,12 @@ def test_external_no_auth_no_override_raises() -> None:
 
 
 def test_external_with_auth_warns(caplog: pytest.LogCaptureFixture) -> None:
-    s = Settings(bind_host="0.0.0.0", auth_username="admin", external_bind_allowed=False)
+    s = Settings(
+        bind_host="0.0.0.0",
+        auth_username="admin",
+        auth_password="password",
+        external_bind_allowed=False,
+    )
     with caplog.at_level(logging.WARNING, logger="sentinel.safety"):
         check_external_bind(s)
     assert "external interface" in caplog.text
@@ -36,7 +41,12 @@ def test_external_with_override_warns(caplog: pytest.LogCaptureFixture) -> None:
 
 
 def test_external_with_auth_and_override_warns(caplog: pytest.LogCaptureFixture) -> None:
-    s = Settings(bind_host="0.0.0.0", auth_username="admin", external_bind_allowed=True)
+    s = Settings(
+        bind_host="0.0.0.0",
+        auth_username="admin",
+        auth_password="password",
+        external_bind_allowed=True,
+    )
     with caplog.at_level(logging.WARNING, logger="sentinel.safety"):
         check_external_bind(s)
     assert "external interface" in caplog.text

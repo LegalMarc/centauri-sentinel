@@ -202,6 +202,44 @@ async def test_snapshot_503_on_camera_error(mock_db: AsyncMock, mock_watcher: Ma
     assert r.status_code == 503
 
 
+async def test_get_saved_snapshot_not_found(app: object) -> None:
+    async with _client(app) as c:
+        r = await c.get("/snapshot/nonexistent_snap_id")
+    assert r.status_code == 404
+
+
+async def test_get_saved_snapshot_success(
+    mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: AsyncMock
+) -> None:
+    import os
+    import tempfile
+    from pathlib import Path
+
+    # We need a real temp directory for db path so snapshots directory exists
+    temp_dir = tempfile.mkdtemp()
+    db_path = os.path.join(temp_dir, "sentinel.db")
+    mock_db._path = db_path
+
+    snapshots_dir = Path(temp_dir) / "snapshots"
+    snapshots_dir.mkdir()
+    (snapshots_dir / "snap123.jpg").write_bytes(b"saved_jpeg_data")
+
+    app_with_real_paths = create_app(
+        _base_settings(), db=mock_db, watcher=mock_watcher, camera=mock_camera
+    )
+    async with _client(app_with_real_paths) as c:
+        r = await c.get("/snapshot/snap123")
+
+    assert r.status_code == 200
+    assert r.content == b"saved_jpeg_data"
+    assert r.headers["content-type"] == "image/jpeg"
+
+    # cleanup
+    (snapshots_dir / "snap123.jpg").unlink()
+    snapshots_dir.rmdir()
+    os.rmdir(temp_dir)
+
+
 # ---------------------------------------------------------------------------
 # /readyz
 # ---------------------------------------------------------------------------
@@ -357,9 +395,7 @@ async def test_status_page_no_db_returns_503() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_snapshot_no_camera_returns_503(
-    mock_db: AsyncMock, mock_watcher: MagicMock
-) -> None:
+async def test_snapshot_no_camera_returns_503(mock_db: AsyncMock, mock_watcher: MagicMock) -> None:
     no_cam_app = create_app(_base_settings(), db=mock_db, watcher=mock_watcher)
     async with _client(no_cam_app) as c:
         r = await c.get("/snapshot")
@@ -371,18 +407,14 @@ async def test_snapshot_no_camera_returns_503(
 # ---------------------------------------------------------------------------
 
 
-async def test_stream_no_camera_returns_503(
-    mock_db: AsyncMock, mock_watcher: MagicMock
-) -> None:
+async def test_stream_no_camera_returns_503(mock_db: AsyncMock, mock_watcher: MagicMock) -> None:
     no_cam_app = create_app(_base_settings(), db=mock_db, watcher=mock_watcher)
     async with _client(no_cam_app) as c:
         r = await c.get("/stream")
     assert r.status_code == 503
 
 
-async def test_stream_returns_multipart(
-    mock_db: AsyncMock, mock_watcher: MagicMock
-) -> None:
+async def test_stream_returns_multipart(mock_db: AsyncMock, mock_watcher: MagicMock) -> None:
     async def _gen() -> object:
         yield _FAKE_JPEG
         yield _FAKE_JPEG
@@ -421,8 +453,6 @@ def test_auth_bad_base64_sets_empty_credentials(auth_app: object) -> None:
     """Malformed Base64 in Authorization header must not crash; results in 401."""
     import asyncio
 
-    import httpx
-
     async def _run() -> httpx.Response:
         async with _client(auth_app) as c:
             r = await c.get(
@@ -459,14 +489,11 @@ def test_verify_token_wrong_part_count() -> None:
 def test_verify_token_expired() -> None:
     import time
 
-    from sentinel.web.auth import AuthMiddleware, _TTL
+    from sentinel.web.auth import _TTL, AuthMiddleware
 
     mw = _make_auth_middleware()
     assert isinstance(mw, AuthMiddleware)
     old_ts = str(int(time.time()) - _TTL - 10)
-    token = mw._make_cookie.__func__(mw, "ua").replace(
-        mw._make_cookie.__func__(mw, "ua").split(".")[0], old_ts
-    )
     # Build an expired token manually
     import hashlib
     import hmac
@@ -511,9 +538,11 @@ def test_check_credentials_bcrypt_exception() -> None:
         Settings(
             printer_ip="127.0.0.1",
             auth_username="admin",
-            auth_password_bcrypt="$garbage$not_a_real_hash",
+            auth_password="password",
         ),
         secret=b"\x00" * 32,
     )
+    # Inject garbage hash directly to test middleware resilience to bcrypt exceptions
+    mw._password_hash = "$garbage$not_a_real_hash"
     result = mw._check_credentials("admin", "password")
     assert result is False

@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
 from sentinel.camera.errors import CameraOfflineError
@@ -33,7 +35,12 @@ logger = logging.getLogger(__name__)
 class Notifier(Protocol):
     """Any object that can send alerts to users."""
 
-    async def send_detection_alert(self, score: float, snapshot_id: str | None) -> None: ...
+    async def send_detection_alert(
+        self,
+        score: float,
+        snapshot_id: str | None = None,
+        jpeg: bytes | None = None,
+    ) -> None: ...
     async def send_stall_alert(self) -> None: ...
     async def send_camera_offline_alert(self) -> None: ...
 
@@ -167,16 +174,25 @@ class WatcherLoop:
                 self._settings.ml_confirm_count,
             )
             if self._confirm_count >= self._settings.ml_confirm_count:
-                await self._on_confirmed_detection(result)
+                await self._on_confirmed_detection(result, jpeg)
         else:
             if self._confirm_count > 0:
                 logger.debug("Score below threshold — resetting confirm counter")
             self._confirm_count = 0
 
-    async def _on_confirmed_detection(self, result: MlResult) -> None:
+    async def _on_confirmed_detection(self, result: MlResult, jpeg: bytes) -> None:
         logger.warning("CONFIRMED DETECTION score=%.2f — pausing printer", result.score)
         self._confirm_count = 0
-        snapshot_id: str | None = None
+        snapshot_id: str | None = uuid.uuid4().hex
+
+        snapshots_dir = Path(self._db._path).parent / "snapshots"
+        try:
+            await asyncio.to_thread(snapshots_dir.mkdir, parents=True, exist_ok=True)
+            snapshot_path = snapshots_dir / f"{snapshot_id}.jpg"
+            await asyncio.to_thread(snapshot_path.write_bytes, jpeg)
+        except Exception:
+            logger.exception("Failed to save snapshot file to disk")
+            snapshot_id = None
 
         # Shield the pause publish so that a task cancellation arriving mid-call
         # still lets the MQTT command complete before propagating CancelledError.
@@ -202,9 +218,28 @@ class WatcherLoop:
 
         for n in self._notifiers:
             try:
-                await n.send_detection_alert(result.score, snapshot_id)
+                await n.send_detection_alert(result.score, snapshot_id, jpeg)
             except Exception:
                 logger.exception("Notifier detection_alert failed")
+
+        # Cleanup old snapshots (keep last 50)
+        try:
+            old_ids = await self._db.get_snapshots_for_cleanup(keep_limit=50)
+            if old_ids:
+                await self._db.delete_old_snapshots(old_ids)
+
+                def _delete_files() -> None:
+                    for sid in old_ids:
+                        p = snapshots_dir / f"{sid}.jpg"
+                        if p.exists():
+                            try:
+                                p.unlink()
+                            except OSError:
+                                logger.exception("Failed to delete old snapshot file: %s", p)
+
+                await asyncio.to_thread(_delete_files)
+        except Exception:
+            logger.exception("Failed to clean up old snapshots")
 
         _ = pause_id  # will be used later when resume is wired up
 

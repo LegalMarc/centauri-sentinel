@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, HTTPException, Request
@@ -70,6 +72,20 @@ def make_router(
             return Response(content=jpeg, media_type="image/jpeg")
         except Exception as exc:
             raise HTTPException(status_code=503, detail="Camera unavailable") from exc
+
+    @router.get("/snapshot/{snapshot_id}")
+    async def get_saved_snapshot(snapshot_id: str) -> Response:
+        if db is None:
+            raise HTTPException(status_code=503, detail="Service not initialised")
+        snapshots_dir = Path(db._path).parent / "snapshots"
+        p = snapshots_dir / f"{snapshot_id}.jpg"
+        if not p.exists():
+            raise HTTPException(status_code=404, detail="Snapshot not found")
+        try:
+            jpeg = await asyncio.to_thread(p.read_bytes)
+            return Response(content=jpeg, media_type="image/jpeg")
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail="Error reading snapshot") from exc
 
     @router.get("/stream")
     async def stream() -> StreamingResponse:
