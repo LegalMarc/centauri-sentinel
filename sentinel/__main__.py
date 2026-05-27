@@ -131,6 +131,9 @@ async def _run(args: argparse.Namespace) -> None:
         await asyncio.gather(watcher_task, return_exceptions=True)
         if bot is not None:
             await bot.stop()
+        # Clean up the persistent MQTT status listener
+        if hasattr(printer, "close"):
+            await printer.close()
         await db.close()
 
 

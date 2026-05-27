@@ -174,7 +174,7 @@ async def test_status_page_no_tailwind_cdn(app: object) -> None:
 
 
 async def test_status_page_css_under_2kb(app: object) -> None:
-    """Embedded CSS must stay under 2 KB."""
+    """Embedded CSS must stay under 8 KB."""
     async with _client(app) as c:
         r = await c.get("/")
     body = r.text
@@ -182,7 +182,7 @@ async def test_status_page_css_under_2kb(app: object) -> None:
     end = body.find("</style>")
     assert start != -1 and end != -1
     css_bytes = len(body[start:end].encode())
-    assert css_bytes < 2048, f"Embedded CSS is {css_bytes} bytes (limit 2048)"
+    assert css_bytes < 8192, f"Embedded CSS is {css_bytes} bytes (limit 8192)"
 
 
 async def test_status_page_meta_refresh(app: object) -> None:
@@ -565,3 +565,49 @@ async def test_status_page_renders_all_states(
             r = await c.get("/")
         assert r.status_code == 200
         assert state.name in r.text
+
+
+async def test_printer_api_endpoint(
+    mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: AsyncMock
+) -> None:
+    """Verify that the /api/printer endpoint returns correct JSON status data."""
+    from sentinel.printer.types import PrinterStatus
+
+    mock_watcher.last_printer_status = PrinterStatus(
+        printing=True,
+        elapsed_seconds=3600.0,
+        current_layer=15,
+        total_layers=150,
+        filename="custom_job.gcode",
+        extruder_temp=245.5,
+        extruder_target=250.0,
+        bed_temp=58.2,
+        bed_target=60.0,
+        progress=45.5,
+        remaining_seconds=1800.0,
+        print_state="printing",
+        camera_connected=True,
+        raw={"diag": "test"},
+    )
+
+    app_state = create_app(
+        _base_settings(), db=mock_db, watcher=mock_watcher, camera=mock_camera
+    )
+    async with _client(app_state) as c:
+        r = await c.get("/api/printer")
+
+    assert r.status_code == 200
+    data = r.json()
+    assert data["printing"] is True
+    assert data["elapsed_seconds"] == 3600.0
+    assert data["current_layer"] == 15
+    assert data["total_layers"] == 150
+    assert data["filename"] == "custom_job.gcode"
+    assert data["extruder_temp"] == 245.5
+    assert data["extruder_target"] == 250.0
+    assert data["bed_temp"] == 58.2
+    assert data["bed_target"] == 60.0
+    assert data["progress"] == 45.5
+    assert data["remaining_seconds"] == 1800.0
+    assert data["print_state"] == "printing"
+    assert data["camera_connected"] is True

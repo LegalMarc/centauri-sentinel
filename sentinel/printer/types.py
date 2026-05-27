@@ -27,6 +27,24 @@ class PrinterStatus:
     # Filename of the current / last job; None when none loaded
     filename: str | None
 
+    # Extruder and bed temperatures
+    extruder_temp: float = 0.0
+    extruder_target: float = 0.0
+    bed_temp: float = 0.0
+    bed_target: float = 0.0
+
+    # Print progress percentage (0-100)
+    progress: float = 0.0
+
+    # Remaining print time in seconds
+    remaining_seconds: float = 0.0
+
+    # Human-readable state (e.g. printing, paused, idle)
+    print_state: str = "idle"
+
+    # Camera connectivity as reported by the printer
+    camera_connected: bool = False
+
     # Raw decoded payload for diagnostics
     raw: dict[str, Any] = field(default_factory=dict, compare=False, repr=False)
 

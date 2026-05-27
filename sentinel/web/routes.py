@@ -65,9 +65,37 @@ def make_router(
         p_status = watcher.last_printer_status
         printer_state = "Idle"
         print_elapsed = "—"
+        extruder_temp = 0.0
+        extruder_target = 0.0
+        bed_temp = 0.0
+        bed_target = 0.0
+        progress = 0.0
+        remaining_seconds = 0.0
+        print_state = "idle"
+        camera_connected = False
+        filename = "—"
+        current_layer = 0
+        total_layers = 0
+
         if p_status:
-            printer_state = "Printing" if p_status.printing else "Idle"
-            print_elapsed = f"{p_status.elapsed_seconds:.0f}s" if p_status.printing else "—"
+            print_state = p_status.print_state or (
+                "printing" if p_status.printing else "idle"
+            )
+            printer_state = print_state.capitalize()
+            is_active = p_status.printing or print_state == "paused"
+            print_elapsed = (
+                f"{p_status.elapsed_seconds:.0f}s" if is_active else "—"
+            )
+            extruder_temp = p_status.extruder_temp
+            extruder_target = p_status.extruder_target
+            bed_temp = p_status.bed_temp
+            bed_target = p_status.bed_target
+            progress = p_status.progress
+            remaining_seconds = p_status.remaining_seconds
+            camera_connected = p_status.camera_connected
+            filename = p_status.filename or "—"
+            current_layer = p_status.current_layer
+            total_layers = p_status.total_layers
 
         return templates.TemplateResponse(
             request,
@@ -80,8 +108,44 @@ def make_router(
                 "pauses": pauses,
                 "printer_state": printer_state,
                 "print_elapsed": print_elapsed,
+                "extruder_temp": extruder_temp,
+                "extruder_target": extruder_target,
+                "bed_temp": bed_temp,
+                "bed_target": bed_target,
+                "progress": progress,
+                "remaining_seconds": remaining_seconds,
+                "print_state": print_state,
+                "camera_connected": camera_connected,
+                "filename": filename,
+                "current_layer": current_layer,
+                "total_layers": total_layers,
             },
         )
+
+    @router.get("/api/printer")
+    async def printer_api() -> Response:
+        if watcher is None:
+            raise HTTPException(status_code=503, detail="Service not initialised")
+        p_status = watcher.last_printer_status
+        if not p_status:
+            return Response(content='{"status": "unknown"}', media_type="application/json")
+
+        data = {
+            "printing": p_status.printing,
+            "elapsed_seconds": p_status.elapsed_seconds,
+            "current_layer": p_status.current_layer,
+            "total_layers": p_status.total_layers,
+            "filename": p_status.filename,
+            "extruder_temp": p_status.extruder_temp,
+            "extruder_target": p_status.extruder_target,
+            "bed_temp": p_status.bed_temp,
+            "bed_target": p_status.bed_target,
+            "progress": p_status.progress,
+            "remaining_seconds": p_status.remaining_seconds,
+            "print_state": p_status.print_state,
+            "camera_connected": p_status.camera_connected,
+        }
+        return Response(content=json.dumps(data), media_type="application/json")
 
     @router.get("/snapshot")
     async def snapshot() -> Response:
