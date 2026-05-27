@@ -250,6 +250,7 @@ class PrinterClient:
                     username="elegoo",
                     password=self._access_code,
                     identifier=client_id,
+                    timeout=_TIMEOUT_S,
                 ) as client:
                     await client.subscribe("elegoo/+/api_status")
                     delay = 0.5  # reset backoff on successful connect

@@ -796,6 +796,7 @@ async def test_paused_externally_transitions_to_paused_state() -> None:
 async def test_watchdog_resilient_to_database_exceptions() -> None:
     """The watchdog loop must not crash and terminate if a database exception occurs."""
     import aiosqlite
+
     notifier = _make_notifier()
     watcher, _, _, _, db = await _make_watcher(settings=_FAST_SETTINGS, notifiers=[notifier])
 
