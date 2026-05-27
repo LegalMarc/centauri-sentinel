@@ -820,3 +820,20 @@ async def test_watchdog_resilient_to_database_exceptions() -> None:
     # Verify that get_heartbeat was called, exception was swallowed, and watchdog task did not crash
     assert db.get_heartbeat.call_count >= 2
     assert watcher.state == WatcherState.IDLE
+
+
+async def test_confirm_count_resets_on_external_pause() -> None:
+    """If the printer is paused externally, confirm_count must reset to 0."""
+    watcher, printer, _, _, _ = await _make_watcher(printer_status=_printing_status())
+    watcher._confirm_count = 2
+
+    # Mock status to return print_state="paused"
+    status = _printing_status()
+    status.print_state = "paused"
+    printer.status = AsyncMock(return_value=status)
+
+    await watcher.tick()
+
+    assert watcher.state == WatcherState.PAUSED
+    assert watcher._confirm_count == 0
+

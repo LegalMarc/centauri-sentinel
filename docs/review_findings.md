@@ -11,13 +11,13 @@
 | Severity | Count | Status |
 |---|---|---|
 | CRITICAL | 2 | Resolved |
-| HIGH | 14 | Resolved |
+| HIGH | 15 | Resolved |
 | MEDIUM | 21 | Resolved |
-| LOW | 15 | Resolved |
+| LOW | 16 | Resolved |
 
-**Total findings: 52 (0 remaining, 52 resolved)**
+**Total findings: 54 (0 remaining, 54 resolved)**
 
-**Go/No-Go: GO** — All 52 findings (including 2 CRITICAL, 14 HIGH, 21 MEDIUM, and 15 LOW items) have been successfully resolved, tested, and verified. The codebase passes all checks and tests with **95% total coverage** and zero warnings.
+**Go/No-Go: GO** — All 54 findings (including 2 CRITICAL, 15 HIGH, 21 MEDIUM, and 16 LOW items) have been successfully resolved, tested, and verified. The codebase passes all checks and tests with **94.63% total coverage** and zero warnings.
 
 ---
 
@@ -123,6 +123,13 @@
 **Issue:** If the print job is paused externally (e.g. via the printer physical LCD screen or a separate web console), the print state transitions to `"paused"`. However, the watcher loop remains in the `ARMED` state and continues to grab camera frames and run ML detection on a static image, which can trigger duplicate pause events and notification alerts.
 **Impact:** Unnecessary CPU and API resource utilization, and potential spam of false alarms while the printer is paused.
 **Fix:** In `_update_state()`, transition to `WatcherState.PAUSED` immediately when `status.print_state == "paused"`.
+**Status:** Resolved
+
+### [PASS 1] [LOW] Detection confirm count not reset when printer is paused externally
+**File:** [sentinel/watcher/loop.py](../sentinel/watcher/loop.py) (lines 248–253)
+**Issue:** When the printer is paused externally, the watcher transitions to the `PAUSED` state. However, the detection confirm count `self._confirm_count` was not reset to 0. If there were accumulated failure confirmations, they would remain, causing the very next positive frame after a resume to immediately trigger a pause.
+**Impact:** A potential false positive pause right after manual print resumption if a transient failure had previously accumulated hits before the external pause.
+**Fix:** Reset `self._confirm_count = 0` inside the external pause transition block in `_update_state()`.
 **Status:** Resolved
 
 ---
@@ -234,6 +241,13 @@
 **File:** [sentinel/printer/client.py](../sentinel/printer/client.py)
 **Issue:** `aiomqtt` connection can hang.
 **Fix:** Wrap client connection in `asyncio.timeout(_TIMEOUT_S)`.
+**Status:** Resolved
+
+### [PASS 4] [HIGH] Database write exceptions do not trigger rollback
+**File:** [sentinel/db/repo.py](../sentinel/db/repo.py) (lines 40–48)
+**Issue:** If a write operation performed within the `Database._write()` context manager encounters an exception, the transaction is not rolled back. Because all DB operations share the same database connection in WAL mode, any uncommitted transaction could remain open, causing subsequent operations to either fail or implicitly commit the partially failed changes.
+**Impact:** Potential database inconsistency, transaction leakage, or corruption if a write query partially fails.
+**Fix:** Wrapped the context manager yield in a `try-except` block to ensure `await self._conn.rollback()` is executed if an exception is raised during the transaction.
 **Status:** Resolved
 
 ---

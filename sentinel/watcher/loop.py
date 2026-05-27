@@ -249,6 +249,7 @@ class WatcherLoop:
             if self.state != WatcherState.PAUSED:
                 logger.info("Printer paused externally — transitioning PAUSED")
                 self.state = WatcherState.PAUSED
+                self._confirm_count = 0
             return
 
         if elapsed < warmup:

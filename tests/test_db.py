@@ -365,3 +365,19 @@ async def test_print_jobs_crud_and_analytics(db: Database) -> None:
     assert summary["total_filament_g"] == 20.5
     assert summary["total_pauses"] == 3
     assert summary["avg_duration_seconds"] == 600.0
+
+
+async def test_write_exception_rolls_back(db: Database) -> None:
+    try:
+        async with db._write() as conn:
+            await conn.execute(
+                "INSERT INTO runtime_settings (key, value) VALUES ('test_rollback', 'val')"
+            )
+            # Invalid SQL to trigger an exception
+            await conn.execute("INSERT INTO non_existent_table (foo) VALUES ('bar')")
+    except Exception:
+        pass
+
+    val = await db.get_setting("test_rollback")
+    assert val is None
+

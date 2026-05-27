@@ -43,8 +43,12 @@ class Database:
         # connection thread and SQLite WAL provides snapshot isolation.
         async with self._lock:
             assert self._conn is not None, "Database.connect() was not called"
-            yield self._conn
-            await self._conn.commit()
+            try:
+                yield self._conn
+                await self._conn.commit()
+            except Exception:
+                await self._conn.rollback()
+                raise
 
     @property
     def _db(self) -> aiosqlite.Connection:
