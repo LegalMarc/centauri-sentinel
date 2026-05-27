@@ -256,18 +256,22 @@ class Database:
         ) as cur:
             row = await cur.fetchone()
             res = dict(row) if row else {}
-            
+
             total = res.get("total_jobs") or 0
             completed = res.get("completed_jobs") or 0
             success_rate = (completed / total * 100) if total > 0 else 0.0
-            
+
             # Average duration of completed prints
             async with self._db.execute(
                 "SELECT AVG(duration_seconds) as avg_duration FROM print_jobs"
                 " WHERE status = 'completed' AND duration_seconds IS NOT NULL"
             ) as cur_avg:
                 row_avg = await cur_avg.fetchone()
-                avg_duration = row_avg["avg_duration"] if row_avg and row_avg["avg_duration"] is not None else 0.0
+                avg_duration = (
+                    row_avg["avg_duration"]
+                    if row_avg and row_avg["avg_duration"] is not None
+                    else 0.0
+                )
 
             return {
                 "total_prints": total,
@@ -276,4 +280,3 @@ class Database:
                 "total_pauses": res.get("total_pauses") or 0,
                 "avg_duration_seconds": avg_duration,
             }
-

@@ -286,9 +286,7 @@ class PrinterClient:
                     if stream_empty or not has_received:
                         raise PrinterProtocolError("MQTT stream ended without a status message")
 
-                    logger.debug(
-                        "Printer MQTT status stream ended cleanly. Reconnecting..."
-                    )
+                    logger.debug("Printer MQTT status stream ended cleanly. Reconnecting...")
                     await asyncio.sleep(delay)
                     delay = min(delay * 2, 30.0)
             except asyncio.CancelledError:

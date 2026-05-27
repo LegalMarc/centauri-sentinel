@@ -11,13 +11,13 @@
 | Severity | Count | Status |
 |---|---|---|
 | CRITICAL | 2 | Resolved |
-| HIGH | 10 | Resolved |
-| MEDIUM | 17 | Resolved |
-| LOW | 11 | Resolved |
+| HIGH | 12 | Resolved |
+| MEDIUM | 20 | Resolved |
+| LOW | 13 | Resolved |
 
-**Total findings: 40 (0 remaining, 40 resolved)**
+**Total findings: 47 (0 remaining, 47 resolved)**
 
-**Go/No-Go: GO** — All 40 findings (including 2 CRITICAL, 10 HIGH, 17 MEDIUM, and 11 LOW items) have been successfully resolved, tested, and verified. The codebase passes all checks and tests with **95.05% total coverage** and zero warnings.
+**Go/No-Go: GO** — All 47 findings (including 2 CRITICAL, 12 HIGH, 20 MEDIUM, and 13 LOW items) have been successfully resolved, tested, and verified. The codebase passes all checks and tests with **95.37% total coverage** and zero warnings.
 
 ---
 
@@ -28,6 +28,13 @@
 **Issue:** When the printer is paused due to a confirmed detection, the watcher transitions to the `PAUSED` state. However, when the operator manually resumes the print (via `/resume` or the inline "Resume" button), the bot only sends the MQTT resume command to the printer. The watcher remains stuck in the `PAUSED` state. In this state, the watcher loop refuses to call `_check_frame()`, meaning failure detection is silently disabled for the remainder of the active print.
 **Impact:** A print resumed after a false positive or temporary issue runs completely unmonitored, defeating the safety guarantees of sentinel.
 **Fix:** Modify `cmd_resume` and `handle_callback` in `sentinel/bot/commands.py` to check if the watcher is in the `PAUSED` state and transition it back to `ARMED` upon successful resumption of the print.
+**Status:** Resolved
+
+### [PASS 1] [HIGH] Watcher state trapped in PAUSED when printer is resumed from screen
+**File:** [sentinel/watcher/loop.py](file:///Users/mhm/Documents/Dev/centauri-sentinel/sentinel/watcher/loop.py)
+**Issue:** If the watcher is in the `PAUSED` state and the user resumes the print job directly using the physical LCD screen on the printer, `status.print_state` transitions back to `"printing"`, but the watcher remains stuck in the `PAUSED` state because `_update_state()` does not auto-recover from `PAUSED`.
+**Impact:** Failure detection remains silently disabled for the remainder of the print.
+**Fix:** Added automatic transition from `WatcherState.PAUSED` to `WatcherState.ARMED` inside `_update_state()` when `status.print_state == "printing"`.
 **Status:** Resolved
 
 ### [PASS 1] [HIGH] CAMERA_OFFLINE state has no recovery path
@@ -160,6 +167,13 @@
 **Fix:** Added module-level task tracking and a `cancel_background_tasks()` helper.
 **Status:** Resolved
 
+### [PASS 3] [MEDIUM] Event loop blocked by synchronous `bcrypt.checkpw()`
+**File:** [sentinel/web/auth.py](file:///Users/mhm/Documents/Dev/centauri-sentinel/sentinel/web/auth.py)
+**Issue:** The synchronous `bcrypt.checkpw()` handles hashing during Basic Authentication, which blocks the central `asyncio` event loop for 100–300 ms on every request attempt.
+**Impact:** Slows server event loop responsiveness for concurrent camera streaming, watchdogs, and status updates during auth attempts.
+**Fix:** Modified `_check_credentials` to be async and run the CPU-heavy hashing operation in a separate thread pool using `asyncio.to_thread`.
+**Status:** Resolved
+
 ---
 
 ## Pass 4 — Resilience & Error Handling
@@ -168,6 +182,13 @@
 **File:** [sentinel/db/migrate.py](file:///Users/mhm/Documents/Dev/centauri-sentinel/sentinel/db/migrate.py)
 **Issue:** Drops tables without a wrapping transaction.
 **Fix:** Wrap the drops in `async with db.execute("BEGIN"): ... await db.commit()`.
+**Status:** Resolved
+
+### [PASS 4] [HIGH] ML container callback hostname defaults to 0.0.0.0 in Docker
+**File:** [sentinel/ml/client.py](file:///Users/mhm/Documents/Dev/centauri-sentinel/sentinel/ml/client.py)
+**Issue:** The sentinel generates callback URLs using the `BIND_HOST` IP address. If this defaults to `"0.0.0.0"`, the URL is sent as `http://0.0.0.0:8000/__internal_snapshot/<nonce>`. The `obico-ml` container cannot resolve `0.0.0.0` back to the sentinel host, causing the ML callback request to fail.
+**Impact:** Image analysis fails in default docker compose deployments.
+**Fix:** Automatically check if the bind host is `"0.0.0.0"` and resolve it to `"sentinel"` if running inside a Docker container (detecting `/.dockerenv` presence) or `"127.0.0.1"` if running natively.
 **Status:** Resolved
 
 ### [PASS 4] [MEDIUM] `/readyz` uses private `db._db` attribute
@@ -204,6 +225,13 @@
 **Fix:** Introduce a `cleanup_resources` async fixture that keeps track of active `Database` connections and closes them gracefully at test completion.
 **Status:** Resolved
 
+### [PASS 5] [MEDIUM] `bot/commands.py` and `web/routes.py` coverage below 85%
+**File:** [tests/test_bot.py](file:///Users/mhm/Documents/Dev/centauri-sentinel/tests/test_bot.py), [tests/test_web.py](file:///Users/mhm/Documents/Dev/centauri-sentinel/tests/test_web.py)
+**Issue:** Both command and web route modules hovered at 79% test coverage, missing the minimum 85% requirement.
+**Impact:** Risk of untested code paths in key UI rendering and Telegram interaction logic.
+**Fix:** Expanded `test_bot.py` and `test_web.py` to cover detailed printer status states (printing, active, remaining duration hours vs. minutes, exceptions in controllers, unauthorized callback queries, and fallback/abort routes). Commands.py coverage raised to **94%**, and Routes.py to **93%**. Total codebase coverage is now **95.37%**.
+**Status:** Resolved
+
 ### [PASS 5] [LOW] DeprecationWarning on request cookies in test_web.py
 **File:** [tests/test_web.py](file:///Users/mhm/Documents/Dev/centauri-sentinel/tests/test_web.py)
 **Issue:** httpx warned about per-request `cookies=` parameter usage.
@@ -218,6 +246,13 @@
 **File:** [Dockerfile](file:///Users/mhm/Documents/Dev/centauri-sentinel/Dockerfile)
 **Issue:** `python:3.12-slim` is mutable.
 **Fix:** Pin base images to `python:3.12.8-slim`.
+**Status:** Resolved
+
+### [PASS 6] [MEDIUM] obico-ml Dockerfile base image `python:3.10-slim` mutable
+**File:** [docker/obico-ml/Dockerfile](file:///Users/mhm/Documents/Dev/centauri-sentinel/docker/obico-ml/Dockerfile)
+**Issue:** The base Python image was specified as mutable `python:3.10-slim`.
+**Impact:** Non-deterministic docker build caches and potential runtime drift when redeploying the ML container.
+**Fix:** Pinned the base image to `python:3.10.16-slim` to match standard pinning practices.
 **Status:** Resolved
 
 ### [PASS 6] [MEDIUM] Named volume first-mount ownership — non-root user cannot write
@@ -240,6 +275,13 @@
 **File:** [README.md](file:///Users/mhm/Documents/Dev/centauri-sentinel/README.md)
 **Issue:** Missing licensing information for Obico.
 **Fix:** Add "Third-party license acknowledgements" section noting the derived work under AGPL-3.0.
+**Status:** Resolved
+
+### [PASS 7] [LOW] `healthcheck.py` docstring refers to `/healthz` instead of `/readyz`
+**File:** [sentinel/healthcheck.py](file:///Users/mhm/Documents/Dev/centauri-sentinel/sentinel/healthcheck.py)
+**Issue:** Docstring incorrectly described checking `/healthz` to determine Docker container health status, whereas the code checks the `/readyz` endpoint.
+**Impact:** Confuses developers inspecting container health configurations.
+**Fix:** Corrected docstring to accurately mention `/readyz`.
 **Status:** Resolved
 
 ---
@@ -271,4 +313,18 @@
 ### [PASS 8] [LOW] `pyproject.toml` has duplicate dev dependency groups
 **File:** [pyproject.toml](file:///Users/mhm/Documents/Dev/centauri-sentinel/pyproject.toml)
 **Fix:** Consolidate dev dependencies.
+**Status:** Resolved
+
+### [PASS 8] [LOW] mypy `filters.Text` list typing error in `runner.py`
+**File:** [sentinel/bot/runner.py](file:///Users/mhm/Documents/Dev/centauri-sentinel/sentinel/bot/runner.py)
+**Issue:** mypy failed with: `Argument 1 to "Text" has incompatible type "str"; expected "list[str] | tuple[str, ...] | None"`.
+**Impact:** Mypy build step failure.
+**Fix:** Wrapped the individual text strings in lists inside the `MessageHandler(filters.Text([...]))` declarations.
+**Status:** Resolved
+
+### [PASS 8] [LOW] Ruff styling and code formatting issues (25 warnings)
+**File:** Multiple files
+**Issue:** Ruff identified 25 style issues (lines too long, nested if statements, unchained raise exceptions).
+**Impact:** Non-compliant lint checks.
+**Fix:** Consolidated nested checks into single compound `if` blocks, applied `from exc` to HTTPExceptions, removed blank line whitespace, and executed `ruff format`.
 **Status:** Resolved

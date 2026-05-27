@@ -88,6 +88,10 @@ async def _run(args: argparse.Namespace) -> None:
             "true" if settings.detection_enabled_default else "false",
         )
 
+    db_printer_ip = await db.get_setting("printer_ip")
+    if db_printer_ip:
+        settings.printer_ip = db_printer_ip
+
     camera = MjpegGrabber(settings)
     printer = PrinterClient(settings)
     ml = MlClient(settings)

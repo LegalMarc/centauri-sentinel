@@ -122,7 +122,6 @@ class BotCommandHandler:
         if not self._authorized(update):
             return
         assert update.message is not None
-        heartbeat = await self._db.get_heartbeat()
         detection_enabled = await self._db.get_setting("detection_enabled", "true")
         recent = await self._db.get_recent_detections(limit=1)
         last_det = recent[0] if recent else None
@@ -181,15 +180,12 @@ class BotCommandHandler:
         try:
             jpeg = await self._camera.grab()
             await update.message.reply_photo(
-                photo=jpeg,
-                caption=caption,
-                reply_markup=_TUI_KEYBOARD
+                photo=jpeg, caption=caption, reply_markup=_TUI_KEYBOARD
             )
         except Exception:
             logger.exception("Failed to grab snapshot for Telegram status")
             await update.message.reply_text(
-                caption + "\n\n⚠️ Chamber feed unavailable.",
-                reply_markup=_TUI_KEYBOARD
+                caption + "\n\n⚠️ Chamber feed unavailable.", reply_markup=_TUI_KEYBOARD
             )
 
     async def cmd_snapshot(self, update: Update, context: Any) -> None:
@@ -212,7 +208,9 @@ class BotCommandHandler:
         except Exception as exc:
             logger.exception("Pause failed via Telegram command")
             await self._db.record_pause(source="telegram", result="error", error_message=str(exc))
-            await update.message.reply_text("Pause failed — check the printer.", reply_markup=_TUI_KEYBOARD)
+            await update.message.reply_text(
+                "Pause failed — check the printer.", reply_markup=_TUI_KEYBOARD
+            )
             return
         if sent:
             await self._db.record_pause(source="telegram", result="ok")
@@ -221,7 +219,9 @@ class BotCommandHandler:
             await self._db.record_pause(
                 source="telegram", result="error", error_message="Printer already paused"
             )
-            await update.message.reply_text("Printer is already paused.", reply_markup=_TUI_KEYBOARD)
+            await update.message.reply_text(
+                "Printer is already paused.", reply_markup=_TUI_KEYBOARD
+            )
 
     async def cmd_resume(self, update: Update, context: Any) -> None:
         if not self._authorized(update):
@@ -230,12 +230,15 @@ class BotCommandHandler:
         try:
             await self._printer.resume()
             from sentinel.watcher.state import WatcherState
+
             if self._watcher.state == WatcherState.PAUSED:
                 self._watcher.state = WatcherState.ARMED
             await update.message.reply_text("Print resumed.", reply_markup=_TUI_KEYBOARD)
         except Exception:
             logger.exception("Resume failed via Telegram command")
-            await update.message.reply_text("Resume failed — check the printer.", reply_markup=_TUI_KEYBOARD)
+            await update.message.reply_text(
+                "Resume failed — check the printer.", reply_markup=_TUI_KEYBOARD
+            )
 
     async def cmd_stop(self, update: Update, context: Any) -> None:
         if not self._authorized(update):
@@ -244,7 +247,9 @@ class BotCommandHandler:
         user = update.message.from_user
         assert user is not None
         self._pending_stops[user.id] = time.monotonic()
-        await update.message.reply_text("Reply /confirm within 30 s to cancel the print.", reply_markup=_TUI_KEYBOARD)
+        await update.message.reply_text(
+            "Reply /confirm within 30 s to cancel the print.", reply_markup=_TUI_KEYBOARD
+        )
 
     async def cmd_confirm(self, update: Update, context: Any) -> None:
         if not self._authorized(update):
@@ -258,7 +263,7 @@ class BotCommandHandler:
             self._pending_stops.pop(user.id, None)
             await update.message.reply_text(
                 "No active /stop request (or it expired). Use /stop first.",
-                reply_markup=_TUI_KEYBOARD
+                reply_markup=_TUI_KEYBOARD,
             )
             return
 
@@ -268,7 +273,9 @@ class BotCommandHandler:
             await update.message.reply_text("Print cancelled.", reply_markup=_TUI_KEYBOARD)
         except Exception:
             logger.exception("Stop failed via Telegram /confirm")
-            await update.message.reply_text("Stop failed — check the printer.", reply_markup=_TUI_KEYBOARD)
+            await update.message.reply_text(
+                "Stop failed — check the printer.", reply_markup=_TUI_KEYBOARD
+            )
 
     async def cmd_enable(self, update: Update, context: Any) -> None:
         if not self._authorized(update):
@@ -304,6 +311,7 @@ class BotCommandHandler:
             try:
                 await self._printer.resume()
                 from sentinel.watcher.state import WatcherState
+
                 if self._watcher.state == WatcherState.PAUSED:
                     self._watcher.state = WatcherState.ARMED
                 await cq.edit_message_text("Print resumed.")

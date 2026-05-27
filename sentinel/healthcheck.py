@@ -1,4 +1,4 @@
-"""Health-check probe: exits 0 if /healthz responds 200, 1 otherwise.
+"""Health-check probe: exits 0 if /readyz responds 200, 1 otherwise.
 
 Usage (from Dockerfile / compose healthcheck):
     python -m sentinel.healthcheck

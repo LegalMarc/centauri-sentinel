@@ -154,7 +154,7 @@ async def test_bot_runner_stop_when_not_started() -> None:
 
 
 async def test_bot_runner_all_handlers_added() -> None:
-    """Verify all 9 command handlers + callback query handler + 5 reply keyboard handlers are registered."""
+    """Verify registration of all command, callback query, and keyboard handlers."""
     handler = _make_handler()
     app, builder = _make_ptb_app()
 

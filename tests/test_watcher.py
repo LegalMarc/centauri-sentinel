@@ -750,5 +750,3 @@ async def test_print_job_tracking_lifecycle() -> None:
     second_job = recent[0]
     assert second_job["filename"] == "second_job.gcode"
     assert second_job["status"] == "failed"
-
-

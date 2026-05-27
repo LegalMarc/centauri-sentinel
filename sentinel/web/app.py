@@ -43,7 +43,7 @@ def create_app(
         watcher,
         camera,
         templates,
-        stall_seconds=settings.watcher_stall_seconds,
+        settings,
     )
     app.include_router(router)
 

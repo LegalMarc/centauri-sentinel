@@ -118,7 +118,7 @@ def test_parse_status_thumbnail_carbon2() -> None:
             "heater_bed": {"temperature": 60.0, "target": 60.0},
             "external_device": {"camera": True},
             "thumbnail": "base64encodedresult",
-        }
+        },
     }
     status = _parse_status(payload)
     assert status.thumbnail_base64 == "base64encodedresult"

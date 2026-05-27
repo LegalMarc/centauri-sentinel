@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 
     from fastapi.templating import Jinja2Templates
 
+    from sentinel.config import Settings
     from sentinel.db.repo import Database
 
 logger = logging.getLogger(__name__)
@@ -49,10 +50,10 @@ def make_router(
     watcher: Any,
     camera: Any,
     templates: Jinja2Templates | None,
-    *,
-    stall_seconds: int = 60,
+    settings: Settings,
 ) -> APIRouter:
     router = APIRouter()
+    stall_seconds = settings.watcher_stall_seconds
 
     @router.get("/", response_class=HTMLResponse)
     async def status_page(request: Request) -> Response:
@@ -65,7 +66,46 @@ def make_router(
         pauses = await db.get_recent_pauses(limit=10)
         recent_jobs = await db.get_recent_jobs(limit=20)
         analytics = await db.get_analytics_summary()
-        detection_enabled = (await db.get_setting("detection_enabled", "true") == "true")
+        detection_enabled = await db.get_setting("detection_enabled", "true") == "true"
+
+        # Get settings from DB (with config defaults)
+        printer_ip = await db.get_setting("printer_ip", settings.printer_ip) or settings.printer_ip
+
+        ml_confirm_count_str = await db.get_setting(
+            "ml_confirm_count", str(settings.ml_confirm_count)
+        )
+        ml_confirm_count = int(
+            ml_confirm_count_str if ml_confirm_count_str is not None else settings.ml_confirm_count
+        )
+
+        ml_score_threshold_str = await db.get_setting(
+            "ml_score_threshold", str(settings.ml_score_threshold)
+        )
+        ml_score_threshold = float(
+            ml_score_threshold_str
+            if ml_score_threshold_str is not None
+            else settings.ml_score_threshold
+        )
+
+        ml_poll_interval_str = await db.get_setting(
+            "ml_poll_interval_seconds", str(settings.ml_poll_interval_seconds)
+        )
+        ml_poll_interval_seconds = int(
+            ml_poll_interval_str
+            if ml_poll_interval_str is not None
+            else settings.ml_poll_interval_seconds
+        )
+
+        detection_warmup_str = await db.get_setting(
+            "detection_warmup_seconds", str(settings.detection_warmup_seconds)
+        )
+        detection_warmup_seconds = int(
+            detection_warmup_str
+            if detection_warmup_str is not None
+            else settings.detection_warmup_seconds
+        )
+
+        from sentinel import __version__
 
         # Map snapshot_path to snapshot_id for the Jinja template
         for d in detections:
@@ -90,14 +130,10 @@ def make_router(
         thumbnail_base64 = None
 
         if p_status:
-            print_state = p_status.print_state or (
-                "printing" if p_status.printing else "idle"
-            )
+            print_state = p_status.print_state or ("printing" if p_status.printing else "idle")
             printer_state = print_state.capitalize()
             is_active = p_status.printing or print_state == "paused"
-            print_elapsed = (
-                f"{p_status.elapsed_seconds:.0f}s" if is_active else "—"
-            )
+            print_elapsed = f"{p_status.elapsed_seconds:.0f}s" if is_active else "—"
             extruder_temp = p_status.extruder_temp
             extruder_target = p_status.extruder_target
             bed_temp = p_status.bed_temp
@@ -136,6 +172,12 @@ def make_router(
                 "current_layer": current_layer,
                 "total_layers": total_layers,
                 "thumbnail_base64": thumbnail_base64,
+                "printer_ip": printer_ip,
+                "ml_confirm_count": ml_confirm_count,
+                "ml_score_threshold": ml_score_threshold,
+                "ml_poll_interval_seconds": ml_poll_interval_seconds,
+                "detection_warmup_seconds": detection_warmup_seconds,
+                "version": __version__,
             },
         )
 
@@ -174,16 +216,20 @@ def make_router(
         except Exception as exc:
             logger.exception("Pause failed via Web API")
             await db.record_pause(source="web", result="error", error_message=str(exc))
-            raise HTTPException(status_code=500, detail=f"Pause failed: {exc}")
+            raise HTTPException(status_code=500, detail=f"Pause failed: {exc}") from exc
         if sent:
             await db.record_pause(source="web", result="ok")
-            return Response(content='{"status": "ok", "message": "Print paused"}', media_type="application/json")
+            return Response(
+                content='{"status": "ok", "message": "Print paused"}', media_type="application/json"
+            )
         else:
-            await db.record_pause(source="web", result="error", error_message="Printer already paused")
+            await db.record_pause(
+                source="web", result="error", error_message="Printer already paused"
+            )
             return Response(
                 content='{"status": "error", "message": "Printer already paused"}',
                 status_code=400,
-                media_type="application/json"
+                media_type="application/json",
             )
 
     @router.post("/api/control/resume")
@@ -193,12 +239,16 @@ def make_router(
         try:
             await watcher.printer.resume()
             from sentinel.watcher.state import WatcherState
+
             if watcher.state == WatcherState.PAUSED:
                 watcher.state = WatcherState.ARMED
-            return Response(content='{"status": "ok", "message": "Print resumed"}', media_type="application/json")
+            return Response(
+                content='{"status": "ok", "message": "Print resumed"}',
+                media_type="application/json",
+            )
         except Exception as exc:
             logger.exception("Resume failed via Web API")
-            raise HTTPException(status_code=500, detail=f"Resume failed: {exc}")
+            raise HTTPException(status_code=500, detail=f"Resume failed: {exc}") from exc
 
     @router.post("/api/control/stop")
     async def control_stop() -> Response:
@@ -206,16 +256,19 @@ def make_router(
             raise HTTPException(status_code=503, detail="Service not initialised")
         try:
             await watcher.printer.stop()
-            return Response(content='{"status": "ok", "message": "Print cancelled"}', media_type="application/json")
+            return Response(
+                content='{"status": "ok", "message": "Print cancelled"}',
+                media_type="application/json",
+            )
         except Exception as exc:
             logger.exception("Stop failed via Web API")
-            raise HTTPException(status_code=500, detail=f"Stop failed: {exc}")
+            raise HTTPException(status_code=500, detail=f"Stop failed: {exc}") from exc
 
     @router.post("/api/control/snooze")
     async def control_snooze(request: Request) -> Response:
         if db is None:
             raise HTTPException(status_code=503, detail="Service not initialised")
-        
+
         seconds = 600
         try:
             body = await request.json()
@@ -223,17 +276,113 @@ def make_router(
                 seconds = int(body["seconds"])
         except Exception:
             pass
-            
+
         await db.set_setting("detection_enabled", "false")
-        
+
         task = asyncio.create_task(_re_enable_after(db, float(seconds)))
         _web_background_tasks.add(task)
         task.add_done_callback(_web_background_tasks.discard)
-        
+
         return Response(
-            content=json.dumps({"status": "ok", "message": f"Detection snoozed for {seconds} seconds"}),
-            media_type="application/json"
+            content=json.dumps(
+                {"status": "ok", "message": f"Detection snoozed for {seconds} seconds"}
+            ),
+            media_type="application/json",
         )
+
+    @router.post("/api/settings")
+    async def update_settings(request: Request) -> Response:
+        if db is None or watcher is None:
+            raise HTTPException(status_code=503, detail="Service not initialised")
+        try:
+            body = await request.json()
+            printer_ip = body.get("printer_ip")
+            ml_confirm_count = body.get("ml_confirm_count")
+            ml_score_threshold = body.get("ml_score_threshold")
+            ml_poll_interval_seconds = body.get("ml_poll_interval_seconds")
+            detection_warmup_seconds = body.get("detection_warmup_seconds")
+
+            if printer_ip is not None:
+                printer_ip = printer_ip.strip()
+                if not printer_ip:
+                    raise HTTPException(
+                        status_code=400, detail="Printer IP/Hostname cannot be empty"
+                    )
+
+                # Verify IP or Domain hostname format
+                import ipaddress
+                import re
+
+                is_valid = False
+                try:
+                    ipaddress.ip_address(printer_ip)
+                    is_valid = True
+                except ValueError:
+                    pass
+                if not is_valid and not re.match(r"^[0-9.]+$", printer_ip):
+                    hostname_regex = re.compile(
+                        r"^(?:[a-zA-Z0-9]"
+                        r"(?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)*"
+                        r"[a-zA-Z0-9]"
+                        r"(?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$"
+                    )
+                    if hostname_regex.match(printer_ip):
+                        is_valid = True
+                if not is_valid:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Invalid IP address or hostname format: {printer_ip}",
+                    )
+
+                await db.set_setting("printer_ip", printer_ip)
+                watcher.printer._host = printer_ip
+                watcher.camera._url = f"http://{printer_ip}:{settings.printer_mjpeg_port}{settings.printer_mjpeg_path}"
+                if hasattr(watcher.printer, "close"):
+                    await watcher.printer.close()
+
+            if ml_confirm_count is not None:
+                ml_confirm_count_val = int(ml_confirm_count)
+                if ml_confirm_count_val < 1:
+                    raise HTTPException(status_code=400, detail="Confirm count must be at least 1")
+                await db.set_setting("ml_confirm_count", str(ml_confirm_count_val))
+
+            if ml_score_threshold is not None:
+                ml_score_threshold_val = float(ml_score_threshold)
+                if not (0.0 <= ml_score_threshold_val <= 1.0):
+                    raise HTTPException(
+                        status_code=400, detail="Score threshold must be between 0.0 and 1.0"
+                    )
+                await db.set_setting("ml_score_threshold", str(ml_score_threshold_val))
+
+            if ml_poll_interval_seconds is not None:
+                ml_poll_interval_seconds_val = int(ml_poll_interval_seconds)
+                if ml_poll_interval_seconds_val < 1:
+                    raise HTTPException(
+                        status_code=400, detail="Poll interval must be at least 1 second"
+                    )
+                await db.set_setting("ml_poll_interval_seconds", str(ml_poll_interval_seconds_val))
+
+            if detection_warmup_seconds is not None:
+                detection_warmup_seconds_val = int(detection_warmup_seconds)
+                if detection_warmup_seconds_val < 0:
+                    raise HTTPException(
+                        status_code=400, detail="Warmup duration cannot be negative"
+                    )
+                await db.set_setting("detection_warmup_seconds", str(detection_warmup_seconds_val))
+
+            return Response(
+                content=json.dumps({"status": "ok", "message": "Settings updated successfully"}),
+                media_type="application/json",
+            )
+        except HTTPException:
+            raise
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid parameter format: {exc}") from exc
+        except Exception as exc:
+            logger.exception("Failed to update settings")
+            raise HTTPException(
+                status_code=500, detail=f"Failed to update settings: {exc}"
+            ) from exc
 
     @router.get("/snapshot")
     async def snapshot() -> Response:

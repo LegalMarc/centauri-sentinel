@@ -435,3 +435,103 @@ async def test_cancel_background_tasks() -> None:
 
     assert task.cancelled()
     assert task not in _background_tasks
+
+
+async def test_cmd_status_with_printer_status() -> None:
+    from sentinel.printer.types import PrinterStatus
+
+    handler = _make_handler()
+    handler._watcher.last_printer_status = PrinterStatus(
+        printing=True,
+        elapsed_seconds=3600.0,
+        current_layer=25,
+        total_layers=100,
+        filename="test_print.gcode",
+        extruder_temp=220.0,
+        extruder_target=220.0,
+        bed_temp=60.0,
+        bed_target=60.0,
+        progress=25.0,
+        remaining_seconds=7200.0,
+        print_state="printing",
+        camera_connected=True,
+    )
+    update = _make_update()
+    await handler.cmd_status(update, None)
+    assert update.message.reply_photo.called
+    caption = update.message.reply_photo.call_args[1]["caption"]
+    assert "test_print.gcode" in caption
+    assert "2h 0m 0s" in caption
+    assert "25.0%" in caption
+
+    # Test when remaining time is less than 1 hour (minutes/seconds only)
+    handler._watcher.last_printer_status.remaining_seconds = 1500.0
+    await handler.cmd_status(update, None)
+    caption2 = update.message.reply_photo.call_args[1]["caption"]
+    assert "25m 0s" in caption2
+
+    # Test camera failure path
+    handler._camera.grab.side_effect = RuntimeError("offline")
+    await handler.cmd_status(update, None)
+    update.message.reply_text.assert_called_once()
+    assert "Chamber feed unavailable" in update.message.reply_text.call_args[0][0]
+
+
+async def test_authorized_edge_cases() -> None:
+    handler = _make_handler()
+
+    # 1. callback query message is None
+    update_cq_no_msg = MagicMock()
+    update_cq_no_msg.message = None
+    cq = MagicMock()
+    cq.from_user = MagicMock()
+    cq.from_user.id = _AUTHORIZED_USER
+    cq.message = None
+    cq.answer = AsyncMock()
+    update_cq_no_msg.callback_query = cq
+    assert handler._authorized(update_cq_no_msg) is False
+
+    # 2. user is None in regular message
+    update_no_user = MagicMock()
+    msg = MagicMock()
+    msg.chat_id = _AUTHORIZED_CHAT
+    msg.from_user = None
+    update_no_user.message = msg
+    update_no_user.callback_query = None
+    assert handler._authorized(update_no_user) is False
+
+    # 3. neither message nor callback_query
+    update_empty = MagicMock()
+    update_empty.message = None
+    update_empty.callback_query = None
+    assert handler._authorized(update_empty) is False
+
+
+async def test_callback_resume_failure_edits_text() -> None:
+    printer = AsyncMock()
+    printer.resume.side_effect = RuntimeError("resume fail")
+    handler = _make_handler(printer=printer)
+    update = _make_update(callback_data="resume")
+    await handler.handle_callback(update, None)
+    update.callback_query.edit_message_text.assert_called_once()
+    assert "failed" in update.callback_query.edit_message_text.call_args[0][0].lower()
+
+
+async def test_cmd_pause_already_paused() -> None:
+    printer = AsyncMock()
+    printer.pause.return_value = False
+    handler = _make_handler(printer=printer)
+    update = _make_update()
+    await handler.cmd_pause(update, None)
+    update.message.reply_text.assert_called_once()
+    assert "already" in update.message.reply_text.call_args[0][0].lower()
+
+
+async def test_cmd_resume_failure() -> None:
+    printer = AsyncMock()
+    printer.resume.side_effect = RuntimeError("resume fail")
+    handler = _make_handler(printer=printer)
+    update = _make_update()
+    await handler.cmd_resume(update, None)
+    update.message.reply_text.assert_called_once()
+    assert "failed" in update.message.reply_text.call_args[0][0].lower()

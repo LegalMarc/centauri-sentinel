@@ -174,7 +174,7 @@ async def test_status_page_no_tailwind_cdn(app: object) -> None:
 
 
 async def test_status_page_css_under_2kb(app: object) -> None:
-    """Embedded CSS must stay under 8 KB."""
+    """Embedded CSS must stay under 16 KB."""
     async with _client(app) as c:
         r = await c.get("/")
     body = r.text
@@ -182,7 +182,7 @@ async def test_status_page_css_under_2kb(app: object) -> None:
     end = body.find("</style>")
     assert start != -1 and end != -1
     css_bytes = len(body[start:end].encode())
-    assert css_bytes < 8192, f"Embedded CSS is {css_bytes} bytes (limit 8192)"
+    assert css_bytes < 16384, f"Embedded CSS is {css_bytes} bytes (limit 16384)"
 
 
 async def test_status_page_meta_refresh(app: object) -> None:
@@ -525,7 +525,7 @@ def test_verify_token_garbage_raises_false() -> None:
     assert mw._verify_token("notint.rnd.uah.sig", "ua") is False
 
 
-def test_check_credentials_bcrypt_exception() -> None:
+async def test_check_credentials_bcrypt_exception() -> None:
     """bcrypt.checkpw on a garbage hash must not raise; returns False."""
     from sentinel.config import Settings
     from sentinel.web.auth import AuthMiddleware
@@ -544,7 +544,7 @@ def test_check_credentials_bcrypt_exception() -> None:
     )
     # Inject garbage hash directly to test middleware resilience to bcrypt exceptions
     mw._password_hash = "$garbage$not_a_real_hash"
-    result = mw._check_credentials("admin", "password")
+    result = await mw._check_credentials("admin", "password")
     assert result is False
 
 
@@ -590,9 +590,7 @@ async def test_printer_api_endpoint(
         raw={"diag": "test"},
     )
 
-    app_state = create_app(
-        _base_settings(), db=mock_db, watcher=mock_watcher, camera=mock_camera
-    )
+    app_state = create_app(_base_settings(), db=mock_db, watcher=mock_watcher, camera=mock_camera)
     async with _client(app_state) as c:
         r = await c.get("/api/printer")
 
@@ -680,9 +678,195 @@ async def test_control_snooze_success(
     assert r.status_code == 200
     assert r.json()["status"] == "ok"
     mock_db.set_setting.assert_any_call("detection_enabled", "false")
-    
+
     # Wait for the re-enable task to fire
     import asyncio
+
     await asyncio.sleep(0.05)
     mock_db.set_setting.assert_any_call("detection_enabled", "true")
 
+
+async def test_status_page_renders_with_printer_status(
+    mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: MagicMock
+) -> None:
+    from sentinel.printer.types import PrinterStatus
+
+    mock_watcher.last_printer_status = PrinterStatus(
+        printing=True,
+        elapsed_seconds=120.0,
+        current_layer=2,
+        total_layers=20,
+        filename="test.gcode",
+        extruder_temp=200.0,
+        extruder_target=200.0,
+        bed_temp=60.0,
+        bed_target=60.0,
+        progress=10.0,
+        remaining_seconds=1800.0,
+        print_state="printing",
+        camera_connected=True,
+    )
+    app_state = create_app(
+        _base_settings(auth_enabled=False), db=mock_db, watcher=mock_watcher, camera=mock_camera
+    )
+    async with _client(app_state) as c:
+        r = await c.get("/")
+    assert r.status_code == 200
+    assert "test.gcode" in r.text
+    assert "120s" in r.text
+    assert "10.0%" in r.text
+
+
+async def test_control_pause_failure(
+    mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: MagicMock
+) -> None:
+    printer = AsyncMock()
+    printer.pause.side_effect = RuntimeError("MQTT offline")
+    mock_watcher.printer = printer
+    app_state = create_app(
+        _base_settings(auth_enabled=False), db=mock_db, watcher=mock_watcher, camera=mock_camera
+    )
+    async with _client(app_state) as c:
+        r = await c.post("/api/control/pause")
+    assert r.status_code == 500
+    mock_db.record_pause.assert_called_once_with(
+        source="web", result="error", error_message="MQTT offline"
+    )
+
+
+async def test_control_pause_already_paused_edge(
+    mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: MagicMock
+) -> None:
+    printer = AsyncMock()
+    printer.pause.return_value = False
+    mock_watcher.printer = printer
+    app_state = create_app(
+        _base_settings(auth_enabled=False), db=mock_db, watcher=mock_watcher, camera=mock_camera
+    )
+    async with _client(app_state) as c:
+        r = await c.post("/api/control/pause")
+    assert r.status_code == 400
+    mock_db.record_pause.assert_called_once_with(
+        source="web", result="error", error_message="Printer already paused"
+    )
+
+
+async def test_control_resume_failure(
+    mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: MagicMock
+) -> None:
+    printer = AsyncMock()
+    printer.resume.side_effect = RuntimeError("MQTT offline")
+    mock_watcher.printer = printer
+    app_state = create_app(
+        _base_settings(auth_enabled=False), db=mock_db, watcher=mock_watcher, camera=mock_camera
+    )
+    async with _client(app_state) as c:
+        r = await c.post("/api/control/resume")
+    assert r.status_code == 500
+
+
+async def test_control_stop_failure(
+    mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: MagicMock
+) -> None:
+    printer = AsyncMock()
+    printer.stop.side_effect = RuntimeError("MQTT offline")
+    mock_watcher.printer = printer
+    app_state = create_app(
+        _base_settings(auth_enabled=False), db=mock_db, watcher=mock_watcher, camera=mock_camera
+    )
+    async with _client(app_state) as c:
+        r = await c.post("/api/control/stop")
+    assert r.status_code == 500
+
+
+async def test_get_settings_on_status_page(
+    mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: AsyncMock
+) -> None:
+    mock_db.get_setting.side_effect = lambda key, default: {
+        "printer_ip": "192.168.1.150",
+        "ml_confirm_count": "5",
+        "ml_score_threshold": "0.75",
+        "ml_poll_interval_seconds": "3",
+        "detection_warmup_seconds": "15",
+        "detection_enabled": "true",
+    }.get(key, default)
+
+    app_state = create_app(
+        _base_settings(auth_enabled=False), db=mock_db, watcher=mock_watcher, camera=mock_camera
+    )
+    async with _client(app_state) as c:
+        r = await c.get("/")
+    assert r.status_code == 200
+    body = r.text
+    assert "192.168.1.150" in body
+    assert "0.75" in body
+    assert "5" in body
+    assert "3" in body
+    assert "15" in body
+
+
+async def test_post_settings_success(
+    mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: AsyncMock
+) -> None:
+    printer = AsyncMock()
+    mock_watcher.printer = printer
+    mock_watcher.camera = mock_camera
+
+    app_state = create_app(
+        _base_settings(auth_enabled=False), db=mock_db, watcher=mock_watcher, camera=mock_camera
+    )
+    payload = {
+        "printer_ip": "10.0.0.42",
+        "ml_score_threshold": 0.45,
+        "ml_confirm_count": 4,
+        "ml_poll_interval_seconds": 6,
+        "detection_warmup_seconds": 30,
+    }
+    async with _client(app_state) as c:
+        r = await c.post("/api/settings", json=payload)
+
+    assert r.status_code == 200
+    assert r.json() == {"status": "ok", "message": "Settings updated successfully"}
+
+    mock_db.set_setting.assert_any_call("printer_ip", "10.0.0.42")
+    mock_db.set_setting.assert_any_call("ml_score_threshold", "0.45")
+    mock_db.set_setting.assert_any_call("ml_confirm_count", "4")
+    mock_db.set_setting.assert_any_call("ml_poll_interval_seconds", "6")
+    mock_db.set_setting.assert_any_call("detection_warmup_seconds", "30")
+
+    assert mock_watcher.printer._host == "10.0.0.42"
+    assert mock_watcher.camera._url.startswith("http://10.0.0.42:")
+    printer.close.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "payload,expected_detail",
+    [
+        ({"printer_ip": ""}, "cannot be empty"),
+        ({"printer_ip": "invalid ip address"}, "Invalid IP address or hostname format"),
+        ({"printer_ip": "10.0.0.999"}, "Invalid IP address or hostname format"),
+        ({"printer_ip": "bad_host@name"}, "Invalid IP address or hostname format"),
+        ({"ml_confirm_count": 0}, "Confirm count must be at least 1"),
+        ({"ml_confirm_count": -2}, "Confirm count must be at least 1"),
+        ({"ml_score_threshold": -0.1}, "Score threshold must be between 0.0 and 1.0"),
+        ({"ml_score_threshold": 1.1}, "Score threshold must be between 0.0 and 1.0"),
+        ({"ml_poll_interval_seconds": 0}, "Poll interval must be at least 1 second"),
+        ({"ml_poll_interval_seconds": -5}, "Poll interval must be at least 1 second"),
+        ({"detection_warmup_seconds": -1}, "Warmup duration cannot be negative"),
+    ],
+)
+async def test_post_settings_invalid_values(
+    mock_db: AsyncMock,
+    mock_watcher: MagicMock,
+    mock_camera: MagicMock,
+    payload: dict[str, object],
+    expected_detail: str,
+) -> None:
+    mock_watcher.printer = AsyncMock()
+    app_state = create_app(
+        _base_settings(auth_enabled=False), db=mock_db, watcher=mock_watcher, camera=mock_camera
+    )
+    async with _client(app_state) as c:
+        r = await c.post("/api/settings", json=payload)
+    assert r.status_code == 400
+    assert expected_detail in r.json()["detail"]

@@ -22,6 +22,7 @@ no DB), a fresh random secret is generated — callers should persist it.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -88,7 +89,7 @@ class AuthMiddleware:
             except Exception:
                 username = password = ""
 
-            if self._check_credentials(username, password):
+            if await self._check_credentials(username, password):
                 cookie = self._make_cookie(user_agent)
                 secure_flag = "; Secure" if self._secure else ""
                 response = Response(
@@ -111,7 +112,7 @@ class AuthMiddleware:
         )
         await response(scope, receive, send)
 
-    def _check_credentials(self, username: str, password: str) -> bool:
+    async def _check_credentials(self, username: str, password: str) -> bool:
         # Constant-time username comparison prevents user-enumeration via timing.
         username_ok = hmac.compare_digest(username.encode("utf-8"), self._username.encode("utf-8"))
         # Always run bcrypt even on a bad username so timing is indistinguishable.
@@ -119,7 +120,9 @@ class AuthMiddleware:
             self._password_hash if (username_ok and self._password_hash) else _DUMMY_HASH
         )
         try:
-            pw_ok = bcrypt.checkpw(password.encode("utf-8"), hash_to_check.encode("utf-8"))
+            pw_ok = await asyncio.to_thread(
+                bcrypt.checkpw, password.encode("utf-8"), hash_to_check.encode("utf-8")
+            )
         except Exception:
             pw_ok = False
         return username_ok and pw_ok

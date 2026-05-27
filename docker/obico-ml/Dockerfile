@@ -12,7 +12,7 @@
 #   docker build -t ghcr.io/legalmarc/centauri-sentinel/obico-ml:1.4 .
 
 # syntax=docker/dockerfile:1
-FROM python:3.10-slim
+FROM python:3.10.16-slim
 
 # System deps
 #   libgl1 + libglib2.0-0 — required by opencv-python-headless

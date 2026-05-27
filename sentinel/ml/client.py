@@ -71,7 +71,10 @@ class MlClient:
     async def _detect(self, jpeg: bytes) -> MlResult:
         nonce = self._store.put(jpeg)
         try:
-            snapshot_url = f"http://{self._bind_host}:{self._bind_port}/__internal_snapshot/{nonce}"
+            host = self._bind_host
+            if host == "0.0.0.0":
+                host = "sentinel" if Path("/.dockerenv").exists() else "127.0.0.1"
+            snapshot_url = f"http://{host}:{self._bind_port}/__internal_snapshot/{nonce}"
             token = self._load_token()
             headers: dict[str, str] = {}
             if token:

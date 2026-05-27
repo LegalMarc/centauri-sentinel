@@ -365,4 +365,3 @@ async def test_print_jobs_crud_and_analytics(db: Database) -> None:
     assert summary["total_filament_g"] == 20.5
     assert summary["total_pauses"] == 3
     assert summary["avg_duration_seconds"] == 600.0
-

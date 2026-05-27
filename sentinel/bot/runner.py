@@ -56,11 +56,11 @@ class BotRunner:
         app.add_handler(CallbackQueryHandler(h.handle_callback))
 
         # Reply keyboard TUI message handlers
-        app.add_handler(MessageHandler(filters.Text("📊 Status"), h.cmd_status))
-        app.add_handler(MessageHandler(filters.Text("📸 Snapshot"), h.cmd_snapshot))
-        app.add_handler(MessageHandler(filters.Text("⏸️ Pause"), h.cmd_pause))
-        app.add_handler(MessageHandler(filters.Text("▶️ Resume"), h.cmd_resume))
-        app.add_handler(MessageHandler(filters.Text("⏹️ Stop"), h.cmd_stop))
+        app.add_handler(MessageHandler(filters.Text(["📊 Status"]), h.cmd_status))
+        app.add_handler(MessageHandler(filters.Text(["📸 Snapshot"]), h.cmd_snapshot))
+        app.add_handler(MessageHandler(filters.Text(["⏸️ Pause"]), h.cmd_pause))
+        app.add_handler(MessageHandler(filters.Text(["▶️ Resume"]), h.cmd_resume))
+        app.add_handler(MessageHandler(filters.Text(["⏹️ Stop"]), h.cmd_stop))
 
         await app.initialize()
         await app.start()

@@ -125,7 +125,18 @@ class WatcherLoop:
                 raise
             except Exception:
                 logger.exception("Watcher loop tick raised unexpectedly")
-            await asyncio.sleep(self._settings.ml_poll_interval_seconds)
+
+            poll_interval_str = await self._db.get_setting(
+                "ml_poll_interval_seconds",
+                str(self._settings.ml_poll_interval_seconds),
+            )
+            if poll_interval_str is None:
+                poll_interval_str = str(self._settings.ml_poll_interval_seconds)
+            try:
+                poll_interval = float(poll_interval_str)
+            except (ValueError, TypeError):
+                poll_interval = float(self._settings.ml_poll_interval_seconds)
+            await asyncio.sleep(poll_interval)
 
     async def _tick(self) -> None:
         ts = datetime.now(tz=UTC).isoformat()
@@ -185,20 +196,23 @@ class WatcherLoop:
             self._print_start = datetime.now(tz=UTC)
 
         # Handle back-to-back print job transitions (filename changed while printing)
-        if self._current_job_id is not None and self._current_filename is not None:
-            if status.filename != self._current_filename:
-                ended_at = datetime.now(tz=UTC).isoformat().replace("+00:00", "Z")
-                duration = 0
-                if self.last_printer_status:
-                    duration = int(self.last_printer_status.elapsed_seconds)
-                await self._db.record_print_end(
-                    self._current_job_id,
-                    ended_at,
-                    duration,
-                    0.0,
-                    "completed",
-                )
-                self._current_job_id = None
+        if (
+            self._current_job_id is not None
+            and self._current_filename is not None
+            and status.filename != self._current_filename
+        ):
+            ended_at = datetime.now(tz=UTC).isoformat().replace("+00:00", "Z")
+            duration = 0
+            if self.last_printer_status:
+                duration = int(self.last_printer_status.elapsed_seconds)
+            await self._db.record_print_end(
+                self._current_job_id,
+                ended_at,
+                duration,
+                0.0,
+                "completed",
+            )
+            self._current_job_id = None
 
         # Start job tracking if not already active
         if self._current_job_id is None:
@@ -210,14 +224,26 @@ class WatcherLoop:
             )
 
         # Record pauses
-        if status.print_state == "paused" and self._prev_print_state != "paused":
-            if self._current_job_id is not None:
-                await self._db.increment_job_pauses(self._current_job_id)
+        if (
+            status.print_state == "paused"
+            and self._prev_print_state != "paused"
+            and self._current_job_id is not None
+        ):
+            await self._db.increment_job_pauses(self._current_job_id)
 
         self._prev_print_state = status.print_state
 
         elapsed = status.elapsed_seconds
-        warmup = self._settings.detection_warmup_seconds
+        warmup_str = await self._db.get_setting(
+            "detection_warmup_seconds",
+            str(self._settings.detection_warmup_seconds),
+        )
+        if warmup_str is None:
+            warmup_str = str(self._settings.detection_warmup_seconds)
+        try:
+            warmup = int(warmup_str)
+        except (ValueError, TypeError):
+            warmup = self._settings.detection_warmup_seconds
 
         if elapsed < warmup:
             self.state = WatcherState.WARMUP
@@ -228,6 +254,9 @@ class WatcherLoop:
             # the next _check_frame call will attempt a fresh grab.
             if self.state == WatcherState.CAMERA_OFFLINE:
                 logger.info("Camera offline — retrying grab on next tick")
+                self.state = WatcherState.ARMED
+            elif self.state == WatcherState.PAUSED and status.print_state == "printing":
+                logger.info("Printer resumed externally — transitioning ARMED")
                 self.state = WatcherState.ARMED
             elif self.state != WatcherState.PAUSED:
                 self.state = WatcherState.ARMED
@@ -251,15 +280,37 @@ class WatcherLoop:
 
         result: MlResult = await self._ml.detect(jpeg)
 
-        if result.score >= self._settings.ml_score_threshold:
+        score_threshold_str = await self._db.get_setting(
+            "ml_score_threshold",
+            str(self._settings.ml_score_threshold),
+        )
+        if score_threshold_str is None:
+            score_threshold_str = str(self._settings.ml_score_threshold)
+        try:
+            score_threshold = float(score_threshold_str)
+        except (ValueError, TypeError):
+            score_threshold = self._settings.ml_score_threshold
+
+        confirm_count_str = await self._db.get_setting(
+            "ml_confirm_count",
+            str(self._settings.ml_confirm_count),
+        )
+        if confirm_count_str is None:
+            confirm_count_str = str(self._settings.ml_confirm_count)
+        try:
+            confirm_count = int(confirm_count_str)
+        except (ValueError, TypeError):
+            confirm_count = self._settings.ml_confirm_count
+
+        if result.score >= score_threshold:
             self._confirm_count += 1
             logger.info(
                 "Detection score=%.2f confirm=%d/%d",
                 result.score,
                 self._confirm_count,
-                self._settings.ml_confirm_count,
+                confirm_count,
             )
-            if self._confirm_count >= self._settings.ml_confirm_count:
+            if self._confirm_count >= confirm_count:
                 await self._on_confirmed_detection(result, jpeg)
         else:
             if self._confirm_count > 0:
