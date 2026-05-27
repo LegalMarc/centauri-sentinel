@@ -11,7 +11,7 @@ import aiosqlite
 logger = logging.getLogger(__name__)
 
 _SCHEMA_SQL = (Path(__file__).parent / "schema.sql").read_text()
-CURRENT_VERSION = 2
+CURRENT_VERSION = 3
 
 
 async def migrate(db_path: str) -> None:

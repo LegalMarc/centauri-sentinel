@@ -9,319 +9,74 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
-:root {
-  --bg-color: #08090c;
-  --panel-bg: rgba(20, 22, 31, 0.7);
-  --panel-hover: rgba(30, 32, 45, 0.85);
-  --border-color: rgba(255, 255, 255, 0.08);
-  --border-hover: rgba(99, 102, 241, 0.4);
-  --text-primary: #f3f4f6;
-  --text-secondary: #9ca3af;
-  --accent-color: #6366f1;
-  --accent-gradient: linear-gradient(135deg, #6366f1 0%, #a855f7 100%);
-  --success-color: #10b981;
-  --warning-color: #f59e0b;
-  --danger-color: #ef4444;
-  --font-sans: 'Outfit', sans-serif;
-  --font-mono: 'JetBrains Mono', monospace;
-}
-
-* {
-  box-sizing: border-box;
-  margin: 0;
-  padding: 0;
-}
-
-body {
-  font-family: var(--font-sans);
-  background-color: var(--bg-color);
-  background-image: 
-    radial-gradient(at 0% 0%, rgba(99, 102, 241, 0.12) 0px, transparent 50%),
-    radial-gradient(at 100% 100%, rgba(168, 85, 247, 0.08) 0px, transparent 50%);
-  color: var(--text-primary);
-  min-height: 100vh;
-  padding: 2rem;
-  line-height: 1.5;
-}
-
-.header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 2rem;
-  border-bottom: 1px solid var(--border-color);
-  padding-bottom: 1.5rem;
-}
-
-h1 {
-  font-size: 1.8rem;
-  font-weight: 700;
-  background: var(--accent-gradient);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  letter-spacing: -0.02em;
-}
-
-.header-status {
-  display: flex;
-  gap: 1rem;
-  align-items: center;
-}
-
-h2 {
-  font-size: 1.1rem;
-  font-weight: 600;
-  margin: 2rem 0 1rem;
-  color: var(--text-primary);
-  letter-spacing: -0.01em;
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-}
-
-.grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-  gap: 1rem;
-  margin-bottom: 2rem;
-}
-
-.card {
-  background: var(--panel-bg);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  border: 1px solid var(--border-color);
-  border-radius: 12px;
-  padding: 1.25rem;
-  display: flex;
-  align-items: center;
-  gap: 1rem;
-  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-.card:hover {
-  transform: translateY(-2px);
-  background: var(--panel-hover);
-  border-color: var(--border-hover);
-  box-shadow: 0 10px 20px -10px rgba(99, 102, 241, 0.2);
-}
-
-.card-icon {
-  font-size: 1.75rem;
-  width: 48px;
-  height: 48px;
-  background: rgba(255, 255, 255, 0.03);
-  border-radius: 8px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.card-content {
-  flex: 1;
-  min-width: 0;
-}
-
-.card dt {
-  color: var(--text-secondary);
-  font-size: 0.8rem;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  font-weight: 600;
-  margin-bottom: 0.25rem;
-}
-
-.card dd {
-  color: var(--text-primary);
-  font-size: 1.25rem;
-  font-weight: 600;
-  font-family: var(--font-mono);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.col-span-2 {
-  grid-column: span 1;
-}
-
-@media (min-width: 768px) {
-  .col-span-2 {
-    grid-column: span 2;
-  }
-}
-
-/* Badges */
-.state-badge {
-  display: inline-block;
-  padding: 0.2rem 0.6rem;
-  border-radius: 20px;
-  font-size: 0.85rem;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.02em;
-}
-
-.state-idle { background: rgba(156, 163, 175, 0.15); color: #9ca3af; border: 1px solid rgba(156, 163, 175, 0.3); }
-.state-printing { background: rgba(99, 102, 241, 0.15); color: #818cf8; border: 1px solid rgba(99, 102, 241, 0.3); }
-.state-paused { background: rgba(245, 158, 11, 0.15); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.3); }
-.state-warmup { background: rgba(245, 158, 11, 0.15); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.3); }
-.state-armed { background: rgba(16, 185, 129, 0.15); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.3); }
-.state-camera_offline { background: rgba(239, 68, 68, 0.15); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.3); }
-.state-stalled { background: rgba(239, 68, 68, 0.15); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.3); }
-
-/* Temperatures */
-.temp-text {
-  display: flex;
-  align-items: baseline;
-  gap: 0.25rem;
-}
-.temp-target {
-  color: var(--text-secondary);
-  font-size: 0.9rem;
-  font-weight: 400;
-}
-
-/* Progress bar */
-.progress-container {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  width: 100%;
-}
-.progress-bar-wrapper {
-  flex: 1;
-  height: 8px;
-  background: rgba(255, 255, 255, 0.05);
-  border-radius: 4px;
-  overflow: hidden;
-}
-.progress-bar {
-  height: 100%;
-  background: var(--accent-gradient);
-  border-radius: 4px;
-  transition: width 0.4s ease;
-}
-.progress-percent {
-  font-size: 1.1rem;
-  font-weight: 600;
-  min-width: 60px;
-  text-align: right;
-}
-
-/* Camera viewport */
-.camera-container {
-  background: var(--panel-bg);
-  border: 1px solid var(--border-color);
-  border-radius: 16px;
-  padding: 1rem;
-  margin-bottom: 2rem;
-  overflow: hidden;
-}
-.camera-wrapper {
-  position: relative;
-  width: 100%;
-  aspect-ratio: 16/9;
-  background: #020203;
-  border-radius: 12px;
-  overflow: hidden;
-}
-.camera-wrapper img {
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-  display: block;
-}
-.camera-badge {
-  position: absolute;
-  top: 1rem;
-  left: 1rem;
-  z-index: 10;
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  background: rgba(8, 9, 12, 0.75);
-  backdrop-filter: blur(8px);
-  padding: 0.4rem 0.8rem;
-  border-radius: 20px;
-  font-size: 0.8rem;
-  font-weight: 600;
-}
-.camera-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--success-color);
-  box-shadow: 0 0 8px var(--success-color);
-}
-.camera-dot.offline {
-  background: var(--danger-color);
-  box-shadow: none;
-}
-
-/* Tables */
-.table-container {
-  background: var(--panel-bg);
-  backdrop-filter: blur(12px);
-  border: 1px solid var(--border-color);
-  border-radius: 16px;
-  overflow: hidden;
-  margin-bottom: 2rem;
-}
-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 0.9rem;
-  text-align: left;
-}
-th {
-  padding: 1rem 1.25rem;
-  background: rgba(255, 255, 255, 0.02);
-  color: var(--text-secondary);
-  font-weight: 600;
-  font-size: 0.75rem;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  border-bottom: 1px solid var(--border-color);
-}
-td {
-  padding: 1rem 1.25rem;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
-  color: var(--text-primary);
-}
-tr:last-child td {
-  border-bottom: none;
-}
-tr:hover td {
-  background: rgba(255, 255, 255, 0.01);
-}
-.table-container p {
-  padding: 2rem;
-  text-align: center;
-  color: var(--text-secondary);
-}
-
-.stale {
-  color: var(--warning-color) !important;
-}
-
-footer {
-  margin-top: 3rem;
-  border-top: 1px solid var(--border-color);
-  padding-top: 1.5rem;
-  font-size: 0.85rem;
-  color: var(--text-secondary);
-  display: flex;
-  justify-content: space-between;
-}
-footer a {
-  color: var(--accent-color);
-  text-decoration: none;
-  transition: opacity 0.2s;
-}
-footer a:hover {
-  opacity: 0.8;
-}
+:root{--bg-color:#08090c;--panel-bg:rgba(20,22,31,.7);--panel-hover:rgba(30,32,45,.85);--border-color:rgba(255,255,255,.08);--border-hover:rgba(99,102,241,.4);--text-primary:#f3f4f6;--text-secondary:#9ca3af;--accent-color:#6366f1;--accent-gradient:linear-gradient(135deg,#6366f1 0%,#a855f7 100%);--success-color:#10b981;--warning-color:#f59e0b;--danger-color:#ef4444;--font-sans:'Outfit',sans-serif;--font-mono:'JetBrains Mono',monospace}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:var(--font-sans);background-color:var(--bg-color);background-image:radial-gradient(at 0% 0%,rgba(99,102,241,.12) 0px,transparent 50%),radial-gradient(at 100% 100%,rgba(168,85,247,.08) 0px,transparent 50%);color:var(--text-primary);min-height:100vh;padding:2rem;line-height:1.5}
+.header{display:flex;justify-content:space-between;align-items:center;margin-bottom:1.5rem;border-bottom:1px solid var(--border-color);padding-bottom:1.5rem}
+h1{font-size:1.8rem;font-weight:700;background:var(--accent-gradient);-webkit-background-clip:text;-webkit-text-fill-color:transparent;letter-spacing:-.02em}
+.header-status{display:flex;gap:1rem;align-items:center}
+h2{font-size:1.1rem;font-weight:600;margin:2rem 0 1rem;color:var(--text-primary);display:flex;align-items:center;gap:.5rem}
+.tabs{display:flex;gap:.5rem;margin-bottom:2rem;border-bottom:1px solid var(--border-color);padding-bottom:.5rem}
+.tab-btn{background:none;border:none;color:var(--text-secondary);font-family:var(--font-sans);font-size:1rem;font-weight:600;padding:.5rem 1rem;cursor:pointer;border-radius:6px;transition:all .2s ease}
+.tab-btn:hover{color:var(--text-primary);background:rgba(255,255,255,.03)}
+.tab-btn.active{color:var(--text-primary);background:rgba(99,102,241,.1);box-shadow:inset 0 -2px 0 var(--accent-color)}
+.tab-content{display:none}
+.tab-content.active{display:block}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:1rem;margin-bottom:2rem}
+.card{background:var(--panel-bg);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border:1px solid var(--border-color);border-radius:12px;padding:1.25rem;display:flex;align-items:center;gap:1rem;transition:all .3s cubic-bezier(.4,0,.2,1)}
+.card:hover{transform:translateY(-2px);background:var(--panel-hover);border-color:var(--border-hover);box-shadow:0 10px 20px -10px rgba(99,102,241,.2)}
+.card-icon{font-size:1.75rem;width:48px;height:48px;background:rgba(255,255,255,.03);border-radius:8px;display:flex;align-items:center;justify-content:center}
+.card-content{flex:1;min-width:0}
+.card dt{color:var(--text-secondary);font-size:.8rem;text-transform:uppercase;letter-spacing:.05em;font-weight:600;margin-bottom:.25rem}
+.card dd{color:var(--text-primary);font-size:1.25rem;font-weight:600;font-family:var(--font-mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.col-span-2{grid-column:span 1}
+@media (min-width:768px){.col-span-2{grid-column:span 2}}
+.state-badge{display:inline-block;padding:.2rem .6rem;border-radius:20px;font-size:.85rem;font-weight:600;text-transform:uppercase;letter-spacing:.02em;border:1px solid}
+.state-idle{background:rgba(156,163,175,.15);color:#9ca3af;border-color:rgba(156,163,175,.3)}
+.state-printing{background:rgba(99,102,241,.15);color:#818cf8;border-color:rgba(99,102,241,.3)}
+.state-paused,.state-warmup{background:rgba(245,158,11,.15);color:#fbbf24;border-color:rgba(245,158,11,.3)}
+.state-armed{background:rgba(16,185,129,.15);color:#34d399;border-color:rgba(16,185,129,.3)}
+.state-camera_offline,.state-stalled{background:rgba(239,68,68,.15);color:#f87171;border-color:rgba(239,68,68,.3)}
+.temp-text{display:flex;align-items:baseline;gap:.25rem}
+.temp-target{color:var(--text-secondary);font-size:.9rem}
+.progress-container{display:flex;align-items:center;gap:.75rem;width:100%}
+.progress-bar-wrapper{flex:1;height:8px;background:rgba(255,255,255,.05);border-radius:4px;overflow:hidden}
+.progress-bar{height:100%;background:var(--accent-gradient);border-radius:4px}
+.progress-percent{font-size:1.1rem;font-weight:600;min-width:60px;text-align:right}
+.media-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:1.5rem;margin-bottom:2rem}
+.camera-container,.thumbnail-container{background:var(--panel-bg);border:1px solid var(--border-color);border-radius:16px;padding:1rem;display:flex;flex-direction:column}
+.camera-wrapper,.thumbnail-wrapper{position:relative;width:100%;aspect-ratio:16/9;background:#020203;border-radius:12px;overflow:hidden;flex:1;display:flex;align-items:center;justify-content:center}
+.camera-wrapper img,.thumbnail-wrapper img{max-width:100%;max-height:100%;object-fit:contain;display:block}
+.camera-badge{position:absolute;top:1rem;left:1rem;z-index:10;display:flex;align-items:center;gap:.5rem;background:rgba(8,9,12,.75);backdrop-filter:blur(8px);padding:.4rem .8rem;border-radius:20px;font-size:.8rem;font-weight:600}
+.camera-dot{width:8px;height:8px;border-radius:50%;background:var(--success-color);box-shadow:0 0 8px var(--success-color)}
+.camera-dot.offline{background:var(--danger-color);box-shadow:none}
+.controls-panel{display:flex;flex-direction:column;gap:1.25rem;margin-bottom:2rem;background:var(--panel-bg);backdrop-filter:blur(12px);border:1px solid var(--border-color);border-radius:16px;padding:1.5rem}
+.controls-header{display:flex;justify-content:space-between;align-items:center}
+.controls-buttons{display:flex;flex-wrap:wrap;gap:.75rem}
+.btn{font-family:var(--font-sans);font-weight:600;font-size:.95rem;padding:.65rem 1.25rem;border-radius:8px;border:none;cursor:pointer;transition:all .2s;display:inline-flex;align-items:center;gap:.5rem;color:var(--text-primary)}
+.btn:hover{transform:translateY(-1px);filter:brightness(1.1)}
+.btn:active{transform:translateY(0)}
+.btn-warning{background:var(--warning-color);color:#08090c}
+.btn-success{background:var(--success-color)}
+.btn-danger{background:var(--danger-color)}
+.btn-secondary{background:rgba(255,255,255,.08)}
+.btn-confirming{animation:pulse 1s infinite alternate}
+@keyframes pulse{from{box-shadow:0 0 0 0 rgba(239,68,68,0.5)}to{box-shadow:0 0 0 10px rgba(239,68,68,0)}}
+.toast{position:fixed;bottom:2rem;right:2rem;padding:.75rem 1.5rem;border-radius:8px;background:rgba(20,22,31,.95);border:1px solid var(--border-color);backdrop-filter:blur(12px);color:var(--text-primary);font-weight:600;z-index:1000;transform:translateY(100px);opacity:0;transition:all .3s}
+.toast.show{transform:translateY(0);opacity:1}
+.toast-success{border-color:var(--success-color)}
+.toast-warning{border-color:var(--warning-color)}
+.toast-danger{border-color:var(--danger-color)}
+.table-container{background:var(--panel-bg);backdrop-filter:blur(12px);border:1px solid var(--border-color);border-radius:16px;overflow:hidden;margin-bottom:2rem}
+table{width:100%;border-collapse:collapse;font-size:.9rem}
+th{padding:1rem 1.25rem;background:rgba(255,255,255,.02);color:var(--text-secondary);font-weight:600;font-size:.75rem;text-transform:uppercase;border-bottom:1px solid var(--border-color)}
+td{padding:1rem 1.25rem;border-bottom:1px solid rgba(255,255,255,.04)}
+tr:last-child td{border-bottom:none}
+tr:hover td{background:rgba(255,255,255,.01)}
+.table-container p{padding:2rem;text-align:center;color:var(--text-secondary)}
+.stale{color:var(--warning-color)!important}
+footer{margin-top:3rem;border-top:1px solid var(--border-color);padding-top:1.5rem;font-size:.85rem;color:var(--text-secondary);display:flex;justify-content:space-between}
+footer a{color:var(--accent-color);text-decoration:none}
 </style>
 </head>
 <body>
@@ -332,190 +87,276 @@ footer a:hover {
   </div>
 </div>
 
-<div class="grid">
-  <!-- Watcher state -->
-  <div class="card">
-    <div class="card-icon">👁️</div>
-    <div class="card-content">
-      <dt>Watcher state</dt>
-      <dd><span class="state-badge state-{{ watcher_state | lower }}">{{ watcher_state }}</span></dd>
+<div class="tabs">
+  <button class="tab-btn active" onclick="switchTab('live')">Live Monitor</button>
+  <button class="tab-btn" onclick="switchTab('history')">History & Analytics</button>
+</div>
+
+<!-- LIVE MONITOR TAB -->
+<div id="tab-live" class="tab-content active">
+  <div class="controls-panel">
+    <div class="controls-header">
+      <h3>🎛️ Printer Controls</h3>
+      <span class="detection-toggle-wrapper" style="font-size: 0.9rem; font-weight: 500; color: var(--text-secondary);">
+        Detection: <span id="det-status-badge" class="state-badge {% if detection_enabled %}state-armed{% else %}state-camera_offline{% endif %}">{% if detection_enabled %}Enabled{% else %}Snoozed{% endif %}</span>
+      </span>
+    </div>
+    <div class="controls-buttons">
+      <button id="btn-pause" class="btn btn-warning" onclick="sendControl('pause')">⏸️ Pause</button>
+      <button id="btn-resume" class="btn btn-success" onclick="sendControl('resume')">▶️ Resume</button>
+      <button id="btn-stop" class="btn btn-danger" onclick="confirmStop()">⏹️ Stop Print</button>
+      <button id="btn-snooze" class="btn btn-secondary" onclick="snoozeDetection()">🔕 Snooze 10m</button>
     </div>
   </div>
 
-  <!-- Printer state -->
-  <div class="card">
-    <div class="card-icon">🖨️</div>
-    <div class="card-content">
-      <dt>Printer State</dt>
-      <dd><span class="state-badge state-{{ print_state | lower }}">{{ printer_state }}</span></dd>
+  <div class="grid">
+    <div class="card">
+      <div class="card-icon">👁️</div>
+      <div class="card-content">
+        <dt>Watcher state</dt>
+        <dd><span class="state-badge state-{{ watcher_state | lower }}">{{ watcher_state }}</span></dd>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-icon">🖨️</div>
+      <div class="card-content">
+        <dt>Printer State</dt>
+        <dd><span class="state-badge state-{{ print_state | lower }}">{{ printer_state }}</span></dd>
+      </div>
+    </div>
+    <div class="card col-span-2">
+      <div class="card-icon">📄</div>
+      <div class="card-content">
+        <dt>Active Job File</dt>
+        <dd title="{{ filename }}">{{ filename }}</dd>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-icon">🔥</div>
+      <div class="card-content">
+        <dt>Extruder Temp</dt>
+        <dd class="temp-text">
+          <span>{{ "%.1f"|format(extruder_temp) }}°C</span>
+          <span class="temp-target">/ {{ extruder_target | int }}°C</span>
+        </dd>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-icon">🛏️</div>
+      <div class="card-content">
+        <dt>Bed Temp</dt>
+        <dd class="temp-text">
+          <span>{{ "%.1f"|format(bed_temp) }}°C</span>
+          <span class="temp-target">/ {{ bed_target | int }}°C</span>
+        </dd>
+      </div>
+    </div>
+    <div class="card col-span-2">
+      <div class="card-icon">📊</div>
+      <div class="card-content">
+        <dt>Print Progress</dt>
+        <dd class="progress-container">
+          <div class="progress-bar-wrapper">
+            <div class="progress-bar" style="width: {{ progress }}%"></div>
+          </div>
+          <span class="progress-percent">{{ "%.1f"|format(progress) }}%</span>
+        </dd>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-icon">🥞</div>
+      <div class="card-content">
+        <dt>Current Layer</dt>
+        <dd>{{ current_layer }} / {{ total_layers }}</dd>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-icon">⏱️</div>
+      <div class="card-content">
+        <dt>Print Elapsed</dt>
+        <dd>{{ print_elapsed }}</dd>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-icon">⏳</div>
+      <div class="card-content">
+        <dt>Time Remaining</dt>
+        <dd id="time-remaining">—</dd>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-icon">❤️</div>
+      <div class="card-content">
+        <dt>Last Watcher Heartbeat</dt>
+        <dd class="{% if tick_age_stale %}stale{% endif %}">{{ tick_age }}</dd>
+      </div>
     </div>
   </div>
 
-  <!-- Active Filename -->
-  <div class="card col-span-2">
-    <div class="card-icon">📄</div>
-    <div class="card-content">
-      <dt>Active Job File</dt>
-      <dd title="{{ filename }}">{{ filename }}</dd>
-    </div>
-  </div>
-
-  <!-- Extruder Temp -->
-  <div class="card">
-    <div class="card-icon">🔥</div>
-    <div class="card-content">
-      <dt>Extruder Temp</dt>
-      <dd class="temp-text">
-        <span>{{ "%.1f"|format(extruder_temp) }}°C</span>
-        <span class="temp-target">/ {{ extruder_target | int }}°C</span>
-      </dd>
-    </div>
-  </div>
-
-  <!-- Bed Temp -->
-  <div class="card">
-    <div class="card-icon">🛏️</div>
-    <div class="card-content">
-      <dt>Bed Temp</dt>
-      <dd class="temp-text">
-        <span>{{ "%.1f"|format(bed_temp) }}°C</span>
-        <span class="temp-target">/ {{ bed_target | int }}°C</span>
-      </dd>
-    </div>
-  </div>
-
-  <!-- Print Progress -->
-  <div class="card col-span-2">
-    <div class="card-icon">📊</div>
-    <div class="card-content">
-      <dt>Print Progress</dt>
-      <dd class="progress-container">
-        <div class="progress-bar-wrapper">
-          <div class="progress-bar" style="width: {{ progress }}%"></div>
+  <div class="media-grid">
+    <div class="camera-container">
+      <h2>🎥 Chamber Live Feed</h2>
+      <div class="camera-wrapper" style="margin-top: 0.75rem;">
+        <div class="camera-badge">
+          <div class="camera-dot {% if not camera_connected %}offline{% endif %}"></div>
+          <span>Camera {% if camera_connected %}Connected{% else %}Offline{% endif %}</span>
         </div>
-        <span class="progress-percent">{{ "%.1f"|format(progress) }}%</span>
-      </dd>
+        <img src="/snapshot" alt="Current camera frame" onerror="this.alt='Camera stream currently unavailable'">
+      </div>
     </div>
-  </div>
-
-  <!-- Layers -->
-  <div class="card">
-    <div class="card-icon">🥞</div>
-    <div class="card-content">
-      <dt>Current Layer</dt>
-      <dd>{{ current_layer }} / {{ total_layers }}</dd>
+    {% if thumbnail_base64 %}
+    <div class="thumbnail-container">
+      <h2>🖼️ G-code Model Preview</h2>
+      <div class="thumbnail-wrapper" style="margin-top: 0.75rem;">
+        <img src="data:image/png;base64,{{ thumbnail_base64 }}" alt="Print Job Thumbnail">
+      </div>
     </div>
-  </div>
-
-  <!-- Print Elapsed -->
-  <div class="card">
-    <div class="card-icon">⏱️</div>
-    <div class="card-content">
-      <dt>Print Elapsed</dt>
-      <dd>{{ print_elapsed }}</dd>
-    </div>
-  </div>
-
-  <!-- Time Remaining -->
-  <div class="card">
-    <div class="card-icon">⏳</div>
-    <div class="card-content">
-      <dt>Time Remaining</dt>
-      <dd id="time-remaining">—</dd>
-    </div>
-  </div>
-
-  <!-- Last Watchdog Tick -->
-  <div class="card">
-    <div class="card-icon">❤️</div>
-    <div class="card-content">
-      <dt>Last Watcher Heartbeat</dt>
-      <dd class="{% if tick_age_stale %}stale{% endif %}">{{ tick_age }}</dd>
-    </div>
+    {% endif %}
   </div>
 </div>
 
-<h2>🎥 Live Chamber Feed</h2>
-<div class="camera-container">
-  <div class="camera-wrapper">
-    <div class="camera-badge">
-      <div class="camera-dot {% if not camera_connected %}offline{% endif %}"></div>
-      <span>Camera {% if camera_connected %}Connected{% else %}Offline{% endif %}</span>
+<!-- HISTORY & ANALYTICS TAB -->
+<div id="tab-history" class="tab-content">
+  <div class="analytics-grid grid">
+    <div class="card">
+      <div class="card-icon">🔢</div>
+      <div class="card-content">
+        <dt>Total Print Jobs</dt>
+        <dd>{{ analytics.total_prints }}</dd>
+      </div>
     </div>
-    <img src="/snapshot" alt="Current camera frame" onerror="this.alt='Camera stream currently unavailable'">
+    <div class="card">
+      <div class="card-icon">🏆</div>
+      <div class="card-content">
+        <dt>Success Rate</dt>
+        <dd>{{ "%.1f"|format(analytics.success_rate_percent) }}%</dd>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-icon">⏸️</div>
+      <div class="card-content">
+        <dt>Total Pauses</dt>
+        <dd>{{ analytics.total_pauses }}</dd>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-icon">⏱️</div>
+      <div class="card-content">
+        <dt>Avg Completed Duration</dt>
+        <dd id="avg-duration">—</dd>
+      </div>
+    </div>
   </div>
-</div>
 
-<h2>🔍 Recent detections</h2>
-<div class="table-container">
-  {% if detections %}
-  <table>
-    <thead>
-      <tr>
-        <th>ID</th>
-        <th>Time (UTC)</th>
-        <th>Confidence Score</th>
-        <th>Consecutive Hits</th>
-        <th>Action Taken</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for d in detections %}
-      <tr>
-        <td>{{ d.id }}</td>
-        <td>{{ d.ts_utc }}</td>
-        <td>
-          {% if d.snapshot_id %}
-            <a href="/snapshot/{{ d.snapshot_id }}" target="_blank" style="color: var(--accent-color); font-weight: 500;">
+  <h2>📋 Recent Print Jobs</h2>
+  <div class="table-container">
+    {% if recent_jobs %}
+    <table>
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Filename</th>
+          <th>Started (UTC)</th>
+          <th>Ended (UTC)</th>
+          <th>Duration</th>
+          <th>Pauses</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for j in recent_jobs %}
+        <tr>
+          <td>{{ j.id }}</td>
+          <td style="font-weight: 600; color: var(--text-primary);">{{ j.filename }}</td>
+          <td>{{ j.started_at }}</td>
+          <td>{{ j.ended_at or "—" }}</td>
+          <td class="job-duration" data-seconds="{{ j.duration_seconds or 0 }}">—</td>
+          <td>{{ j.pauses_count }}</td>
+          <td>
+            <span class="state-badge {% if j.status == 'completed' %}state-armed{% elif j.status == 'failed' %}state-camera_offline{% else %}state-printing{% endif %}">
+              {{ j.status }}
+            </span>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p>No print jobs recorded yet.</p>
+    {% endif %}
+  </div>
+
+  <h2>🔍 Recent detections</h2>
+  <div class="table-container">
+    {% if detections %}
+    <table>
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Time (UTC)</th>
+          <th>Confidence Score</th>
+          <th>Consecutive Hits</th>
+          <th>Action Taken</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for d in detections %}
+        <tr>
+          <td>{{ d.id }}</td>
+          <td>{{ d.ts_utc }}</td>
+          <td>
+            {% if d.snapshot_id %}
+              <a href="/snapshot/{{ d.snapshot_id }}" target="_blank" style="color: var(--accent-color); font-weight: 500;">
+                {{ "%.3f"|format(d.score) }}
+              </a>
+            {% else %}
               {{ "%.3f"|format(d.score) }}
-            </a>
-          {% else %}
-            {{ "%.3f"|format(d.score) }}
-          {% endif %}
-        </td>
-        <td>{{ d.consecutive }}</td>
-        <td>
-          <span class="state-badge {% if d.confirmed %}state-camera_offline{% else %}state-warmup{% endif %}">
-            {{ 'printer paused' if d.confirmed else 'alert sent' }}
-          </span>
-        </td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  {% else %}
-  <p>No spaghetti or print failures detected yet.</p>
-  {% endif %}
-</div>
+            {% endif %}
+          </td>
+          <td>{{ d.consecutive }}</td>
+          <td>
+            <span class="state-badge {% if d.confirmed %}state-camera_offline{% else %}state-warmup{% endif %}">
+              {{ 'printer paused' if d.confirmed else 'alert sent' }}
+            </span>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p>No spaghetti or print failures detected yet.</p>
+    {% endif %}
+  </div>
 
-<h2>🎛️ Recent pauses</h2>
-<div class="table-container">
-  {% if pauses %}
-  <table>
-    <thead>
-      <tr>
-        <th>ID</th>
-        <th>Time (UTC)</th>
-        <th>Trigger Source</th>
-        <th>Result</th>
-        <th>Message Details</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for p in pauses %}
-      <tr>
-        <td>{{ p.id }}</td>
-        <td>{{ p.ts_utc }}</td>
-        <td><span class="state-badge {% if p.source == 'auto' %}state-camera_offline{% else %}state-idle{% endif %}">{{ p.source }}</span></td>
-        <td><span class="state-badge {% if p.result == 'ok' %}state-armed{% else %}state-camera_offline{% endif %}">{{ p.result }}</span></td>
-        <td style="color: var(--text-secondary);">{{ p.error_message or "Executed successfully" }}</td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  {% else %}
-  <p>No printer pauses have been recorded.</p>
-  {% endif %}
+  <h2>🎛️ Recent pauses</h2>
+  <div class="table-container">
+    {% if pauses %}
+    <table>
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Time (UTC)</th>
+          <th>Trigger Source</th>
+          <th>Result</th>
+          <th>Message Details</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for p in pauses %}
+        <tr>
+          <td>{{ p.id }}</td>
+          <td>{{ p.ts_utc }}</td>
+          <td><span class="state-badge {% if p.source == 'auto' %}state-camera_offline{% else %}state-idle{% endif %}">{{ p.source }}</span></td>
+          <td><span class="state-badge {% if p.result == 'ok' %}state-armed{% else %}state-camera_offline{% endif %}">{{ p.result }}</span></td>
+          <td style="color: var(--text-secondary);">{{ p.error_message or "Executed successfully" }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p>No printer pauses have been recorded.</p>
+    {% endif %}
+  </div>
 </div>
 
 <footer>
@@ -524,23 +365,129 @@ footer a:hover {
 </footer>
 
 <script>
-// Format remaining time nicely
 const remainingSeconds = {{ remaining_seconds | int }};
 const timeRemainingEl = document.getElementById("time-remaining");
-
 if (remainingSeconds > 0) {
   const hours = Math.floor(remainingSeconds / 3600);
   const minutes = Math.floor((remainingSeconds % 3600) / 60);
   const seconds = remainingSeconds % 60;
-  
   let formatted = "";
   if (hours > 0) formatted += `${hours}h `;
   if (minutes > 0 || hours > 0) formatted += `${minutes}m `;
   formatted += `${seconds}s`;
-  
   timeRemainingEl.textContent = formatted;
 } else {
   timeRemainingEl.textContent = "—";
+}
+const avgSeconds = {{ analytics.avg_duration_seconds | int }};
+const avgDurationEl = document.getElementById("avg-duration");
+if (avgSeconds > 0) {
+  const hours = Math.floor(avgSeconds / 3600);
+  const minutes = Math.floor((avgSeconds % 3600) / 60);
+  const seconds = avgSeconds % 60;
+  let formatted = "";
+  if (hours > 0) formatted += `${hours}h `;
+  if (minutes > 0 || hours > 0) formatted += `${minutes}m `;
+  formatted += `${seconds}s`;
+  avgDurationEl.textContent = formatted;
+} else {
+  avgDurationEl.textContent = "—";
+}
+document.querySelectorAll(".job-duration").forEach(el => {
+  const sec = parseInt(el.getAttribute("data-seconds"));
+  if (sec > 0) {
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    const s = sec % 60;
+    let formatted = "";
+    if (h > 0) formatted += `${h}h `;
+    if (m > 0 || h > 0) formatted += `${m}m `;
+    formatted += `${s}s`;
+    el.textContent = formatted;
+  } else {
+    el.textContent = "—";
+  }
+});
+function switchTab(tabId) {
+  document.querySelectorAll('.tab-btn').forEach(btn => { btn.classList.remove('active'); });
+  document.querySelectorAll('.tab-content').forEach(content => { content.classList.remove('active'); });
+  const activeBtn = Array.from(document.querySelectorAll('.tab-btn')).find(btn => btn.getAttribute('onclick').includes(tabId));
+  if (activeBtn) activeBtn.classList.add('active');
+  const activeContent = document.getElementById(`tab-${tabId}`);
+  if (activeContent) activeContent.classList.add('active');
+  localStorage.setItem('sentinel_active_tab', tabId);
+}
+const storedTab = localStorage.getItem('sentinel_active_tab');
+if (storedTab) { switchTab(storedTab); }
+function showToast(message, type) {
+  const toast = document.createElement("div");
+  toast.className = `toast toast-${type}`;
+  toast.textContent = message;
+  document.body.appendChild(toast);
+  setTimeout(() => { toast.classList.add("show"); }, 10);
+  setTimeout(() => {
+    toast.classList.remove("show");
+    setTimeout(() => { toast.remove(); }, 300);
+  }, 3000);
+}
+function sendControl(action) {
+  fetch(`/api/control/${action}`, { method: 'POST' })
+    .then(res => {
+      if (res.ok) { showToast(`Print ${action} command sent successfully`, "success"); }
+      else { showToast(`Failed to send ${action} command`, "danger"); }
+    })
+    .catch(err => { showToast(`Error: ${err.message}`, "danger"); });
+}
+function snoozeDetection() {
+  fetch('/api/control/snooze', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ seconds: 600 })
+  })
+  .then(res => {
+    if (res.ok) {
+      showToast("Detection snoozed for 10 minutes", "warning");
+      const badge = document.getElementById("det-status-badge");
+      badge.className = "state-badge state-camera_offline";
+      badge.textContent = "Snoozed";
+    } else { showToast("Failed to snooze detection", "danger"); }
+  })
+  .catch(err => { showToast(`Error: ${err.message}`, "danger"); });
+}
+let stopCountdown = null;
+let stopSeconds = 5;
+function confirmStop() {
+  const btn = document.getElementById("btn-stop");
+  if (stopCountdown) {
+    clearInterval(stopCountdown);
+    stopCountdown = null;
+    btn.textContent = "⏹️ Stopping...";
+    btn.disabled = true;
+    fetch('/api/control/stop', { method: 'POST' })
+      .then(res => {
+        if (res.ok) { showToast("Print stop command executed", "success"); }
+        else { showToast("Failed to stop print", "danger"); resetStopButton(); }
+      })
+      .catch(err => { showToast(`Error: ${err.message}`, "danger"); resetStopButton(); });
+  } else {
+    stopSeconds = 5;
+    btn.classList.add("btn-confirming");
+    btn.textContent = `⚠️ Confirm STOP (${stopSeconds})`;
+    stopCountdown = setInterval(() => {
+      stopSeconds--;
+      if (stopSeconds <= 0) {
+        clearInterval(stopCountdown);
+        stopCountdown = null;
+        resetStopButton();
+      } else { btn.textContent = `⚠️ Confirm STOP (${stopSeconds})`; }
+    }, 1000);
+  }
+}
+function resetStopButton() {
+  const btn = document.getElementById("btn-stop");
+  btn.classList.remove("btn-confirming");
+  btn.textContent = "⏹️ Stop Print";
+  btn.disabled = false;
 }
 </script>
 </body>

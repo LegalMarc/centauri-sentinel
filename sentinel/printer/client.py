@@ -65,12 +65,14 @@ def _parse_status(payload: dict[str, Any]) -> PrinterStatus:
             current_layer = int(attrs.get("CurrentLayer", 0))
             total_layers = int(attrs.get("TotalLayer", 0))
             filename = attrs.get("Filename") or None
+            thumbnail_base64 = attrs.get("Thumbnail") or payload.get("thumbnail") or None
             return PrinterStatus(
                 printing=printing,
                 elapsed_seconds=elapsed,
                 current_layer=current_layer,
                 total_layers=total_layers,
                 filename=filename,
+                thumbnail_base64=thumbnail_base64,
                 raw=payload,
             )
 
@@ -105,6 +107,8 @@ def _parse_status(payload: dict[str, Any]) -> PrinterStatus:
         remaining_seconds = float(print_status.get("remaining_time_sec", 0.0))
         camera_connected = bool(external_device.get("camera", False))
 
+        thumbnail_base64 = payload.get("thumbnail") or result.get("thumbnail") or None
+
         return PrinterStatus(
             printing=printing,
             elapsed_seconds=elapsed_seconds,
@@ -119,6 +123,7 @@ def _parse_status(payload: dict[str, Any]) -> PrinterStatus:
             remaining_seconds=remaining_seconds,
             print_state=print_state,
             camera_connected=camera_connected,
+            thumbnail_base64=thumbnail_base64,
             raw=payload,
         )
     except (KeyError, ValueError, TypeError) as exc:

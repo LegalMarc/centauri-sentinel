@@ -611,3 +611,78 @@ async def test_printer_api_endpoint(
     assert data["remaining_seconds"] == 1800.0
     assert data["print_state"] == "printing"
     assert data["camera_connected"] is True
+
+
+async def test_control_pause_success(
+    mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: AsyncMock
+) -> None:
+    printer = AsyncMock()
+    printer.pause.return_value = True
+    mock_watcher.printer = printer
+
+    app_state = create_app(
+        _base_settings(auth_enabled=False), db=mock_db, watcher=mock_watcher, camera=mock_camera
+    )
+    async with _client(app_state) as c:
+        r = await c.post("/api/control/pause")
+
+    assert r.status_code == 200
+    assert r.json()["status"] == "ok"
+    printer.pause.assert_called_once()
+    mock_db.record_pause.assert_called_once_with(source="web", result="ok")
+
+
+async def test_control_resume_success(
+    mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: AsyncMock
+) -> None:
+    printer = AsyncMock()
+    mock_watcher.printer = printer
+    mock_watcher.state = WatcherState.PAUSED
+
+    app_state = create_app(
+        _base_settings(auth_enabled=False), db=mock_db, watcher=mock_watcher, camera=mock_camera
+    )
+    async with _client(app_state) as c:
+        r = await c.post("/api/control/resume")
+
+    assert r.status_code == 200
+    assert r.json()["status"] == "ok"
+    printer.resume.assert_called_once()
+    assert mock_watcher.state == WatcherState.ARMED
+
+
+async def test_control_stop_success(
+    mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: AsyncMock
+) -> None:
+    printer = AsyncMock()
+    mock_watcher.printer = printer
+
+    app_state = create_app(
+        _base_settings(auth_enabled=False), db=mock_db, watcher=mock_watcher, camera=mock_camera
+    )
+    async with _client(app_state) as c:
+        r = await c.post("/api/control/stop")
+
+    assert r.status_code == 200
+    assert r.json()["status"] == "ok"
+    printer.stop.assert_called_once()
+
+
+async def test_control_snooze_success(
+    mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: AsyncMock
+) -> None:
+    app_state = create_app(
+        _base_settings(auth_enabled=False), db=mock_db, watcher=mock_watcher, camera=mock_camera
+    )
+    async with _client(app_state) as c:
+        r = await c.post("/api/control/snooze", json={"seconds": 0.01})
+
+    assert r.status_code == 200
+    assert r.json()["status"] == "ok"
+    mock_db.set_setting.assert_any_call("detection_enabled", "false")
+    
+    # Wait for the re-enable task to fire
+    import asyncio
+    await asyncio.sleep(0.05)
+    mock_db.set_setting.assert_any_call("detection_enabled", "true")
+

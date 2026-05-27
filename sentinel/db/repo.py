@@ -192,3 +192,88 @@ class Database:
         ) as cur:
             row = await cur.fetchone()
             return dict(row) if row else None
+
+    # ------------------------------------------------------------------
+    # Print jobs tracking
+    # ------------------------------------------------------------------
+
+    async def record_print_start(self, filename: str, started_at: str) -> int:
+        """Insert a new print job starting; returns the job id."""
+        async with self._write() as db:
+            cursor = await db.execute(
+                "INSERT INTO print_jobs (filename, started_at, status, pauses_count)"
+                " VALUES (?, ?, 'printing', 0)",
+                (filename, started_at),
+            )
+            return cursor.lastrowid or 0
+
+    async def record_print_end(
+        self,
+        job_id: int,
+        ended_at: str,
+        duration_seconds: int,
+        filament_used_g: float,
+        status: str,
+    ) -> None:
+        """Update job entry when print ends."""
+        async with self._write() as db:
+            await db.execute(
+                "UPDATE print_jobs SET ended_at = ?, duration_seconds = ?,"
+                " filament_used_g = ?, status = ?"
+                " WHERE id = ?",
+                (ended_at, duration_seconds, filament_used_g, status, job_id),
+            )
+
+    async def increment_job_pauses(self, job_id: int) -> None:
+        """Increment the pauses count for the given print job."""
+        async with self._write() as db:
+            await db.execute(
+                "UPDATE print_jobs SET pauses_count = pauses_count + 1 WHERE id = ?",
+                (job_id,),
+            )
+
+    async def get_recent_jobs(self, limit: int = 50) -> list[dict[str, Any]]:
+        """Return the most recent print jobs."""
+        async with self._db.execute(
+            "SELECT id, filename, started_at, ended_at, duration_seconds,"
+            " filament_used_g, status, pauses_count"
+            " FROM print_jobs ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ) as cur:
+            rows = await cur.fetchall()
+            return [dict(r) for r in rows]
+
+    async def get_analytics_summary(self) -> dict[str, Any]:
+        """Calculate and return key statistics for completed/failed prints."""
+        async with self._db.execute(
+            "SELECT COUNT(*) as total_jobs,"
+            " SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed_jobs,"
+            " SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed_jobs,"
+            " SUM(duration_seconds) as total_duration_seconds,"
+            " SUM(filament_used_g) as total_filament_g,"
+            " SUM(pauses_count) as total_pauses"
+            " FROM print_jobs WHERE status IN ('completed', 'failed')"
+        ) as cur:
+            row = await cur.fetchone()
+            res = dict(row) if row else {}
+            
+            total = res.get("total_jobs") or 0
+            completed = res.get("completed_jobs") or 0
+            success_rate = (completed / total * 100) if total > 0 else 0.0
+            
+            # Average duration of completed prints
+            async with self._db.execute(
+                "SELECT AVG(duration_seconds) as avg_duration FROM print_jobs"
+                " WHERE status = 'completed' AND duration_seconds IS NOT NULL"
+            ) as cur_avg:
+                row_avg = await cur_avg.fetchone()
+                avg_duration = row_avg["avg_duration"] if row_avg and row_avg["avg_duration"] is not None else 0.0
+
+            return {
+                "total_prints": total,
+                "success_rate_percent": success_rate,
+                "total_filament_g": res.get("total_filament_g") or 0.0,
+                "total_pauses": res.get("total_pauses") or 0,
+                "avg_duration_seconds": avg_duration,
+            }
+

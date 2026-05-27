@@ -96,6 +96,38 @@ def test_parse_status_filename_present() -> None:
     assert status.filename == "test.gcode"
 
 
+def test_parse_status_thumbnail_legacy() -> None:
+    payload = _status_payload(filename="test.gcode")
+    payload["data"]["Attributes"]["Thumbnail"] = "base64encodedlegacy"
+    status = _parse_status(payload)
+    assert status.thumbnail_base64 == "base64encodedlegacy"
+
+
+def test_parse_status_thumbnail_carbon2() -> None:
+    payload = {
+        "method": 6000,
+        "result": {
+            "print_status": {
+                "state": "printing",
+                "print_duration": 120.0,
+                "filename": "test.gcode",
+                "remaining_time_sec": 300.0,
+            },
+            "machine_status": {"progress": 40.0},
+            "extruder": {"temperature": 210.0, "target": 210.0},
+            "heater_bed": {"temperature": 60.0, "target": 60.0},
+            "external_device": {"camera": True},
+            "thumbnail": "base64encodedresult",
+        }
+    }
+    status = _parse_status(payload)
+    assert status.thumbnail_base64 == "base64encodedresult"
+    assert status.printing is True
+    assert status.extruder_temp == 210.0
+    assert status.bed_temp == 60.0
+    assert status.camera_connected is True
+
+
 def test_parse_status_protocol_error() -> None:
     with pytest.raises(PrinterProtocolError):
         _parse_status({"method": 6000, "data": {"Attributes": {"CurrentStatus": "bad"}}})

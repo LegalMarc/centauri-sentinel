@@ -12,7 +12,17 @@ import logging
 import time
 from typing import TYPE_CHECKING, Any
 
+from telegram import KeyboardButton, ReplyKeyboardMarkup
+
 _background_tasks: set[asyncio.Task[None]] = set()
+
+_TUI_KEYBOARD = ReplyKeyboardMarkup(
+    [
+        [KeyboardButton("📊 Status"), KeyboardButton("📸 Snapshot")],
+        [KeyboardButton("⏸️ Pause"), KeyboardButton("▶️ Resume"), KeyboardButton("⏹️ Stop")],
+    ],
+    resize_keyboard=True,
+)
 
 if TYPE_CHECKING:
     from telegram import Update
@@ -104,7 +114,8 @@ class BotCommandHandler:
             "/confirm — confirm /stop\n"
             "/enable — enable failure detection\n"
             "/disable — disable failure detection\n"
-            "/help — this message"
+            "/help — this message",
+            reply_markup=_TUI_KEYBOARD,
         )
 
     async def cmd_status(self, update: Update, context: Any) -> None:
@@ -116,14 +127,70 @@ class BotCommandHandler:
         recent = await self._db.get_recent_detections(limit=1)
         last_det = recent[0] if recent else None
 
+        # Expose printer state and elapsed print time
+        p_status = self._watcher.last_printer_status
+        printer_state = "Idle"
+        print_elapsed = "—"
+        extruder_temp = 0.0
+        extruder_target = 0.0
+        bed_temp = 0.0
+        bed_target = 0.0
+        progress = 0.0
+        remaining_seconds = 0.0
+        filename = "—"
+        current_layer = 0
+        total_layers = 0
+
+        if p_status:
+            print_state = p_status.print_state or ("printing" if p_status.printing else "idle")
+            printer_state = print_state.capitalize()
+            is_active = p_status.printing or print_state == "paused"
+            print_elapsed = f"{p_status.elapsed_seconds:.0f}s" if is_active else "—"
+            extruder_temp = p_status.extruder_temp
+            extruder_target = p_status.extruder_target
+            bed_temp = p_status.bed_temp
+            bed_target = p_status.bed_target
+            progress = p_status.progress
+            remaining_seconds = p_status.remaining_seconds
+            filename = p_status.filename or "—"
+            current_layer = p_status.current_layer
+            total_layers = p_status.total_layers
+
+        time_rem = "—"
+        if remaining_seconds > 0:
+            hours = int(remaining_seconds // 3600)
+            minutes = int((remaining_seconds % 3600) // 60)
+            secs = int(remaining_seconds % 60)
+            time_rem = f"{hours}h {minutes}m {secs}s" if hours > 0 else f"{minutes}m {secs}s"
+
         lines = [
-            f"Watcher: {self._watcher.state.name}",
-            f"Detection: {'enabled' if detection_enabled == 'true' else 'disabled'}",
-            f"Last heartbeat: {heartbeat.get('last_tick_utc') if heartbeat else 'never'}",
+            f"👁️ Watcher: {self._watcher.state.name}",
+            f"⚙️ Detection: {'enabled' if detection_enabled == 'true' else 'disabled'}",
+            f"🖨️ Printer: {printer_state}",
+            f"📄 File: {filename}",
+            f"📊 Progress: {progress:.1f}% (Layer {current_layer}/{total_layers})",
+            f"⏳ Remaining: {time_rem} (Elapsed: {print_elapsed})",
+            f"🔥 Extruder: {extruder_temp:.1f}°C / {extruder_target:.0f}°C",
+            f"🛏️ Bed: {bed_temp:.1f}°C / {bed_target:.0f}°C",
         ]
         if last_det:
-            lines.append(f"Last detection: score={last_det['score']:.2f} at {last_det['ts_utc']}")
-        await update.message.reply_text("\n".join(lines))
+            lines.append(f"⚠️ Last detection: score={last_det['score']:.2f} at {last_det['ts_utc']}")
+
+        caption = "\n".join(lines)
+
+        try:
+            jpeg = await self._camera.grab()
+            await update.message.reply_photo(
+                photo=jpeg,
+                caption=caption,
+                reply_markup=_TUI_KEYBOARD
+            )
+        except Exception:
+            logger.exception("Failed to grab snapshot for Telegram status")
+            await update.message.reply_text(
+                caption + "\n\n⚠️ Chamber feed unavailable.",
+                reply_markup=_TUI_KEYBOARD
+            )
 
     async def cmd_snapshot(self, update: Update, context: Any) -> None:
         if not self._authorized(update):
@@ -131,10 +198,10 @@ class BotCommandHandler:
         assert update.message is not None
         try:
             jpeg = await self._camera.grab()
-            await update.message.reply_photo(photo=jpeg)
+            await update.message.reply_photo(photo=jpeg, reply_markup=_TUI_KEYBOARD)
         except Exception:
             logger.exception("Failed to grab snapshot for Telegram")
-            await update.message.reply_text("Camera unavailable.")
+            await update.message.reply_text("Camera unavailable.", reply_markup=_TUI_KEYBOARD)
 
     async def cmd_pause(self, update: Update, context: Any) -> None:
         if not self._authorized(update):
@@ -145,16 +212,16 @@ class BotCommandHandler:
         except Exception as exc:
             logger.exception("Pause failed via Telegram command")
             await self._db.record_pause(source="telegram", result="error", error_message=str(exc))
-            await update.message.reply_text("Pause failed — check the printer.")
+            await update.message.reply_text("Pause failed — check the printer.", reply_markup=_TUI_KEYBOARD)
             return
         if sent:
             await self._db.record_pause(source="telegram", result="ok")
-            await update.message.reply_text("Print paused.")
+            await update.message.reply_text("Print paused.", reply_markup=_TUI_KEYBOARD)
         else:
             await self._db.record_pause(
                 source="telegram", result="error", error_message="Printer already paused"
             )
-            await update.message.reply_text("Printer is already paused.")
+            await update.message.reply_text("Printer is already paused.", reply_markup=_TUI_KEYBOARD)
 
     async def cmd_resume(self, update: Update, context: Any) -> None:
         if not self._authorized(update):
@@ -165,10 +232,10 @@ class BotCommandHandler:
             from sentinel.watcher.state import WatcherState
             if self._watcher.state == WatcherState.PAUSED:
                 self._watcher.state = WatcherState.ARMED
-            await update.message.reply_text("Print resumed.")
+            await update.message.reply_text("Print resumed.", reply_markup=_TUI_KEYBOARD)
         except Exception:
             logger.exception("Resume failed via Telegram command")
-            await update.message.reply_text("Resume failed — check the printer.")
+            await update.message.reply_text("Resume failed — check the printer.", reply_markup=_TUI_KEYBOARD)
 
     async def cmd_stop(self, update: Update, context: Any) -> None:
         if not self._authorized(update):
@@ -177,7 +244,7 @@ class BotCommandHandler:
         user = update.message.from_user
         assert user is not None
         self._pending_stops[user.id] = time.monotonic()
-        await update.message.reply_text("Reply /confirm within 30 s to cancel the print.")
+        await update.message.reply_text("Reply /confirm within 30 s to cancel the print.", reply_markup=_TUI_KEYBOARD)
 
     async def cmd_confirm(self, update: Update, context: Any) -> None:
         if not self._authorized(update):
@@ -190,31 +257,32 @@ class BotCommandHandler:
         if ts is None or (time.monotonic() - ts) > _STOP_CONFIRM_WINDOW:
             self._pending_stops.pop(user.id, None)
             await update.message.reply_text(
-                "No active /stop request (or it expired). Use /stop first."
+                "No active /stop request (or it expired). Use /stop first.",
+                reply_markup=_TUI_KEYBOARD
             )
             return
 
         self._pending_stops.pop(user.id)
         try:
             await self._printer.stop()
-            await update.message.reply_text("Print cancelled.")
+            await update.message.reply_text("Print cancelled.", reply_markup=_TUI_KEYBOARD)
         except Exception:
             logger.exception("Stop failed via Telegram /confirm")
-            await update.message.reply_text("Stop failed — check the printer.")
+            await update.message.reply_text("Stop failed — check the printer.", reply_markup=_TUI_KEYBOARD)
 
     async def cmd_enable(self, update: Update, context: Any) -> None:
         if not self._authorized(update):
             return
         assert update.message is not None
         await self._db.set_setting("detection_enabled", "true")
-        await update.message.reply_text("Failure detection enabled.")
+        await update.message.reply_text("Failure detection enabled.", reply_markup=_TUI_KEYBOARD)
 
     async def cmd_disable(self, update: Update, context: Any) -> None:
         if not self._authorized(update):
             return
         assert update.message is not None
         await self._db.set_setting("detection_enabled", "false")
-        await update.message.reply_text("Failure detection disabled.")
+        await update.message.reply_text("Failure detection disabled.", reply_markup=_TUI_KEYBOARD)
 
     # ------------------------------------------------------------------
     # Inline keyboard callbacks

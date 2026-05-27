@@ -82,6 +82,7 @@ def _make_handler(
 
     watcher = MagicMock()
     watcher.state = WatcherState.ARMED
+    watcher.last_printer_status = None
 
     return BotCommandHandler(
         _settings(),
@@ -193,8 +194,9 @@ async def test_cmd_status_includes_state() -> None:
     handler = _make_handler()
     update = _make_update()
     await handler.cmd_status(update, None)
-    text: str = update.message.reply_text.call_args[0][0]
-    assert "ARMED" in text
+    assert update.message.reply_photo.called
+    caption = update.message.reply_photo.call_args[1]["caption"]
+    assert "ARMED" in caption
 
 
 # ---------------------------------------------------------------------------
@@ -206,7 +208,8 @@ async def test_cmd_snapshot_sends_photo() -> None:
     handler = _make_handler()
     update = _make_update()
     await handler.cmd_snapshot(update, None)
-    update.message.reply_photo.assert_called_once_with(photo=b"\xff\xd8\xff\xd9")
+    assert update.message.reply_photo.called
+    assert update.message.reply_photo.call_args[1]["photo"] == b"\xff\xd8\xff\xd9"
 
 
 async def test_cmd_snapshot_camera_error_replies_text() -> None:

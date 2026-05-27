@@ -35,3 +35,15 @@ CREATE TABLE IF NOT EXISTS watcher_heartbeat (
     state           TEXT    NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS print_jobs (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    filename            TEXT    NOT NULL,
+    started_at          TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    ended_at            TEXT,
+    duration_seconds    INTEGER,
+    filament_used_g     REAL,
+    status              TEXT    NOT NULL,  -- 'printing' | 'completed' | 'failed'
+    pauses_count        INTEGER NOT NULL DEFAULT 0
+);
+
+

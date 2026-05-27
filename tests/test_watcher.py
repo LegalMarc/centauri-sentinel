@@ -683,3 +683,72 @@ async def test_camera_offline_alert_only_sent_once() -> None:
     assert watcher.state == WatcherState.CAMERA_OFFLINE
     assert notifier.send_camera_offline_alert.call_count == 1
 
+
+async def test_print_job_tracking_lifecycle() -> None:
+    """Verify that print job lifecycle transitions correctly update the database."""
+    watcher, printer, _, _, db = await _make_watcher()
+
+    # 1. Start printing
+    status = PrinterStatus(
+        printing=True,
+        elapsed_seconds=10.0,
+        current_layer=1,
+        total_layers=100,
+        filename="first_job.gcode",
+        print_state="printing",
+    )
+    printer.status = AsyncMock(return_value=status)
+    await watcher.tick()
+
+    recent = await db.get_recent_jobs()
+    assert len(recent) == 1
+    job = recent[0]
+    assert job["filename"] == "first_job.gcode"
+    assert job["status"] == "printing"
+    assert job["pauses_count"] == 0
+
+    # 2. Transition print_state to paused
+    status.print_state = "paused"
+    await watcher.tick()
+    recent = await db.get_recent_jobs()
+    assert recent[0]["pauses_count"] == 1
+
+    # 3. Transition back-to-back to another print job (different filename)
+    status.filename = "second_job.gcode"
+    status.print_state = "printing"
+    status.elapsed_seconds = 20.0
+    await watcher.tick()
+
+    recent = await db.get_recent_jobs()
+    assert len(recent) == 2
+    # The most recent is at index 0 (second_job)
+    second_job = recent[0]
+    first_job = recent[1]
+
+    assert first_job["filename"] == "first_job.gcode"
+    assert first_job["status"] == "completed"
+    assert first_job["duration_seconds"] == 20
+
+    assert second_job["filename"] == "second_job.gcode"
+    assert second_job["status"] == "printing"
+    assert second_job["pauses_count"] == 0
+
+    # 4. Stop printing (go idle)
+    idle_status = PrinterStatus(
+        printing=False,
+        elapsed_seconds=0.0,
+        current_layer=0,
+        total_layers=0,
+        filename=None,
+        print_state="idle",
+    )
+    printer.status = AsyncMock(return_value=idle_status)
+    await watcher.tick()
+
+    recent = await db.get_recent_jobs()
+    assert len(recent) == 2
+    second_job = recent[0]
+    assert second_job["filename"] == "second_job.gcode"
+    assert second_job["status"] == "failed"
+
+

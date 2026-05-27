@@ -154,7 +154,7 @@ async def test_bot_runner_stop_when_not_started() -> None:
 
 
 async def test_bot_runner_all_handlers_added() -> None:
-    """Verify all 9 command handlers + callback query handler are registered."""
+    """Verify all 9 command handlers + callback query handler + 5 reply keyboard handlers are registered."""
     handler = _make_handler()
     app, builder = _make_ptb_app()
 
@@ -162,13 +162,14 @@ async def test_bot_runner_all_handlers_added() -> None:
         patch("telegram.ext.Application") as mock_app_class,
         patch("telegram.ext.CommandHandler", side_effect=lambda name, fn: (name, fn)),
         patch("telegram.ext.CallbackQueryHandler", side_effect=lambda fn: fn),
+        patch("telegram.ext.MessageHandler", side_effect=lambda filters, fn: (filters, fn)),
     ):
         mock_app_class.builder.return_value = builder
         runner = BotRunner(_SETTINGS_TG, handler)
         await runner.start()
 
-    # add_handler should be called 10 times (9 commands + 1 callback)
-    assert app.add_handler.call_count == 10
+    # add_handler should be called 15 times (9 commands + 1 callback + 5 message text filters)
+    assert app.add_handler.call_count == 15
 
 
 async def test_bot_runner_stop_times_out() -> None:

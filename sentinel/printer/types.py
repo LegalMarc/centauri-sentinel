@@ -45,6 +45,9 @@ class PrinterStatus:
     # Camera connectivity as reported by the printer
     camera_connected: bool = False
 
+    # Base64-encoded thumbnail PNG image from G-code metadata
+    thumbnail_base64: str | None = None
+
     # Raw decoded payload for diagnostics
     raw: dict[str, Any] = field(default_factory=dict, compare=False, repr=False)
 

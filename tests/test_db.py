@@ -321,3 +321,48 @@ async def test_ping_returns_false_on_closed_connection(tmp_path: Path) -> None:
     # Connection is closed — ping should return False
     result = await database.ping()
     assert result is False
+
+
+# ---------------------------------------------------------------------------
+# Print Jobs & Analytics
+# ---------------------------------------------------------------------------
+
+
+async def test_print_jobs_crud_and_analytics(db: Database) -> None:
+    # 1. Record print start
+    job_id = await db.record_print_start("benchy.gcode", "2026-05-26T23:00:00Z")
+    assert job_id == 1
+
+    # 2. Get recent jobs
+    recent = await db.get_recent_jobs()
+    assert len(recent) == 1
+    assert recent[0]["filename"] == "benchy.gcode"
+    assert recent[0]["status"] == "printing"
+    assert recent[0]["pauses_count"] == 0
+
+    # 3. Increment pauses
+    await db.increment_job_pauses(job_id)
+    recent = await db.get_recent_jobs()
+    assert recent[0]["pauses_count"] == 1
+
+    # 4. Record print end (completed)
+    await db.record_print_end(job_id, "2026-05-26T23:10:00Z", 600, 15.5, "completed")
+    recent = await db.get_recent_jobs()
+    assert recent[0]["status"] == "completed"
+    assert recent[0]["duration_seconds"] == 600
+    assert recent[0]["filament_used_g"] == 15.5
+
+    # 5. Record another job (failed)
+    job_id2 = await db.record_print_start("spaghetti.gcode", "2026-05-26T23:15:00Z")
+    await db.increment_job_pauses(job_id2)
+    await db.increment_job_pauses(job_id2)
+    await db.record_print_end(job_id2, "2026-05-26T23:20:00Z", 300, 5.0, "failed")
+
+    # 6. Verify analytics summary
+    summary = await db.get_analytics_summary()
+    assert summary["total_prints"] == 2
+    assert summary["success_rate_percent"] == 50.0
+    assert summary["total_filament_g"] == 20.5
+    assert summary["total_pauses"] == 3
+    assert summary["avg_duration_seconds"] == 600.0
+

@@ -82,6 +82,9 @@ class WatcherLoop:
         self._print_start: datetime | None = None
         self._running = False
         self.last_printer_status: PrinterStatus | None = None
+        self._current_job_id: int | None = None
+        self._prev_print_state: str | None = None
+        self._current_filename: str | None = None
 
     @property
     def state(self) -> WatcherState:
@@ -90,6 +93,10 @@ class WatcherLoop:
     @state.setter
     def state(self, value: WatcherState) -> None:
         self._state = value
+
+    @property
+    def printer(self) -> Printer:
+        return self._printer
 
     # ------------------------------------------------------------------
     # Public
@@ -152,11 +159,62 @@ class WatcherLoop:
             self.state = WatcherState.IDLE
             self._confirm_count = 0
             self._print_start = None
+
+            # Record print end if a job was active
+            if self._current_job_id is not None:
+                ended_at = datetime.now(tz=UTC).isoformat().replace("+00:00", "Z")
+                duration = int(status.elapsed_seconds)
+                if duration == 0 and self.last_printer_status:
+                    duration = int(self.last_printer_status.elapsed_seconds)
+                final_status = "completed" if status.print_state == "completed" else "failed"
+                await self._db.record_print_end(
+                    self._current_job_id,
+                    ended_at,
+                    duration,
+                    0.0,
+                    final_status,
+                )
+                self._current_job_id = None
+
+            self._prev_print_state = None
+            self._current_filename = None
             return
 
         # Printer is printing
         if self._print_start is None:
             self._print_start = datetime.now(tz=UTC)
+
+        # Handle back-to-back print job transitions (filename changed while printing)
+        if self._current_job_id is not None and self._current_filename is not None:
+            if status.filename != self._current_filename:
+                ended_at = datetime.now(tz=UTC).isoformat().replace("+00:00", "Z")
+                duration = 0
+                if self.last_printer_status:
+                    duration = int(self.last_printer_status.elapsed_seconds)
+                await self._db.record_print_end(
+                    self._current_job_id,
+                    ended_at,
+                    duration,
+                    0.0,
+                    "completed",
+                )
+                self._current_job_id = None
+
+        # Start job tracking if not already active
+        if self._current_job_id is None:
+            started_at = datetime.now(tz=UTC).isoformat().replace("+00:00", "Z")
+            self._current_filename = status.filename
+            self._current_job_id = await self._db.record_print_start(
+                status.filename or "unknown.gcode",
+                started_at,
+            )
+
+        # Record pauses
+        if status.print_state == "paused" and self._prev_print_state != "paused":
+            if self._current_job_id is not None:
+                await self._db.increment_job_pauses(self._current_job_id)
+
+        self._prev_print_state = status.print_state
 
         elapsed = status.elapsed_seconds
         warmup = self._settings.detection_warmup_seconds

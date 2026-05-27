@@ -24,6 +24,14 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_web_background_tasks: set[asyncio.Task[None]] = set()
+
+
+async def _re_enable_after(db: Any, delay: float) -> None:
+    await asyncio.sleep(delay)
+    await db.set_setting("detection_enabled", "true")
+    logger.info("Detection re-enabled after %.0fs snooze", delay)
+
 
 def _age_seconds(heartbeat: str | None) -> float | None:
     """Return seconds since the last heartbeat, or None if no heartbeat recorded."""
@@ -55,6 +63,9 @@ def make_router(
         age = _age_seconds(last_tick_utc)
         detections = await db.get_recent_detections(limit=10)
         pauses = await db.get_recent_pauses(limit=10)
+        recent_jobs = await db.get_recent_jobs(limit=20)
+        analytics = await db.get_analytics_summary()
+        detection_enabled = (await db.get_setting("detection_enabled", "true") == "true")
 
         # Map snapshot_path to snapshot_id for the Jinja template
         for d in detections:
@@ -76,6 +87,7 @@ def make_router(
         filename = "—"
         current_layer = 0
         total_layers = 0
+        thumbnail_base64 = None
 
         if p_status:
             print_state = p_status.print_state or (
@@ -96,6 +108,7 @@ def make_router(
             filename = p_status.filename or "—"
             current_layer = p_status.current_layer
             total_layers = p_status.total_layers
+            thumbnail_base64 = p_status.thumbnail_base64
 
         return templates.TemplateResponse(
             request,
@@ -106,6 +119,9 @@ def make_router(
                 "tick_age_stale": age is not None and age > stall_seconds,
                 "detections": detections,
                 "pauses": pauses,
+                "recent_jobs": recent_jobs,
+                "analytics": analytics,
+                "detection_enabled": detection_enabled,
                 "printer_state": printer_state,
                 "print_elapsed": print_elapsed,
                 "extruder_temp": extruder_temp,
@@ -119,6 +135,7 @@ def make_router(
                 "filename": filename,
                 "current_layer": current_layer,
                 "total_layers": total_layers,
+                "thumbnail_base64": thumbnail_base64,
             },
         )
 
@@ -144,8 +161,79 @@ def make_router(
             "remaining_seconds": p_status.remaining_seconds,
             "print_state": p_status.print_state,
             "camera_connected": p_status.camera_connected,
+            "thumbnail_base64": p_status.thumbnail_base64,
         }
         return Response(content=json.dumps(data), media_type="application/json")
+
+    @router.post("/api/control/pause")
+    async def control_pause() -> Response:
+        if db is None or watcher is None or watcher.printer is None:
+            raise HTTPException(status_code=503, detail="Service not initialised")
+        try:
+            sent = await watcher.printer.pause()
+        except Exception as exc:
+            logger.exception("Pause failed via Web API")
+            await db.record_pause(source="web", result="error", error_message=str(exc))
+            raise HTTPException(status_code=500, detail=f"Pause failed: {exc}")
+        if sent:
+            await db.record_pause(source="web", result="ok")
+            return Response(content='{"status": "ok", "message": "Print paused"}', media_type="application/json")
+        else:
+            await db.record_pause(source="web", result="error", error_message="Printer already paused")
+            return Response(
+                content='{"status": "error", "message": "Printer already paused"}',
+                status_code=400,
+                media_type="application/json"
+            )
+
+    @router.post("/api/control/resume")
+    async def control_resume() -> Response:
+        if watcher is None or watcher.printer is None:
+            raise HTTPException(status_code=503, detail="Service not initialised")
+        try:
+            await watcher.printer.resume()
+            from sentinel.watcher.state import WatcherState
+            if watcher.state == WatcherState.PAUSED:
+                watcher.state = WatcherState.ARMED
+            return Response(content='{"status": "ok", "message": "Print resumed"}', media_type="application/json")
+        except Exception as exc:
+            logger.exception("Resume failed via Web API")
+            raise HTTPException(status_code=500, detail=f"Resume failed: {exc}")
+
+    @router.post("/api/control/stop")
+    async def control_stop() -> Response:
+        if watcher is None or watcher.printer is None:
+            raise HTTPException(status_code=503, detail="Service not initialised")
+        try:
+            await watcher.printer.stop()
+            return Response(content='{"status": "ok", "message": "Print cancelled"}', media_type="application/json")
+        except Exception as exc:
+            logger.exception("Stop failed via Web API")
+            raise HTTPException(status_code=500, detail=f"Stop failed: {exc}")
+
+    @router.post("/api/control/snooze")
+    async def control_snooze(request: Request) -> Response:
+        if db is None:
+            raise HTTPException(status_code=503, detail="Service not initialised")
+        
+        seconds = 600
+        try:
+            body = await request.json()
+            if isinstance(body, dict) and "seconds" in body:
+                seconds = int(body["seconds"])
+        except Exception:
+            pass
+            
+        await db.set_setting("detection_enabled", "false")
+        
+        task = asyncio.create_task(_re_enable_after(db, float(seconds)))
+        _web_background_tasks.add(task)
+        task.add_done_callback(_web_background_tasks.discard)
+        
+        return Response(
+            content=json.dumps({"status": "ok", "message": f"Detection snoozed for {seconds} seconds"}),
+            media_type="application/json"
+        )
 
     @router.get("/snapshot")
     async def snapshot() -> Response:
