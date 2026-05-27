@@ -185,17 +185,17 @@ def make_router(
     async def printer_api() -> Response:
         if watcher is None or db is None:
             raise HTTPException(status_code=503, detail="Service not initialised")
-        
+
         heartbeat = await db.get_heartbeat()
         last_tick_utc = heartbeat.get("last_tick_utc") if heartbeat else None
         age = _age_seconds(last_tick_utc)
-        
+
         data: dict[str, Any] = {
             "watcher_state": watcher.state.name,
             "tick_age": f"{age:.0f}s ago" if age is not None else "never",
             "tick_age_stale": age is not None and age > stall_seconds,
         }
-        
+
         p_status = watcher.last_printer_status
         if p_status:
             data.update({
@@ -231,7 +231,7 @@ def make_router(
                 "camera_connected": False,
                 "thumbnail_base64": None,
             })
-            
+
         return Response(content=json.dumps(data), media_type="application/json")
 
     @router.post("/api/control/pause")

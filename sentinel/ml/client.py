@@ -10,6 +10,7 @@ fetches the image itself. Any error returns MlResult(score=0.0).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from pathlib import Path
@@ -75,7 +76,7 @@ class MlClient:
             if host == "0.0.0.0":
                 host = "sentinel" if Path("/.dockerenv").exists() else "127.0.0.1"
             snapshot_url = f"http://{host}:{self._bind_port}/__internal_snapshot/{nonce}"
-            token = self._load_token()
+            token = await asyncio.to_thread(self._load_token)
             headers: dict[str, str] = {}
             if token:
                 headers["Authorization"] = f"Bearer {token}"

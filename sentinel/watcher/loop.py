@@ -245,6 +245,12 @@ class WatcherLoop:
         except (ValueError, TypeError):
             warmup = self._settings.detection_warmup_seconds
 
+        if status.print_state == "paused":
+            if self.state != WatcherState.PAUSED:
+                logger.info("Printer paused externally — transitioning PAUSED")
+                self.state = WatcherState.PAUSED
+            return
+
         if elapsed < warmup:
             self.state = WatcherState.WARMUP
         else:

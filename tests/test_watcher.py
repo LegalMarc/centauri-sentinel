@@ -774,3 +774,20 @@ async def test_confirm_count_resets_on_camera_grab_exception() -> None:
 
     assert watcher._confirm_count == 0
     assert watcher.state == WatcherState.ARMED
+
+
+async def test_paused_externally_transitions_to_paused_state() -> None:
+    """If print_state is 'paused', the watcher transitions to PAUSED and doesn't run detection."""
+    watcher, printer, camera, ml, _ = await _make_watcher(printer_status=_printing_status())
+    watcher.state = WatcherState.ARMED
+
+    # Mock status to return print_state="paused"
+    status = _printing_status()
+    status.print_state = "paused"
+    printer.status = AsyncMock(return_value=status)
+
+    await watcher.tick()
+
+    assert watcher.state == WatcherState.PAUSED
+    camera.grab.assert_not_called()
+    ml.detect.assert_not_called()
