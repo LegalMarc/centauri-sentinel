@@ -183,28 +183,55 @@ def make_router(
 
     @router.get("/api/printer")
     async def printer_api() -> Response:
-        if watcher is None:
+        if watcher is None or db is None:
             raise HTTPException(status_code=503, detail="Service not initialised")
-        p_status = watcher.last_printer_status
-        if not p_status:
-            return Response(content='{"status": "unknown"}', media_type="application/json")
-
-        data = {
-            "printing": p_status.printing,
-            "elapsed_seconds": p_status.elapsed_seconds,
-            "current_layer": p_status.current_layer,
-            "total_layers": p_status.total_layers,
-            "filename": p_status.filename,
-            "extruder_temp": p_status.extruder_temp,
-            "extruder_target": p_status.extruder_target,
-            "bed_temp": p_status.bed_temp,
-            "bed_target": p_status.bed_target,
-            "progress": p_status.progress,
-            "remaining_seconds": p_status.remaining_seconds,
-            "print_state": p_status.print_state,
-            "camera_connected": p_status.camera_connected,
-            "thumbnail_base64": p_status.thumbnail_base64,
+        
+        heartbeat = await db.get_heartbeat()
+        last_tick_utc = heartbeat.get("last_tick_utc") if heartbeat else None
+        age = _age_seconds(last_tick_utc)
+        
+        data: dict[str, Any] = {
+            "watcher_state": watcher.state.name,
+            "tick_age": f"{age:.0f}s ago" if age is not None else "never",
+            "tick_age_stale": age is not None and age > stall_seconds,
         }
+        
+        p_status = watcher.last_printer_status
+        if p_status:
+            data.update({
+                "printing": p_status.printing,
+                "elapsed_seconds": p_status.elapsed_seconds,
+                "current_layer": p_status.current_layer,
+                "total_layers": p_status.total_layers,
+                "filename": p_status.filename,
+                "extruder_temp": p_status.extruder_temp,
+                "extruder_target": p_status.extruder_target,
+                "bed_temp": p_status.bed_temp,
+                "bed_target": p_status.bed_target,
+                "progress": p_status.progress,
+                "remaining_seconds": p_status.remaining_seconds,
+                "print_state": p_status.print_state,
+                "camera_connected": p_status.camera_connected,
+                "thumbnail_base64": p_status.thumbnail_base64,
+            })
+        else:
+            data.update({
+                "printing": False,
+                "elapsed_seconds": 0.0,
+                "current_layer": 0,
+                "total_layers": 0,
+                "filename": None,
+                "extruder_temp": 0.0,
+                "extruder_target": 0.0,
+                "bed_temp": 0.0,
+                "bed_target": 0.0,
+                "progress": 0.0,
+                "remaining_seconds": 0.0,
+                "print_state": "idle",
+                "camera_connected": False,
+                "thumbnail_base64": None,
+            })
+            
         return Response(content=json.dumps(data), media_type="application/json")
 
     @router.post("/api/control/pause")

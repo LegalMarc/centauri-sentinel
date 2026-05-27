@@ -185,11 +185,10 @@ async def test_status_page_css_under_2kb(app: object) -> None:
     assert css_bytes < 16384, f"Embedded CSS is {css_bytes} bytes (limit 16384)"
 
 
-async def test_status_page_meta_refresh(app: object) -> None:
+async def test_status_page_no_meta_refresh(app: object) -> None:
     async with _client(app) as c:
         r = await c.get("/")
-    assert 'http-equiv="refresh"' in r.text
-    assert 'content="10"' in r.text
+    assert 'http-equiv="refresh"' not in r.text
 
 
 # ---------------------------------------------------------------------------

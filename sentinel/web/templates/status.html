@@ -3,7 +3,6 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="refresh" content="10">
 <title>centauri-sentinel</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -164,8 +163,14 @@ h2 {
   display: none;
 }
 
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
 .tab-content.active {
   display: block;
+  animation: fadeIn 0.25s cubic-bezier(0.4, 0, 0.2, 1) forwards;
 }
 
 /* Grid Layouts */
@@ -516,7 +521,9 @@ h2 {
 .table-container {
   border-radius: 16px;
   overflow: hidden;
+  overflow-x: auto;
   margin-bottom: 2rem;
+  -webkit-overflow-scrolling: touch;
 }
 
 table {
@@ -676,19 +683,76 @@ footer a {
 .form-input.user-invalid-fallback + .error-msg {
   display: block;
 }
+
+/* Mobile-specific optimizations */
+@media (max-width: 500px) {
+  body {
+    padding: 1rem;
+  }
+
+  .header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.75rem;
+  }
+
+  .tabs {
+    overflow-x: auto;
+    white-space: nowrap;
+    padding-bottom: 0.5rem;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .tab-btn {
+    padding: 0.5rem 0.75rem;
+    font-size: 0.9rem;
+  }
+
+  .controls-buttons {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.5rem;
+    width: 100%;
+  }
+
+  .controls-buttons .btn {
+    justify-content: center;
+    width: 100%;
+  }
+
+  .controls-buttons #btn-stop {
+    grid-column: span 2;
+    justify-content: center;
+  }
+
+  .controls-buttons > div {
+    grid-column: span 2;
+    width: 100%;
+  }
+
+  .controls-buttons > div > button {
+    flex: 1;
+    justify-content: center;
+  }
+
+  .controls-buttons > div > select {
+    flex: 1;
+  }
+}
 </style>
 </head>
 <body>
 <div class="header">
   <h1>Centauri Sentinel</h1>
   <div class="header-status">
-    <span class="state-badge state-{{ watcher_state | lower }}">Watcher: {{ watcher_state }}</span>
+    <span id="header-watcher-badge" class="state-badge state-{{ watcher_state | lower }}">Watcher: {{ watcher_state }}</span>
   </div>
 </div>
 
 <div class="tabs">
   <button class="tab-btn active" onclick="switchTab('live')">Live Monitor</button>
   <button class="tab-btn" onclick="switchTab('history')">History & Analytics</button>
+  <button class="tab-btn" onclick="switchTab('settings')">System & ML Settings</button>
 </div>
 
 <!-- LIVE MONITOR TAB -->
@@ -704,7 +768,15 @@ footer a {
       <button id="btn-pause" class="btn btn-warning" onclick="sendControl('pause')">⏸️ Pause</button>
       <button id="btn-resume" class="btn btn-success" onclick="sendControl('resume')">▶️ Resume</button>
       <button id="btn-stop" class="btn btn-danger" onclick="confirmStop()">⏹️ Stop Print</button>
-      <button id="btn-snooze" class="btn btn-secondary" onclick="snoozeDetection()">🔕 Snooze 10m</button>
+      <div style="display: flex; gap: 0.25rem;">
+        <button id="btn-snooze" class="btn btn-secondary" onclick="snoozeDetection()" style="border-top-right-radius: 0; border-bottom-right-radius: 0;">🔕 Snooze</button>
+        <select id="snooze-duration" class="form-input" style="width: auto; border-top-left-radius: 0; border-bottom-left-radius: 0; border-left: none; padding: 0.5rem 1.5rem 0.5rem 0.5rem; font-family: var(--font-sans); font-weight: 600; cursor: pointer; color: var(--text-primary); background: rgba(255, 255, 255, 0.08); font-size: 0.95rem;">
+          <option value="300">5m</option>
+          <option value="600" selected>10m</option>
+          <option value="1800">30m</option>
+          <option value="3600">1h</option>
+        </select>
+      </div>
     </div>
   </div>
 
@@ -713,21 +785,21 @@ footer a {
       <div class="card-icon">👁️</div>
       <div class="card-content">
         <dt>Watcher state</dt>
-        <dd><span class="state-badge state-{{ watcher_state | lower }}">{{ watcher_state }}</span></dd>
+        <dd><span id="card-watcher-badge" class="state-badge state-{{ watcher_state | lower }}">{{ watcher_state }}</span></dd>
       </div>
     </div>
     <div class="card">
       <div class="card-icon">🖨️</div>
       <div class="card-content">
         <dt>Printer State</dt>
-        <dd><span class="state-badge state-{{ print_state | lower }}">{{ printer_state }}</span></dd>
+        <dd><span id="card-printer-badge" class="state-badge state-{{ print_state | lower }}">{{ printer_state }}</span></dd>
       </div>
     </div>
     <div class="card col-span-2">
       <div class="card-icon">📄</div>
       <div class="card-content">
         <dt>Active Job File</dt>
-        <dd title="{{ filename }}">{{ filename }}</dd>
+        <dd id="card-job-file" title="{{ filename }}">{{ filename }}</dd>
       </div>
     </div>
     <div class="card">
@@ -735,8 +807,8 @@ footer a {
       <div class="card-content">
         <dt>Extruder Temp</dt>
         <dd class="temp-text">
-          <span>{{ "%.1f"|format(extruder_temp) }}°C</span>
-          <span class="temp-target">/ {{ extruder_target | int }}°C</span>
+          <span id="extruder-temp-val">{{ "%.1f"|format(extruder_temp) }}°C</span>
+          <span id="extruder-target-val" class="temp-target">/ {{ extruder_target | int }}°C</span>
         </dd>
       </div>
     </div>
@@ -745,8 +817,8 @@ footer a {
       <div class="card-content">
         <dt>Bed Temp</dt>
         <dd class="temp-text">
-          <span>{{ "%.1f"|format(bed_temp) }}°C</span>
-          <span class="temp-target">/ {{ bed_target | int }}°C</span>
+          <span id="bed-temp-val">{{ "%.1f"|format(bed_temp) }}°C</span>
+          <span id="bed-target-val" class="temp-target">/ {{ bed_target | int }}°C</span>
         </dd>
       </div>
     </div>
@@ -756,9 +828,9 @@ footer a {
         <dt>Print Progress</dt>
         <dd class="progress-container">
           <div class="progress-bar-wrapper">
-            <div class="progress-bar" style="width: {{ progress }}%"></div>
+            <div id="progress-bar" class="progress-bar" style="width: {{ progress }}%"></div>
           </div>
-          <span class="progress-percent">{{ "%.1f"|format(progress) }}%</span>
+          <span id="progress-percent" class="progress-percent">{{ "%.1f"|format(progress) }}%</span>
         </dd>
       </div>
     </div>
@@ -766,14 +838,14 @@ footer a {
       <div class="card-icon">🥞</div>
       <div class="card-content">
         <dt>Current Layer</dt>
-        <dd>{{ current_layer }} / {{ total_layers }}</dd>
+        <dd id="card-layers">{{ current_layer }} / {{ total_layers }}</dd>
       </div>
     </div>
     <div class="card">
       <div class="card-icon">⏱️</div>
       <div class="card-content">
         <dt>Print Elapsed</dt>
-        <dd>{{ print_elapsed }}</dd>
+        <dd id="card-elapsed">{{ print_elapsed }}</dd>
       </div>
     </div>
     <div class="card">
@@ -787,7 +859,7 @@ footer a {
       <div class="card-icon">❤️</div>
       <div class="card-content">
         <dt>Last Watcher Heartbeat</dt>
-        <dd class="{% if tick_age_stale %}stale{% endif %}">{{ tick_age }}</dd>
+        <dd id="card-heartbeat" class="{% if tick_age_stale %}stale{% endif %}">{{ tick_age }}</dd>
       </div>
     </div>
   </div>
@@ -797,86 +869,21 @@ footer a {
       <h2>🎥 Chamber Live Feed</h2>
       <div class="camera-wrapper" style="margin-top: 0.75rem;">
         <div class="camera-badge">
-          <div class="camera-dot {% if not camera_connected %}offline{% endif %}"></div>
-          <span>Camera {% if camera_connected %}Connected{% else %}Offline{% endif %}</span>
+          <div id="camera-dot" class="camera-dot {% if not camera_connected %}offline{% endif %}"></div>
+          <span id="camera-status-text">Camera {% if camera_connected %}Connected{% else %}Offline{% endif %}</span>
         </div>
-        <img src="/snapshot" alt="Current camera frame" onerror="this.alt='Camera stream currently unavailable'">
+        <img id="camera-feed-img" src="/stream" alt="Current camera feed" onerror="this.alt='Camera stream currently unavailable'">
       </div>
     </div>
-    {% if thumbnail_base64 %}
-    <div class="thumbnail-container">
+    <div class="thumbnail-container" id="gcode-preview-container" style="display: {% if thumbnail_base64 %}flex{% else %}none{% endif %};">
       <h2>🖼️ G-code Model Preview</h2>
       <div class="thumbnail-wrapper" style="margin-top: 0.75rem;">
-        <img src="data:image/png;base64,{{ thumbnail_base64 }}" alt="Print Job Thumbnail">
+        <img id="gcode-preview-img" src="{% if thumbnail_base64 %}data:image/png;base64,{{ thumbnail_base64 }}{% endif %}" alt="Print Job Thumbnail">
       </div>
     </div>
-    {% endif %}
   </div>
 
-  <div class="controls-panel" style="margin-top: 2rem;">
-    <div class="controls-header">
-      <h3>⚙️ System & ML Settings</h3>
-    </div>
-    <form id="settings-form" class="settings-form" onsubmit="saveSettings(event)" novalidate>
-      <div class="form-group form-group-full">
-        <label class="form-label" for="input-printer-ip">Printer IP Address or Hostname</label>
-        <input type="text" id="input-printer-ip" name="printer_ip" class="form-input" value="{{ printer_ip }}" required pattern="^[a-zA-Z0-9.-]+$" placeholder="e.g. 192.168.1.100 or printer.local" aria-describedby="printer-ip-error">
-        <div id="printer-ip-error" class="error-msg">❌ Please enter a valid IP address or hostname.</div>
-      </div>
 
-      <div class="form-group">
-        <label class="form-label" for="input-ml-score-threshold">ML Confidence Threshold</label>
-        <input type="number" id="input-ml-score-threshold" name="ml_score_threshold" class="form-input" value="{{ ml_score_threshold }}" min="0.0" max="1.0" step="0.01" required aria-describedby="ml-score-error">
-        <div id="ml-score-error" class="error-msg">❌ Must be a number between 0.0 and 1.0.</div>
-        <dl class="form-help">
-          <dt>Purpose:</dt>
-          <dd>The minimum confidence score required for an ML detection to register as a failure.</dd>
-          <dt>Why Tweak:</dt>
-          <dd>Increase if experiencing false alarms on busy/textured models. Decrease if actual spaghetti is missed.</dd>
-        </dl>
-      </div>
-
-      <div class="form-group">
-        <label class="form-label" for="input-ml-confirm-count">ML Confirm Count</label>
-        <input type="number" id="input-ml-confirm-count" name="ml_confirm_count" class="form-input" value="{{ ml_confirm_count }}" min="1" step="1" required aria-describedby="ml-confirm-error">
-        <div id="ml-confirm-error" class="error-msg">❌ Must be an integer of 1 or greater.</div>
-        <dl class="form-help">
-          <dt>Purpose:</dt>
-          <dd>The number of consecutive positive ML evaluations before pausing the print.</dd>
-          <dt>Why Tweak:</dt>
-          <dd>Increase to ignore transient nozzle movements or dynamic layers. Decrease for faster intervention.</dd>
-        </dl>
-      </div>
-
-      <div class="form-group">
-        <label class="form-label" for="input-ml-poll-interval">ML Poll Interval (seconds)</label>
-        <input type="number" id="input-ml-poll-interval" name="ml_poll_interval_seconds" class="form-input" value="{{ ml_poll_interval_seconds }}" min="1" step="1" required aria-describedby="ml-poll-error">
-        <div id="ml-poll-error" class="error-msg">❌ Must be an integer of 1 second or greater.</div>
-        <dl class="form-help">
-          <dt>Purpose:</dt>
-          <dd>How often the camera feed is sent to the Obico ML model for evaluation.</dd>
-          <dt>Why Tweak:</dt>
-          <dd>Increase to lower resource/network consumption. Decrease to analyze and respond faster.</dd>
-        </dl>
-      </div>
-
-      <div class="form-group">
-        <label class="form-label" for="input-detection-warmup">Detection Warmup Duration (seconds)</label>
-        <input type="number" id="input-detection-warmup" name="detection_warmup_seconds" class="form-input" value="{{ detection_warmup_seconds }}" min="0" step="1" required aria-describedby="detection-warmup-error">
-        <div id="detection-warmup-error" class="error-msg">❌ Must be a non-negative integer.</div>
-        <dl class="form-help">
-          <dt>Purpose:</dt>
-          <dd>The quiet period after a print starts or resumes where failures are not checked.</dd>
-          <dt>Why Tweak:</dt>
-          <dd>Increase if print initialization, prime line layout, or purge towers trigger false warnings.</dd>
-        </dl>
-      </div>
-
-      <div class="form-group form-group-full" style="display: flex; justify-content: flex-end; margin-top: 0.5rem;">
-        <button type="submit" class="btn btn-success">💾 Save Settings</button>
-      </div>
-    </form>
-  </div>
 </div>
 
 <!-- HISTORY & ANALYTICS TAB -->
@@ -1023,6 +1030,74 @@ footer a {
   </div>
 </div>
 
+<!-- SYSTEM & ML SETTINGS TAB -->
+<div id="tab-settings" class="tab-content">
+  <div class="controls-panel">
+    <div class="controls-header">
+      <h3>⚙️ System & ML Settings</h3>
+    </div>
+    <form id="settings-form" class="settings-form" onsubmit="saveSettings(event)" novalidate>
+      <div class="form-group form-group-full">
+        <label class="form-label" for="input-printer-ip">Printer IP Address or Hostname</label>
+        <input type="text" id="input-printer-ip" name="printer_ip" class="form-input" value="{{ printer_ip }}" required pattern="^[a-zA-Z0-9.-]+$" placeholder="e.g. 192.168.1.100 or printer.local" aria-describedby="printer-ip-error">
+        <div id="printer-ip-error" class="error-msg">❌ Please enter a valid IP address or hostname.</div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="input-ml-score-threshold">ML Confidence Threshold</label>
+        <input type="number" id="input-ml-score-threshold" name="ml_score_threshold" class="form-input" value="{{ ml_score_threshold }}" min="0.0" max="1.0" step="0.01" required aria-describedby="ml-score-error">
+        <div id="ml-score-error" class="error-msg">❌ Must be a number between 0.0 and 1.0.</div>
+        <dl class="form-help">
+          <dt>Purpose:</dt>
+          <dd>The minimum confidence score required for an ML detection to register as a failure.</dd>
+          <dt>Why Tweak:</dt>
+          <dd>Increase if experiencing false alarms on busy/textured models. Decrease if actual spaghetti is missed.</dd>
+        </dl>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="input-ml-confirm-count">ML Confirm Count</label>
+        <input type="number" id="input-ml-confirm-count" name="ml_confirm_count" class="form-input" value="{{ ml_confirm_count }}" min="1" step="1" required aria-describedby="ml-confirm-error">
+        <div id="ml-confirm-error" class="error-msg">❌ Must be an integer of 1 or greater.</div>
+        <dl class="form-help">
+          <dt>Purpose:</dt>
+          <dd>The number of consecutive positive ML evaluations before pausing the print.</dd>
+          <dt>Why Tweak:</dt>
+          <dd>Increase to ignore transient nozzle movements or dynamic layers. Decrease for faster intervention.</dd>
+        </dl>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="input-ml-poll-interval">ML Poll Interval (seconds)</label>
+        <input type="number" id="input-ml-poll-interval" name="ml_poll_interval_seconds" class="form-input" value="{{ ml_poll_interval_seconds }}" min="1" step="1" required aria-describedby="ml-poll-error">
+        <div id="ml-poll-error" class="error-msg">❌ Must be an integer of 1 second or greater.</div>
+        <dl class="form-help">
+          <dt>Purpose:</dt>
+          <dd>How often the camera feed is sent to the Obico ML model for evaluation.</dd>
+          <dt>Why Tweak:</dt>
+          <dd>Increase to lower resource/network consumption. Decrease to analyze and respond faster.</dd>
+        </dl>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="input-detection-warmup">Detection Warmup Duration (seconds)</label>
+        <input type="number" id="input-detection-warmup" name="detection_warmup_seconds" class="form-input" value="{{ detection_warmup_seconds }}" min="0" step="1" required aria-describedby="detection-warmup-error">
+        <div id="detection-warmup-error" class="error-msg">❌ Must be a non-negative integer.</div>
+        <dl class="form-help">
+          <dt>Purpose:</dt>
+          <dd>The quiet period after a print starts or resumes where failures are not checked.</dd>
+          <dt>Why Tweak:</dt>
+          <dd>Increase if print initialization, prime line layout, or purge towers trigger false warnings.</dd>
+        </dl>
+      </div>
+
+      <div class="form-group form-group-full" style="display: flex; justify-content: flex-end; margin-top: 0.5rem;">
+        <button type="submit" class="btn btn-success">💾 Save Settings</button>
+      </div>
+    </form>
+  </div>
+</div>
+
 <footer>
   <div>centauri-sentinel v{{ version }} &mdash; <a href="https://github.com/legalmarc/centauri-sentinel" target="_blank">GitHub Repo</a> &mdash; <a href="https://github.com/legalmarc/centauri-sentinel/blob/main/docs/threat-model.md" target="_blank">Threat Model Docs</a></div>
   <div>Elegoo Centauri Carbon 2 AI Watcher &mdash; Contact <a href="https://www.linkedin.com/in/marcmandel/" target="_blank">Marc Mandel</a></div>
@@ -1103,14 +1178,18 @@ function sendControl(action) {
     .catch(err => { showToast(`Error: ${err.message}`, "danger"); });
 }
 function snoozeDetection() {
+  const durationSelect = document.getElementById("snooze-duration");
+  const seconds = parseInt(durationSelect.value, 10);
+  const text = durationSelect.options[durationSelect.selectedIndex].text;
+  
   fetch('/api/control/snooze', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ seconds: 600 })
+    body: JSON.stringify({ seconds: seconds })
   })
   .then(res => {
     if (res.ok) {
-      showToast("Detection snoozed for 10 minutes", "warning");
+      showToast(`Detection snoozed for ${text}`, "warning");
       const badge = document.getElementById("det-status-badge");
       badge.className = "state-badge state-camera_offline";
       badge.textContent = "Snoozed";
@@ -1199,7 +1278,6 @@ function saveSettings(event) {
     if (res.ok) {
       showToast("Settings updated successfully", "success");
       inputs.forEach(input => input.classList.add("user-valid-fallback"));
-      setTimeout(() => { window.location.reload(); }, 1000);
     } else {
       showToast(data.detail || "Failed to update settings", "danger");
       inputs.forEach(input => {
@@ -1213,6 +1291,154 @@ function saveSettings(event) {
     showToast(`Error: ${err.message}`, "danger");
   });
 }
+
+// Dynamic Polling for Live Telemetry
+function formatTime(seconds) {
+  if (seconds <= 0) return "—";
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = Math.floor(seconds % 60);
+  let formatted = "";
+  if (h > 0) formatted += `${h}h `;
+  if (m > 0 || h > 0) formatted += `${m}m `;
+  formatted += `${s}s`;
+  return formatted;
+}
+
+function updateLiveStats() {
+  fetch('/api/printer')
+    .then(res => {
+      if (!res.ok) throw new Error("Failed to fetch printer status");
+      return res.json();
+    })
+    .then(data => {
+      // Update Watcher State
+      const headerWatcherBadge = document.getElementById("header-watcher-badge");
+      if (headerWatcherBadge) {
+        headerWatcherBadge.className = `state-badge state-${data.watcher_state.toLowerCase()}`;
+        headerWatcherBadge.textContent = `Watcher: ${data.watcher_state}`;
+      }
+      const cardWatcherBadge = document.getElementById("card-watcher-badge");
+      if (cardWatcherBadge) {
+        cardWatcherBadge.className = `state-badge state-${data.watcher_state.toLowerCase()}`;
+        cardWatcherBadge.textContent = data.watcher_state;
+      }
+      
+      // Update Heartbeat
+      const cardHeartbeat = document.getElementById("card-heartbeat");
+      if (cardHeartbeat) {
+        cardHeartbeat.textContent = data.tick_age;
+        if (data.tick_age_stale) {
+          cardHeartbeat.classList.add("stale");
+        } else {
+          cardHeartbeat.classList.remove("stale");
+        }
+      }
+
+      // Update Printer State
+      const cardPrinterBadge = document.getElementById("card-printer-badge");
+      if (cardPrinterBadge && data.print_state) {
+        cardPrinterBadge.className = `state-badge state-${data.print_state.toLowerCase()}`;
+        cardPrinterBadge.textContent = data.print_state.charAt(0).toUpperCase() + data.print_state.slice(1);
+      }
+
+      // Update Active Job File
+      const cardJobFile = document.getElementById("card-job-file");
+      if (cardJobFile) {
+        const filename = data.filename || "—";
+        cardJobFile.textContent = filename;
+        cardJobFile.title = filename;
+      }
+
+      // Update Extruder Temp
+      const extruderTempEl = document.getElementById("extruder-temp-val");
+      const extruderTargetEl = document.getElementById("extruder-target-val");
+      if (extruderTempEl && extruderTargetEl) {
+        extruderTempEl.textContent = `${parseFloat(data.extruder_temp).toFixed(1)}°C`;
+        extruderTargetEl.textContent = `/ ${parseInt(data.extruder_target, 10)}°C`;
+      }
+
+      // Update Bed Temp
+      const bedTempEl = document.getElementById("bed-temp-val");
+      const bedTargetEl = document.getElementById("bed-target-val");
+      if (bedTempEl && bedTargetEl) {
+        bedTempEl.textContent = `${parseFloat(data.bed_temp).toFixed(1)}°C`;
+        bedTargetEl.textContent = `/ ${parseInt(data.bed_target, 10)}°C`;
+      }
+
+      // Update Progress
+      const progressBar = document.getElementById("progress-bar");
+      const progressPercent = document.getElementById("progress-percent");
+      if (progressBar && progressPercent) {
+        const progress = parseFloat(data.progress || 0);
+        progressBar.style.width = `${progress}%`;
+        progressPercent.textContent = `${progress.toFixed(1)}%`;
+      }
+
+      // Update Layer
+      const cardLayers = document.getElementById("card-layers");
+      if (cardLayers) {
+        cardLayers.textContent = `${data.current_layer} / ${data.total_layers}`;
+      }
+
+      // Update Elapsed
+      const cardElapsed = document.getElementById("card-elapsed");
+      if (cardElapsed) {
+        const isActive = data.printing || data.print_state === "paused";
+        cardElapsed.textContent = isActive ? `${parseFloat(data.elapsed_seconds || 0).toFixed(0)}s` : "—";
+      }
+
+      // Update Remaining
+      const timeRemainingEl = document.getElementById("time-remaining");
+      if (timeRemainingEl) {
+        timeRemainingEl.textContent = formatTime(data.remaining_seconds);
+      }
+
+      // Update Camera Connected Badge
+      const cameraDot = document.getElementById("camera-dot");
+      const cameraStatusText = document.getElementById("camera-status-text");
+      if (cameraDot && cameraStatusText) {
+        if (data.camera_connected) {
+          cameraDot.classList.remove("offline");
+          cameraStatusText.textContent = "Camera Connected";
+        } else {
+          cameraDot.classList.add("offline");
+          cameraStatusText.textContent = "Camera Offline";
+        }
+      }
+
+      // Update G-code Preview Thumbnail Container
+      const previewContainer = document.getElementById("gcode-preview-container");
+      const previewImg = document.getElementById("gcode-preview-img");
+      if (previewContainer && previewImg) {
+        if (data.thumbnail_base64) {
+          previewImg.src = `data:image/png;base64,${data.thumbnail_base64}`;
+          previewContainer.style.display = "flex";
+        } else {
+          previewContainer.style.display = "none";
+        }
+      }
+    })
+    .catch(err => console.error("Error updating live stats:", err));
+}
+
+// Start polling every 5 seconds
+setInterval(updateLiveStats, 5000);
+
+// Set up instant form validation on inputs
+document.querySelectorAll("#settings-form .form-input").forEach(input => {
+  const updateValidationClass = () => {
+    if (input.checkValidity()) {
+      input.classList.remove("user-invalid-fallback");
+      input.classList.add("user-valid-fallback");
+    } else {
+      input.classList.remove("user-valid-fallback");
+      input.classList.add("user-invalid-fallback");
+    }
+  };
+  input.addEventListener("input", updateValidationClass);
+  input.addEventListener("blur", updateValidationClass);
+});
 </script>
 </body>
 </html>
