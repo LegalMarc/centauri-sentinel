@@ -267,6 +267,7 @@ class WatcherLoop:
         except CameraOfflineError:
             self.state = WatcherState.CAMERA_OFFLINE
             logger.warning("Camera offline — suspending detection")
+            self._confirm_count = 0
             if prev_state != WatcherState.CAMERA_OFFLINE:
                 for n in self._notifiers:
                     try:
@@ -276,6 +277,7 @@ class WatcherLoop:
             return
         except Exception:
             logger.warning("Camera grab failed; skipping this tick")
+            self._confirm_count = 0
             return
 
         result: MlResult = await self._ml.detect(jpeg)

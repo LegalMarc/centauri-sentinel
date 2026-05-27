@@ -175,8 +175,12 @@ class PrinterClient:
         if now - self._last_pause_at < _PAUSE_DEBOUNCE_S:
             logger.debug("pause() called within debounce window — skipping duplicate publish")
             return False
-        await self._with_retry(lambda: self._send_command({"method": 1001}))
-        self._last_pause_at = time.monotonic()
+        self._last_pause_at = now
+        try:
+            await self._with_retry(lambda: self._send_command({"method": 1001}))
+        except Exception:
+            self._last_pause_at = 0.0
+            raise
         return True
 
     async def resume(self) -> None:

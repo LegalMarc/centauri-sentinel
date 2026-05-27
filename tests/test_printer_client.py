@@ -5,6 +5,7 @@ Uses unittest.mock to stub aiomqtt.Client so no real MQTT broker is needed.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -333,6 +334,24 @@ async def test_pause_failure_does_not_lock_debounce() -> None:
         await client.pause()
 
     assert client._last_pause_at == pytest.approx(0.0)
+
+
+async def test_pause_concurrent_calls_debounced() -> None:
+    """Concurrent calls to pause() should be debounced correctly (only one publish)."""
+    client = PrinterClient(_SETTINGS)
+    publishes = 0
+
+    async def _slow_publish(msg: dict[str, Any]) -> None:
+        nonlocal publishes
+        publishes += 1
+        await asyncio.sleep(0.05)
+
+    with patch.object(client, "_send_command", side_effect=_slow_publish):
+        # Trigger two pause calls concurrently
+        res1, res2 = await asyncio.gather(client.pause(), client.pause())
+
+    assert (res1 is True and res2 is False) or (res1 is False and res2 is True)
+    assert publishes == 1
 
 
 # ---------------------------------------------------------------------------

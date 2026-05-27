@@ -1,7 +1,7 @@
 # centauri-sentinel — Pre-Publication Review Findings
 
-**Review date:** 2026-05-26
-**Reviewed by:** Antigravity Code Review Loop (Gemini 3.5 Flash)
+**Review date:** 2026-05-27
+**Reviewed by:** Antigravity Code Review Loop
 **Passes completed:** 8/8
 
 ---
@@ -12,12 +12,12 @@
 |---|---|---|
 | CRITICAL | 2 | Resolved |
 | HIGH | 12 | Resolved |
-| MEDIUM | 20 | Resolved |
-| LOW | 13 | Resolved |
+| MEDIUM | 21 | Resolved |
+| LOW | 14 | Resolved |
 
-**Total findings: 47 (0 remaining, 47 resolved)**
+**Total findings: 49 (0 remaining, 49 resolved)**
 
-**Go/No-Go: GO** — All 47 findings (including 2 CRITICAL, 12 HIGH, 20 MEDIUM, and 13 LOW items) have been successfully resolved, tested, and verified. The codebase passes all checks and tests with **95.37% total coverage** and zero warnings.
+**Go/No-Go: GO** — All 49 findings (including 2 CRITICAL, 12 HIGH, 21 MEDIUM, and 14 LOW items) have been successfully resolved, tested, and verified. The codebase passes all checks and tests with **94.50% total coverage** and zero warnings.
 
 ---
 
@@ -105,6 +105,13 @@
 **Fix:** Tests instantiate clean `PrinterClient` instances.
 **Status:** Resolved
 
+### [PASS 1] [LOW] Detection confirm count not reset on camera offline or grab errors
+**File:** [sentinel/watcher/loop.py](../sentinel/watcher/loop.py) (lines 268-278)
+**Issue:** If the camera goes offline or a grab error occurs mid-sequence while the watcher has accumulated positive confirmation hits (e.g. `_confirm_count` > 0), the count is not reset. When the camera recovers, the very next positive frame triggers a pause immediately (as if consecutive), even though the sequence was broken by the camera offline period.
+**Impact:** Potential false-positive pauses when the camera recovers from a transient failure or offline state.
+**Fix:** Reset `_confirm_count = 0` inside the `except CameraOfflineError:` and `except Exception:` blocks in `_check_frame()`.
+**Status:** Resolved
+
 ### [PASS 1] [MEDIUM] Camera offline notification spam on persistent failure
 **File:** [sentinel/watcher/loop.py](file:///Users/mhm/Documents/Dev/centauri-sentinel/sentinel/watcher/loop.py)
 **Issue:** If the camera is persistently offline, the user gets spammed with a camera offline alert every tick (10s).
@@ -172,6 +179,11 @@
 **Issue:** The synchronous `bcrypt.checkpw()` handles hashing during Basic Authentication, which blocks the central `asyncio` event loop for 100–300 ms on every request attempt.
 **Impact:** Slows server event loop responsiveness for concurrent camera streaming, watchdogs, and status updates during auth attempts.
 **Fix:** Modified `_check_credentials` to be async and run the CPU-heavy hashing operation in a separate thread pool using `asyncio.to_thread`.
+### [PASS 3] [MEDIUM] Race condition in printer client pause debounce window check
+**File:** [sentinel/printer/client.py](../sentinel/printer/client.py) (lines 166-180)
+**Issue:** If `pause()` is called concurrently (e.g. from the web control panel and Telegram bot at the same time), both invocations check the elapsed time since `_last_pause_at`. Since `_last_pause_at` is only updated *after* the async command publish completes, both concurrent calls pass the debounce check and publish pause commands to the MQTT broker.
+**Impact:** Duplicate MQTT pause commands published to the printer.
+**Fix:** Set `self._last_pause_at = now` immediately before starting the async publish command. If the publish raises an exception, reset `_last_pause_at = 0.0` to allow subsequent retries.
 **Status:** Resolved
 
 ---

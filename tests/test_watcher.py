@@ -750,3 +750,27 @@ async def test_print_job_tracking_lifecycle() -> None:
     second_job = recent[0]
     assert second_job["filename"] == "second_job.gcode"
     assert second_job["status"] == "failed"
+
+
+async def test_confirm_count_resets_on_camera_offline() -> None:
+    """If camera grab raises CameraOfflineError, confirm_count must reset to 0."""
+    watcher, _, camera, _, _ = await _make_watcher(printer_status=_printing_status())
+    watcher._confirm_count = 2
+
+    camera.grab = AsyncMock(side_effect=CameraOfflineError("offline"))
+    await watcher.tick()
+
+    assert watcher._confirm_count == 0
+    assert watcher.state == WatcherState.CAMERA_OFFLINE
+
+
+async def test_confirm_count_resets_on_camera_grab_exception() -> None:
+    """If camera grab raises a general Exception, confirm_count must reset to 0."""
+    watcher, _, camera, _, _ = await _make_watcher(printer_status=_printing_status())
+    watcher._confirm_count = 2
+
+    camera.grab = AsyncMock(side_effect=Exception("general error"))
+    await watcher.tick()
+
+    assert watcher._confirm_count == 0
+    assert watcher.state == WatcherState.ARMED
