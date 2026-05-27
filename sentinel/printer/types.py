@@ -28,10 +28,10 @@ class PrinterStatus:
     filename: str | None
 
     # Extruder and bed temperatures
-    extruder_temp: float = 0.0
-    extruder_target: float = 0.0
-    bed_temp: float = 0.0
-    bed_target: float = 0.0
+    extruder_temp: float | None = None
+    extruder_target: float | None = None
+    bed_temp: float | None = None
+    bed_target: float | None = None
 
     # Print progress percentage (0-100)
     progress: float = 0.0

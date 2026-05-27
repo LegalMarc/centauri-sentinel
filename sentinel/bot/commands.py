@@ -128,12 +128,12 @@ class BotCommandHandler:
 
         # Expose printer state and elapsed print time
         p_status = self._watcher.last_printer_status
-        printer_state = "Idle"
+        printer_state = "Offline"
         print_elapsed = "—"
-        extruder_temp = 0.0
-        extruder_target = 0.0
-        bed_temp = 0.0
-        bed_target = 0.0
+        extruder_temp = None
+        extruder_target = None
+        bed_temp = None
+        bed_target = None
         progress = 0.0
         remaining_seconds = 0.0
         filename = "—"
@@ -162,6 +162,17 @@ class BotCommandHandler:
             secs = int(remaining_seconds % 60)
             time_rem = f"{hours}h {minutes}m {secs}s" if hours > 0 else f"{minutes}m {secs}s"
 
+        ext_str = (
+            f"{extruder_temp:.1f}°C / {extruder_target:.0f}°C"
+            if (extruder_temp is not None and extruder_target is not None)
+            else "—"
+        )
+        bed_str = (
+            f"{bed_temp:.1f}°C / {bed_target:.0f}°C"
+            if (bed_temp is not None and bed_target is not None)
+            else "—"
+        )
+
         lines = [
             f"👁️ Watcher: {self._watcher.state.name}",
             f"⚙️ Detection: {'enabled' if detection_enabled == 'true' else 'disabled'}",
@@ -169,8 +180,8 @@ class BotCommandHandler:
             f"📄 File: {filename}",
             f"📊 Progress: {progress:.1f}% (Layer {current_layer}/{total_layers})",
             f"⏳ Remaining: {time_rem} (Elapsed: {print_elapsed})",
-            f"🔥 Extruder: {extruder_temp:.1f}°C / {extruder_target:.0f}°C",
-            f"🛏️ Bed: {bed_temp:.1f}°C / {bed_target:.0f}°C",
+            f"🔥 Extruder: {ext_str}",
+            f"🛏️ Bed: {bed_str}",
         ]
         if last_det:
             lines.append(f"⚠️ Last detection: score={last_det['score']:.2f} at {last_det['ts_utc']}")

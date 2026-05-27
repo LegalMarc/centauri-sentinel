@@ -114,15 +114,15 @@ def make_router(
 
         # Expose printer state and elapsed print time
         p_status = watcher.last_printer_status
-        printer_state = "Idle"
+        printer_state = "Offline"
         print_elapsed = "—"
-        extruder_temp = 0.0
-        extruder_target = 0.0
-        bed_temp = 0.0
-        bed_target = 0.0
+        extruder_temp = None
+        extruder_target = None
+        bed_temp = None
+        bed_target = None
         progress = 0.0
         remaining_seconds = 0.0
-        print_state = "idle"
+        print_state = "offline"
         camera_connected = False
         filename = "—"
         current_layer = 0
@@ -224,13 +224,13 @@ def make_router(
                     "current_layer": 0,
                     "total_layers": 0,
                     "filename": None,
-                    "extruder_temp": 0.0,
-                    "extruder_target": 0.0,
-                    "bed_temp": 0.0,
-                    "bed_target": 0.0,
+                    "extruder_temp": None,
+                    "extruder_target": None,
+                    "bed_temp": None,
+                    "bed_target": None,
                     "progress": 0.0,
                     "remaining_seconds": 0.0,
-                    "print_state": "idle",
+                    "print_state": "offline",
                     "camera_connected": False,
                     "thumbnail_base64": None,
                 }

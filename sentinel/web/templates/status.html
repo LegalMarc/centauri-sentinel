@@ -807,8 +807,8 @@ footer a {
       <div class="card-content">
         <dt>Extruder Temp</dt>
         <dd class="temp-text">
-          <span id="extruder-temp-val">{{ "%.1f"|format(extruder_temp) }}°C</span>
-          <span id="extruder-target-val" class="temp-target">/ {{ extruder_target | int }}°C</span>
+          <span id="extruder-temp-val">{% if extruder_temp is not none %}{{ "%.1f"|format(extruder_temp) }}°C{% else %}—{% endif %}</span>
+          <span id="extruder-target-val" class="temp-target">{% if extruder_target is not none %}/ {{ extruder_target | int }}°C{% else %}{% endif %}</span>
         </dd>
       </div>
     </div>
@@ -817,8 +817,8 @@ footer a {
       <div class="card-content">
         <dt>Bed Temp</dt>
         <dd class="temp-text">
-          <span id="bed-temp-val">{{ "%.1f"|format(bed_temp) }}°C</span>
-          <span id="bed-target-val" class="temp-target">/ {{ bed_target | int }}°C</span>
+          <span id="bed-temp-val">{% if bed_temp is not none %}{{ "%.1f"|format(bed_temp) }}°C{% else %}—{% endif %}</span>
+          <span id="bed-target-val" class="temp-target">{% if bed_target is not none %}/ {{ bed_target | int }}°C{% else %}{% endif %}</span>
         </dd>
       </div>
     </div>
@@ -1354,16 +1354,32 @@ function updateLiveStats() {
       const extruderTempEl = document.getElementById("extruder-temp-val");
       const extruderTargetEl = document.getElementById("extruder-target-val");
       if (extruderTempEl && extruderTargetEl) {
-        extruderTempEl.textContent = `${parseFloat(data.extruder_temp).toFixed(1)}°C`;
-        extruderTargetEl.textContent = `/ ${parseInt(data.extruder_target, 10)}°C`;
+        if (data.extruder_temp !== null && data.extruder_temp !== undefined) {
+          extruderTempEl.textContent = `${parseFloat(data.extruder_temp).toFixed(1)}°C`;
+        } else {
+          extruderTempEl.textContent = "—";
+        }
+        if (data.extruder_target !== null && data.extruder_target !== undefined) {
+          extruderTargetEl.textContent = `/ ${parseInt(data.extruder_target, 10)}°C`;
+        } else {
+          extruderTargetEl.textContent = "";
+        }
       }
 
       // Update Bed Temp
       const bedTempEl = document.getElementById("bed-temp-val");
       const bedTargetEl = document.getElementById("bed-target-val");
       if (bedTempEl && bedTargetEl) {
-        bedTempEl.textContent = `${parseFloat(data.bed_temp).toFixed(1)}°C`;
-        bedTargetEl.textContent = `/ ${parseInt(data.bed_target, 10)}°C`;
+        if (data.bed_temp !== null && data.bed_temp !== undefined) {
+          bedTempEl.textContent = `${parseFloat(data.bed_temp).toFixed(1)}°C`;
+        } else {
+          bedTempEl.textContent = "—";
+        }
+        if (data.bed_target !== null && data.bed_target !== undefined) {
+          bedTargetEl.textContent = `/ ${parseInt(data.bed_target, 10)}°C`;
+        } else {
+          bedTargetEl.textContent = "";
+        }
       }
 
       // Update Progress
