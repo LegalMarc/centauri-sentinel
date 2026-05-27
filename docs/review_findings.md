@@ -11,13 +11,13 @@
 | Severity | Count | Status |
 |---|---|---|
 | CRITICAL | 2 | Resolved |
-| HIGH | 13 | Resolved |
+| HIGH | 14 | Resolved |
 | MEDIUM | 21 | Resolved |
 | LOW | 15 | Resolved |
 
-**Total findings: 51 (0 remaining, 51 resolved)**
+**Total findings: 52 (0 remaining, 52 resolved)**
 
-**Go/No-Go: GO** — All 51 findings (including 2 CRITICAL, 13 HIGH, 21 MEDIUM, and 15 LOW items) have been successfully resolved, tested, and verified. The codebase passes all checks and tests with **94.53% total coverage** and zero warnings.
+**Go/No-Go: GO** — All 52 findings (including 2 CRITICAL, 14 HIGH, 21 MEDIUM, and 15 LOW items) have been successfully resolved, tested, and verified. The codebase passes all checks and tests with **94.61% total coverage** and zero warnings.
 
 ---
 
@@ -198,6 +198,13 @@
 **Issue:** The `_load_token()` method performs synchronous disk operations (`os.path.getmtime` and `read_text()`) directly on the main event loop thread inside the async `_detect` method.
 **Impact:** A slow disk or high filesystem latency under load can block the FastAPI event loop for several milliseconds during detection ticks.
 **Fix:** Modified the client to call `_load_token` within a thread pool using `asyncio.to_thread`.
+**Status:** Resolved
+
+### [PASS 3] [HIGH] Watchdog task loop crashes on database operational exceptions
+**File:** [sentinel/watcher/loop.py](../sentinel/watcher/loop.py) (lines 411-424)
+**Issue:** The watchdog task loop sleeps and then queries the database for the heartbeat timestamp. If the SQLite database connection raises a transient operational error (e.g., database locked or closed during reload/shutdown), the unhandled exception propagates out of the watchdog task. Because the task is running inside an `asyncio.TaskGroup`, this cancels the concurrent main watcher loop task and crashes the entire watcher process.
+**Impact:** A transient database lock or minor error halts the watcher service completely, preventing any failure detection.
+**Fix:** Wrapped the watchdog tick execution in a try-except block to gracefully handle and log exceptions without terminating the loop.
 **Status:** Resolved
 
 ---

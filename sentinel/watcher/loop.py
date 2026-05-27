@@ -413,8 +413,13 @@ class WatcherLoop:
         # 1.5x stall_seconds rather than 2x (sleep-before-check pattern).
         half = max(15, self._settings.watcher_stall_seconds // 2)
         while self._running:
-            await asyncio.sleep(half)
-            await self._watchdog_tick(self._db)
+            try:
+                await asyncio.sleep(half)
+                await self._watchdog_tick(self._db)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Watcher watchdog tick raised unexpectedly")
 
     async def _watchdog_tick(self, db: Database) -> None:
         stall_s = self._settings.watcher_stall_seconds

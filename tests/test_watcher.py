@@ -791,3 +791,31 @@ async def test_paused_externally_transitions_to_paused_state() -> None:
     assert watcher.state == WatcherState.PAUSED
     camera.grab.assert_not_called()
     ml.detect.assert_not_called()
+
+
+async def test_watchdog_resilient_to_database_exceptions() -> None:
+    """The watchdog loop must not crash and terminate if a database exception occurs."""
+    import aiosqlite
+    notifier = _make_notifier()
+    watcher, _, _, _, db = await _make_watcher(settings=_FAST_SETTINGS, notifiers=[notifier])
+
+    # Force db.get_heartbeat to raise a database exception (like SQLITE_LOCKED)
+    db.get_heartbeat = AsyncMock(side_effect=aiosqlite.OperationalError("database locked"))
+
+    watcher._running = True
+    call_count = 0
+    original_sleep = asyncio.sleep
+
+    async def mock_sleep(delay: float) -> None:
+        nonlocal call_count
+        call_count += 1
+        if call_count >= 2:
+            watcher._running = False
+        await original_sleep(0)
+
+    with patch("sentinel.watcher.loop.asyncio.sleep", side_effect=mock_sleep):
+        await watcher._watchdog()
+
+    # Verify that get_heartbeat was called, exception was swallowed, and watchdog task did not crash
+    assert db.get_heartbeat.call_count >= 2
+    assert watcher.state == WatcherState.IDLE
