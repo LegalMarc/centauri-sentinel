@@ -196,12 +196,15 @@ class PrinterClient:
         await self._with_retry(lambda: self._send_command({"method": 1003}))
 
     async def close(self) -> None:
-        """Clean up the persistent background listener."""
+        """Clean up the persistent background listener and reset state."""
         if self._listener_task is not None:
             self._listener_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._listener_task
             self._listener_task = None
+        self._serial_number = None
+        self._accumulated_data = {}
+        self._last_update_time = 0.0
 
     # ------------------------------------------------------------------
     # Internal helpers

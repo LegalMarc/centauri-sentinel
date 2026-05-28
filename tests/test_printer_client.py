@@ -459,3 +459,17 @@ async def test_serial_number_extraction_and_usage() -> None:
     topic_published = call_args[0][0]
     assert topic_published.startswith("elegoo/SERIAL123/")
     assert topic_published.endswith("/api_request")
+
+
+async def test_close_resets_connection_state() -> None:
+    client = PrinterClient(_SETTINGS)
+    client._serial_number = "SERIAL123"
+    client._accumulated_data = {"foo": "bar"}
+    client._last_update_time = 12345.6
+
+    await client.close()
+
+    assert client._serial_number is None
+    assert client._accumulated_data == {}
+    assert client._last_update_time == 0.0
+
