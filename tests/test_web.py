@@ -809,7 +809,6 @@ async def test_post_settings_success(
 ) -> None:
     printer = AsyncMock()
     mock_watcher.printer = printer
-    mock_watcher.camera = mock_camera
 
     app_state = create_app(
         _base_settings(auth_enabled=False), db=mock_db, watcher=mock_watcher, camera=mock_camera
@@ -834,7 +833,7 @@ async def test_post_settings_success(
     mock_db.set_setting.assert_any_call("detection_warmup_seconds", "30")
 
     assert mock_watcher.printer._host == "10.0.0.42"
-    assert mock_watcher.camera._url.startswith("http://10.0.0.42:")
+    assert mock_camera._url.startswith("http://10.0.0.42:")
     printer.close.assert_called_once()
 
 

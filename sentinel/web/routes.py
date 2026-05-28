@@ -367,7 +367,7 @@ def make_router(
 
                 await db.set_setting("printer_ip", printer_ip)
                 watcher.printer._host = printer_ip
-                watcher.camera._url = f"http://{printer_ip}:{settings.printer_mjpeg_port}{settings.printer_mjpeg_path}"
+                camera._url = f"http://{printer_ip}:{settings.printer_mjpeg_port}{settings.printer_mjpeg_path}"
                 if hasattr(watcher.printer, "close"):
                     await watcher.printer.close()
 
