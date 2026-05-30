@@ -95,3 +95,8 @@ markers = [
 [tool.coverage.run]
 source = ["sentinel"]
 omit = ["sentinel/__main__.py"]
+
+[dependency-groups]
+dev = [
+    "types-pyyaml>=6.0.12.20260518",
+]

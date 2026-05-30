@@ -1,3 +1,4 @@
+# ruff: noqa
 """MJPEG soak logger — characterizes the printer's camera stream over a long run.
 
 Run for at least 60 minutes against the real printer. Outputs:

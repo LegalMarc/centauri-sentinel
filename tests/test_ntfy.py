@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -190,7 +191,7 @@ async def test_detection_alert_with_photo_uploads() -> None:
     assert "85%" in headers.get("X-Message", "")
 
 
-async def test_detection_alert_loads_photo_from_disk(tmp_path) -> None:
+async def test_detection_alert_loads_photo_from_disk(tmp_path: Any) -> None:
     db_path = str(tmp_path / "sentinel.db")
     settings = Settings(
         printer_ip="10.0.0.1",
@@ -212,7 +213,7 @@ async def test_detection_alert_loads_photo_from_disk(tmp_path) -> None:
     assert call_kwargs.get("content") == b"disk_jpeg_data"
 
 
-async def test_detection_alert_disk_read_failure(tmp_path) -> None:
+async def test_detection_alert_disk_read_failure(tmp_path: Any) -> None:
     db_path = str(tmp_path / "sentinel.db")
     settings = Settings(
         printer_ip="10.0.0.1",

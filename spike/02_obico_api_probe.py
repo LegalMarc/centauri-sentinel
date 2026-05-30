@@ -1,3 +1,4 @@
+# ruff: noqa
 """Probe a running Obico ML container to map its API surface.
 
 Start the container first, e.g.:

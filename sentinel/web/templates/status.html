@@ -376,6 +376,31 @@ h2 {
   display: block;
 }
 
+.camera-offline-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  color: var(--text-secondary);
+  font-family: var(--font-sans);
+  text-align: center;
+  padding: 1rem;
+  box-sizing: border-box;
+}
+
+.camera-offline-placeholder .placeholder-icon {
+  font-size: 2.5rem;
+  margin-bottom: 0.5rem;
+  opacity: 0.6;
+}
+
+.camera-offline-placeholder .placeholder-text {
+  font-size: 0.95rem;
+  font-weight: 500;
+}
+
 .camera-badge {
   position: absolute;
   top: 1rem;
@@ -450,6 +475,14 @@ h2 {
 
 .btn:active {
   transform: translateY(0);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none !important;
+  filter: none !important;
+  pointer-events: none;
 }
 
 .btn-warning {
@@ -765,9 +798,9 @@ footer a {
       </span>
     </div>
     <div class="controls-buttons">
-      <button id="btn-pause" class="btn btn-warning" onclick="sendControl('pause')">⏸️ Pause</button>
-      <button id="btn-resume" class="btn btn-success" onclick="sendControl('resume')">▶️ Resume</button>
-      <button id="btn-stop" class="btn btn-danger" onclick="confirmStop()">⏹️ Stop Print</button>
+      <button id="btn-pause" class="btn btn-warning" onclick="sendControl('pause')" {% if not is_printing %}disabled{% endif %}>⏸️ Pause</button>
+      <button id="btn-resume" class="btn btn-success" onclick="sendControl('resume')" {% if not is_paused %}disabled{% endif %}>▶️ Resume</button>
+      <button id="btn-stop" class="btn btn-danger" onclick="confirmStop()" {% if not (is_printing or is_paused) %}disabled{% endif %}>⏹️ Stop Print</button>
       <div style="display: flex; gap: 0.25rem;">
         <button id="btn-snooze" class="btn btn-secondary" onclick="snoozeDetection()" style="border-top-right-radius: 0; border-bottom-right-radius: 0;">🔕 Snooze</button>
         <select id="snooze-duration" class="form-input" style="width: auto; border-top-left-radius: 0; border-bottom-left-radius: 0; border-left: none; padding: 0.5rem 1.5rem 0.5rem 0.5rem; font-family: var(--font-sans); font-weight: 600; cursor: pointer; color: var(--text-primary); background: rgba(255, 255, 255, 0.08); font-size: 0.95rem;">
@@ -807,8 +840,8 @@ footer a {
       <div class="card-content">
         <dt>Extruder Temp</dt>
         <dd class="temp-text">
-          <span id="extruder-temp-val">{% if extruder_temp is not none %}{{ "%.1f"|format(extruder_temp) }}°C{% else %}—{% endif %}</span>
-          <span id="extruder-target-val" class="temp-target">{% if extruder_target is not none %}/ {{ extruder_target | int }}°C{% else %}{% endif %}</span>
+          <span id="extruder-temp-val">{% if extruder_temp is not none and extruder_temp > 0.5 %}{{ "%.1f"|format(extruder_temp) }}°C{% else %}—{% endif %}</span>
+          <span id="extruder-target-val" class="temp-target">{% if extruder_target is not none and extruder_target > 0.0 %}/ {{ extruder_target | int }}°C{% else %}{% endif %}</span>
         </dd>
       </div>
     </div>
@@ -817,8 +850,8 @@ footer a {
       <div class="card-content">
         <dt>Bed Temp</dt>
         <dd class="temp-text">
-          <span id="bed-temp-val">{% if bed_temp is not none %}{{ "%.1f"|format(bed_temp) }}°C{% else %}—{% endif %}</span>
-          <span id="bed-target-val" class="temp-target">{% if bed_target is not none %}/ {{ bed_target | int }}°C{% else %}{% endif %}</span>
+          <span id="bed-temp-val">{% if bed_temp is not none and bed_temp > 0.5 %}{{ "%.1f"|format(bed_temp) }}°C{% else %}—{% endif %}</span>
+          <span id="bed-target-val" class="temp-target">{% if bed_target is not none and bed_target > 0.0 %}/ {{ bed_target | int }}°C{% else %}{% endif %}</span>
         </dd>
       </div>
     </div>
@@ -838,7 +871,7 @@ footer a {
       <div class="card-icon">🥞</div>
       <div class="card-content">
         <dt>Current Layer</dt>
-        <dd id="card-layers">{{ current_layer }} / {{ total_layers }}</dd>
+        <dd id="card-layers">{% if total_layers > 0 %}{{ current_layer }} / {{ total_layers }}{% else %}{{ current_layer or "—" }}{% endif %}</dd>
       </div>
     </div>
     <div class="card">
@@ -872,7 +905,11 @@ footer a {
           <div id="camera-dot" class="camera-dot {% if not camera_connected %}offline{% endif %}"></div>
           <span id="camera-status-text">Camera {% if camera_connected %}Connected{% else %}Offline{% endif %}</span>
         </div>
-        <img id="camera-feed-img" src="/stream" alt="Current camera feed" onerror="this.alt='Camera stream currently unavailable'">
+        <div id="camera-offline-placeholder" class="camera-offline-placeholder" style="display: {% if camera_connected %}none{% else %}flex{% endif %};">
+          <div class="placeholder-icon">📷❌</div>
+          <div class="placeholder-text">Camera feed currently unavailable</div>
+        </div>
+        <img id="camera-feed-img" src="/stream" alt="Current camera feed" style="display: {% if camera_connected %}block{% else %}none{% endif %};" onerror="handleCameraError()">
       </div>
     </div>
     <div class="thumbnail-container" id="gcode-preview-container" style="display: {% if thumbnail_base64 %}flex{% else %}none{% endif %};">
@@ -1305,6 +1342,15 @@ function formatTime(seconds) {
   return formatted;
 }
 
+function handleCameraError() {
+  const img = document.getElementById("camera-feed-img");
+  const placeholder = document.getElementById("camera-offline-placeholder");
+  if (img && placeholder) {
+    img.style.display = "none";
+    placeholder.style.display = "flex";
+  }
+}
+
 function updateLiveStats() {
   fetch('/api/printer')
     .then(res => {
@@ -1354,13 +1400,15 @@ function updateLiveStats() {
       const extruderTempEl = document.getElementById("extruder-temp-val");
       const extruderTargetEl = document.getElementById("extruder-target-val");
       if (extruderTempEl && extruderTargetEl) {
-        if (data.extruder_temp !== null && data.extruder_temp !== undefined) {
-          extruderTempEl.textContent = `${parseFloat(data.extruder_temp).toFixed(1)}°C`;
+        const temp = parseFloat(data.extruder_temp);
+        const target = parseFloat(data.extruder_target);
+        if (!isNaN(temp) && temp > 0.5) {
+          extruderTempEl.textContent = `${temp.toFixed(1)}°C`;
         } else {
           extruderTempEl.textContent = "—";
         }
-        if (data.extruder_target !== null && data.extruder_target !== undefined) {
-          extruderTargetEl.textContent = `/ ${parseInt(data.extruder_target, 10)}°C`;
+        if (!isNaN(target) && target > 0.0) {
+          extruderTargetEl.textContent = `/ ${Math.round(target)}°C`;
         } else {
           extruderTargetEl.textContent = "";
         }
@@ -1370,13 +1418,15 @@ function updateLiveStats() {
       const bedTempEl = document.getElementById("bed-temp-val");
       const bedTargetEl = document.getElementById("bed-target-val");
       if (bedTempEl && bedTargetEl) {
-        if (data.bed_temp !== null && data.bed_temp !== undefined) {
-          bedTempEl.textContent = `${parseFloat(data.bed_temp).toFixed(1)}°C`;
+        const temp = parseFloat(data.bed_temp);
+        const target = parseFloat(data.bed_target);
+        if (!isNaN(temp) && temp > 0.5) {
+          bedTempEl.textContent = `${temp.toFixed(1)}°C`;
         } else {
           bedTempEl.textContent = "—";
         }
-        if (data.bed_target !== null && data.bed_target !== undefined) {
-          bedTargetEl.textContent = `/ ${parseInt(data.bed_target, 10)}°C`;
+        if (!isNaN(target) && target > 0.0) {
+          bedTargetEl.textContent = `/ ${Math.round(target)}°C`;
         } else {
           bedTargetEl.textContent = "";
         }
@@ -1386,7 +1436,10 @@ function updateLiveStats() {
       const progressBar = document.getElementById("progress-bar");
       const progressPercent = document.getElementById("progress-percent");
       if (progressBar && progressPercent) {
-        const progress = parseFloat(data.progress || 0);
+        let progress = parseFloat(data.progress || 0);
+        if (data.print_state === "completed" || data.print_state === "complete") {
+          progress = 100.0;
+        }
         progressBar.style.width = `${progress}%`;
         progressPercent.textContent = `${progress.toFixed(1)}%`;
       }
@@ -1394,14 +1447,20 @@ function updateLiveStats() {
       // Update Layer
       const cardLayers = document.getElementById("card-layers");
       if (cardLayers) {
-        cardLayers.textContent = `${data.current_layer} / ${data.total_layers}`;
+        const current = data.current_layer || 0;
+        const total = data.total_layers || 0;
+        if (total > 0) {
+          cardLayers.textContent = `${current} / ${total}`;
+        } else {
+          cardLayers.textContent = current > 0 ? `${current}` : "—";
+        }
       }
 
       // Update Elapsed
       const cardElapsed = document.getElementById("card-elapsed");
       if (cardElapsed) {
-        const isActive = data.printing || data.print_state === "paused";
-        cardElapsed.textContent = isActive ? `${parseFloat(data.elapsed_seconds || 0).toFixed(0)}s` : "—";
+        const isActive = data.printing || data.print_state === "paused" || data.print_state === "completed";
+        cardElapsed.textContent = isActive ? formatTime(data.elapsed_seconds) : "—";
       }
 
       // Update Remaining
@@ -1413,14 +1472,38 @@ function updateLiveStats() {
       // Update Camera Connected Badge
       const cameraDot = document.getElementById("camera-dot");
       const cameraStatusText = document.getElementById("camera-status-text");
+      const cameraImg = document.getElementById("camera-feed-img");
+      const cameraPlaceholder = document.getElementById("camera-offline-placeholder");
       if (cameraDot && cameraStatusText) {
         if (data.camera_connected) {
           cameraDot.classList.remove("offline");
           cameraStatusText.textContent = "Camera Connected";
+          if (cameraImg && cameraPlaceholder && cameraImg.style.display === "none") {
+            cameraImg.style.display = "block";
+            cameraPlaceholder.style.display = "none";
+            cameraImg.src = "/stream?t=" + new Date().getTime();
+          }
         } else {
           cameraDot.classList.add("offline");
           cameraStatusText.textContent = "Camera Offline";
+          if (cameraImg && cameraPlaceholder) {
+            cameraImg.style.display = "none";
+            cameraPlaceholder.style.display = "flex";
+          }
         }
+      }
+
+      // Update Control Buttons state
+      const btnPause = document.getElementById("btn-pause");
+      const btnResume = document.getElementById("btn-resume");
+      const btnStop = document.getElementById("btn-stop");
+      if (btnPause && btnResume && btnStop) {
+        const printState = data.print_state || "offline";
+        const isPrinting = printState === "printing";
+        const isPaused = printState === "paused";
+        btnPause.disabled = !isPrinting;
+        btnResume.disabled = !isPaused;
+        btnStop.disabled = !(isPrinting || isPaused);
       }
 
       // Update G-code Preview Thumbnail Container

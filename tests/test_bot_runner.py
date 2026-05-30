@@ -42,7 +42,7 @@ def _make_handler() -> MagicMock:
     return h
 
 
-def _make_ptb_app() -> MagicMock:
+def _make_ptb_app() -> tuple[MagicMock, MagicMock]:
     """Return a minimal mock of a PTB Application."""
     updater = MagicMock()
     updater.running = True

@@ -1,3 +1,4 @@
+# ruff: noqa
 """Live probe against a Centauri Carbon 2 via pycentauri.
 
 Goal: capture the exact state strings, response shapes, and timing of

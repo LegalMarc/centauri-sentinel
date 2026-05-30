@@ -476,7 +476,9 @@ async def test_cancelled_during_pause_sets_paused_state() -> None:
     watcher, _, _, _, _ = await _make_watcher()
 
     async def _cancel_and_complete() -> None:
-        asyncio.current_task().cancel()
+        task = asyncio.current_task()
+        if task:
+            task.cancel()
 
     watcher._printer = MagicMock()
     watcher._printer.pause = _cancel_and_complete
@@ -521,7 +523,7 @@ async def test_snapshot_saving_and_cleanup() -> None:
         ml_score_threshold=0.4,
         ml_poll_interval_seconds=10,
         watcher_stall_seconds=60,
-        db_path=db._path,
+        db_path=str(db._path),
     )
 
     # Grab/tick to trigger confirmed detection
@@ -533,11 +535,11 @@ async def test_snapshot_saving_and_cleanup() -> None:
     assert len(recent) == 1
     snapshot_path = recent[0]["snapshot_path"]
     assert snapshot_path is not None
-    snapshot_id = Path(snapshot_path).stem
+    snapshot_id = Path(str(snapshot_path)).stem
     assert snapshot_id is not None
 
     # Check that snapshot was saved to disk
-    snapshots_dir = Path(db._path).parent / "snapshots"
+    snapshots_dir = Path(str(db._path)).parent / "snapshots"
     p = snapshots_dir / f"{snapshot_id}.jpg"
 
     assert p.exists()
@@ -562,9 +564,9 @@ async def test_snapshot_saving_and_cleanup() -> None:
     with contextlib.suppress(OSError):
         snapshots_dir.rmdir()
     with contextlib.suppress(OSError):
-        Path(db._path).unlink()
+        Path(str(db._path)).unlink()
     with contextlib.suppress(OSError):
-        Path(db._path).parent.rmdir()
+        Path(str(db._path)).parent.rmdir()
 
 
 # ---------------------------------------------------------------------------
@@ -662,7 +664,7 @@ async def test_camera_offline_recovers_on_next_tick_if_printer_still_printing() 
     ml.detect = AsyncMock(return_value=MlResult(score=0.1))
     await watcher.tick()
 
-    assert watcher.state == WatcherState.ARMED
+    assert watcher.state == WatcherState.ARMED  # type: ignore[comparison-overlap]
 
 
 async def test_camera_offline_alert_only_sent_once() -> None:
@@ -801,7 +803,7 @@ async def test_watchdog_resilient_to_database_exceptions() -> None:
     watcher, _, _, _, db = await _make_watcher(settings=_FAST_SETTINGS, notifiers=[notifier])
 
     # Force db.get_heartbeat to raise a database exception (like SQLITE_LOCKED)
-    db.get_heartbeat = AsyncMock(side_effect=aiosqlite.OperationalError("database locked"))
+    db.get_heartbeat = AsyncMock(side_effect=aiosqlite.OperationalError("database locked"))  # type: ignore[method-assign]
 
     watcher._running = True
     call_count = 0

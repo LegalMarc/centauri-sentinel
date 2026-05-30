@@ -45,6 +45,22 @@ def _age_seconds(heartbeat: str | None) -> float | None:
         return None
 
 
+def format_duration(seconds: float) -> str:
+    """Format duration in seconds to a human-readable string like '2h 5m 12s'."""
+    if seconds <= 0:
+        return "—"
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    parts = []
+    if h > 0:
+        parts.append(f"{h}h")
+    if m > 0 or h > 0:
+        parts.append(f"{m}m")
+    parts.append(f"{s}s")
+    return " ".join(parts)
+
+
 def make_router(
     db: Database | None,
     watcher: Any,
@@ -128,17 +144,21 @@ def make_router(
         current_layer = 0
         total_layers = 0
         thumbnail_base64 = None
+        is_printing = False
+        is_paused = False
 
         if p_status:
             print_state = p_status.print_state or ("printing" if p_status.printing else "idle")
             printer_state = print_state.capitalize()
-            is_active = p_status.printing or print_state == "paused"
-            print_elapsed = f"{p_status.elapsed_seconds:.0f}s" if is_active else "—"
+            is_printing = print_state == "printing"
+            is_paused = print_state == "paused"
+            is_active = p_status.printing or is_paused or print_state == "completed"
+            print_elapsed = format_duration(p_status.elapsed_seconds) if is_active else "—"
             extruder_temp = p_status.extruder_temp
             extruder_target = p_status.extruder_target
             bed_temp = p_status.bed_temp
             bed_target = p_status.bed_target
-            progress = p_status.progress
+            progress = 100.0 if print_state == "completed" else p_status.progress
             remaining_seconds = p_status.remaining_seconds
             camera_connected = p_status.camera_connected
             filename = p_status.filename or "—"
@@ -168,6 +188,8 @@ def make_router(
                 "remaining_seconds": remaining_seconds,
                 "print_state": print_state,
                 "camera_connected": camera_connected,
+                "is_printing": is_printing,
+                "is_paused": is_paused,
                 "filename": filename,
                 "current_layer": current_layer,
                 "total_layers": total_layers,

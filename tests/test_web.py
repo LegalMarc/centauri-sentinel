@@ -712,7 +712,7 @@ async def test_status_page_renders_with_printer_status(
         r = await c.get("/")
     assert r.status_code == 200
     assert "test.gcode" in r.text
-    assert "120s" in r.text
+    assert "2m 0s" in r.text
     assert "10.0%" in r.text
 
 
