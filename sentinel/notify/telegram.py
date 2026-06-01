@@ -41,6 +41,7 @@ class TelegramNotifier:
     """Sends Telegram alerts; no-op when telegram_enabled=False."""
 
     def __init__(self, settings: Settings) -> None:
+        self._settings = settings
         self._enabled = settings.telegram_enabled
         if not self._enabled:
             return
@@ -90,7 +91,11 @@ class TelegramNotifier:
             ]
         )
 
-        caption = f"⚠️ Failure detected — confidence {score:.0%}"
+        caption = (
+            f"⚠️ Failure detected — confidence {score:.0%}\n"
+            f"(Hint: if false positive, consider raising ML_SCORE_THRESHOLD, "
+            f"currently {self._settings.ml_score_threshold})"
+        )
 
         if photo_bytes:
 
@@ -182,3 +187,123 @@ class TelegramNotifier:
         async for attempt in retryer:
             with attempt:
                 await fn()
+
+    async def send_print_started_alert(
+        self, filename: str | None, jpeg: bytes | None = None
+    ) -> None:
+        if not self._enabled:
+            return
+
+        name = filename or "Unknown file"
+        caption = f"🚀 Print started: {name}"
+
+        async def _send() -> None:
+            if jpeg:
+                try:
+                    await self._bot.send_photo(
+                        chat_id=self._chat_id,
+                        photo=jpeg,
+                        caption=caption,
+                        read_timeout=_TIMEOUT,
+                        write_timeout=_TIMEOUT,
+                        connect_timeout=_TIMEOUT,
+                    )
+                except Exception:
+                    logger.exception("Telegram photo send failed for print start")
+                    await self._bot.send_message(
+                        chat_id=self._chat_id,
+                        text=caption,
+                        read_timeout=_TIMEOUT,
+                        write_timeout=_TIMEOUT,
+                        connect_timeout=_TIMEOUT,
+                    )
+            else:
+                await self._bot.send_message(
+                    chat_id=self._chat_id,
+                    text=caption,
+                    read_timeout=_TIMEOUT,
+                    write_timeout=_TIMEOUT,
+                    connect_timeout=_TIMEOUT,
+                )
+
+        await self._send_with_retry_fn(_send)
+
+    async def send_print_completed_alert(
+        self, filename: str | None, elapsed_seconds: float, jpeg: bytes | None = None
+    ) -> None:
+        if not self._enabled:
+            return
+
+        name = filename or "Unknown file"
+        hours = int(elapsed_seconds // 3600)
+        minutes = int((elapsed_seconds % 3600) // 60)
+        time_str = f"{hours}h {minutes}m" if hours > 0 else f"{minutes}m"
+        caption = f"✅ Print completed: {name}\nTime: {time_str}"
+
+        async def _send() -> None:
+            if jpeg:
+                try:
+                    await self._bot.send_photo(
+                        chat_id=self._chat_id,
+                        photo=jpeg,
+                        caption=caption,
+                        read_timeout=_TIMEOUT,
+                        write_timeout=_TIMEOUT,
+                        connect_timeout=_TIMEOUT,
+                    )
+                except Exception:
+                    logger.exception("Telegram photo send failed for print completed")
+                    await self._bot.send_message(
+                        chat_id=self._chat_id,
+                        text=caption,
+                        read_timeout=_TIMEOUT,
+                        write_timeout=_TIMEOUT,
+                        connect_timeout=_TIMEOUT,
+                    )
+            else:
+                await self._bot.send_message(
+                    chat_id=self._chat_id,
+                    text=caption,
+                    read_timeout=_TIMEOUT,
+                    write_timeout=_TIMEOUT,
+                    connect_timeout=_TIMEOUT,
+                )
+
+        await self._send_with_retry_fn(_send)
+
+    async def send_external_pause_alert(self, jpeg: bytes | None = None) -> None:
+        if not self._enabled:
+            return
+
+        caption = "⏸️ Printer paused externally (possible filament runout or manual pause)."
+
+        async def _send() -> None:
+            if jpeg:
+                try:
+                    await self._bot.send_photo(
+                        chat_id=self._chat_id,
+                        photo=jpeg,
+                        caption=caption,
+                        read_timeout=_TIMEOUT,
+                        write_timeout=_TIMEOUT,
+                        connect_timeout=_TIMEOUT,
+                    )
+                except Exception:
+                    logger.exception("Telegram photo send failed for external pause")
+                    await self._bot.send_message(
+                        chat_id=self._chat_id,
+                        text=caption,
+                        read_timeout=_TIMEOUT,
+                        write_timeout=_TIMEOUT,
+                        connect_timeout=_TIMEOUT,
+                    )
+            else:
+                await self._bot.send_message(
+                    chat_id=self._chat_id,
+                    text=caption,
+                    read_timeout=_TIMEOUT,
+                    write_timeout=_TIMEOUT,
+                    connect_timeout=_TIMEOUT,
+                )
+
+        await self._send_with_retry_fn(_send)

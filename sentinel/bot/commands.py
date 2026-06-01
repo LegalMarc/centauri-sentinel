@@ -333,14 +333,68 @@ class BotCommandHandler:
         elif data == "stop":
             user = cq.from_user
             self._pending_stops[user.id] = time.monotonic()
-            await cq.edit_message_text("Reply /confirm within 30 s to cancel the print.")
+
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+            keyboard = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton("Confirm Stop", callback_data="confirm_stop"),
+                        InlineKeyboardButton("Cancel", callback_data="cancel_stop"),
+                    ]
+                ]
+            )
+            await cq.edit_message_reply_markup(reply_markup=keyboard)
+
+        elif data == "cancel_stop":
+            user = cq.from_user
+            self._pending_stops.pop(user.id, None)
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+            keyboard = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton("Resume", callback_data="resume"),
+                        InlineKeyboardButton("Stop", callback_data="stop"),
+                        InlineKeyboardButton("Snooze 10m", callback_data="snooze"),
+                    ]
+                ]
+            )
+            await cq.edit_message_reply_markup(reply_markup=keyboard)
+
+        elif data == "confirm_stop":
+            user = cq.from_user
+            ts = self._pending_stops.get(user.id)
+            if ts is None or (time.monotonic() - ts) > _STOP_CONFIRM_WINDOW:
+                self._pending_stops.pop(user.id, None)
+                await cq.edit_message_text("Stop request expired. Use the Stop button again.")
+                return
+
+            self._pending_stops.pop(user.id)
+            try:
+                await self._printer.stop()
+                await cq.edit_message_text("Print cancelled.")
+            except Exception:
+                logger.exception("Stop failed via inline confirm")
+                await cq.edit_message_text("Stop failed — check the printer.")
 
         elif data == "snooze":
             await self._db.set_setting("detection_enabled", "false")
-            await cq.edit_message_text("Detection snoozed for 10 minutes.")
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+            keyboard = InlineKeyboardMarkup(
+                [
+                    [InlineKeyboardButton("Resume Monitoring", callback_data="enable")]
+                ]
+            )
+            snooze_mins = int(self._snooze_seconds // 60)
+            await cq.edit_message_text(
+                f"Detection snoozed for {snooze_mins} minutes.", reply_markup=keyboard
+            )
             task = asyncio.create_task(self._re_enable_after(self._snooze_seconds))
             _background_tasks.add(task)
             task.add_done_callback(_background_tasks.discard)
+
+        elif data == "enable":
+            await self._db.set_setting("detection_enabled", "true")
+            await cq.edit_message_text("Detection re-enabled.")
 
     async def _re_enable_after(self, delay: float) -> None:
         await asyncio.sleep(delay)

@@ -43,11 +43,22 @@ class Notifier(Protocol):
     ) -> None: ...
     async def send_stall_alert(self) -> None: ...
     async def send_camera_offline_alert(self) -> None: ...
+    async def send_text(self, text: str) -> None: ...
+    async def send_print_started_alert(
+        self, filename: str | None, jpeg: bytes | None = None
+    ) -> None: ...
+    async def send_print_completed_alert(
+        self, filename: str | None, elapsed_seconds: float, jpeg: bytes | None = None
+    ) -> None: ...
+    async def send_external_pause_alert(self, jpeg: bytes | None = None) -> None: ...
 
 
 class Printer(Protocol):
     async def status(self) -> PrinterStatus: ...
     async def pause(self) -> bool: ...
+    async def stop(self) -> None: ...
+
+_loop_tasks: set[asyncio.Task[None]] = set()
 
 
 class Camera(Protocol):
@@ -85,6 +96,8 @@ class WatcherLoop:
         self._current_job_id: int | None = None
         self._prev_print_state: str | None = None
         self._current_filename: str | None = None
+        self._paused_since: datetime | None = None
+        self._alerted_new_print: bool = False
 
     @property
     def state(self) -> WatcherState:
@@ -152,6 +165,39 @@ class WatcherLoop:
         prev_state = self.state
         await self._update_state(printer_status)
 
+        if self.state == WatcherState.PAUSED:
+            if self._paused_since is None:
+                self._paused_since = datetime.now(tz=UTC)
+            else:
+                pause_duration = (datetime.now(tz=UTC) - self._paused_since).total_seconds()
+                try:
+                    auto_stop_timeout = int(self._settings.auto_stop_timeout_seconds)
+                except (ValueError, TypeError):
+                    auto_stop_timeout = 1800
+
+                if auto_stop_timeout > 0 and pause_duration > auto_stop_timeout:
+                    logger.warning(
+                        "Auto-stop timeout reached (%.0f s) — stopping printer",
+                        pause_duration,
+                    )
+                    try:
+                        await self._printer.stop()
+                        for n in self._notifiers:
+                            text = (
+                                f"⚠️ Print automatically stopped after "
+                                f"{auto_stop_timeout // 60} minutes of pause inactivity."
+                            )
+                            task = asyncio.create_task(
+                                self._deliver_text_alert_with_retry(n, text)
+                            )
+                            _loop_tasks.add(task)
+                            task.add_done_callback(_loop_tasks.discard)
+                    except Exception:
+                        logger.exception("Auto-stop failed")
+                    self._paused_since = None  # reset to prevent spamming
+        else:
+            self._paused_since = None
+
         if self.state == WatcherState.ARMED:
             detection_enabled = await self._db.get_setting("detection_enabled", "true")
             if detection_enabled == "true":
@@ -185,15 +231,42 @@ class WatcherLoop:
                     0.0,
                     final_status,
                 )
+                if final_status == "completed" and self._settings.notify_on_print_completed:
+                    jpeg = await self._safe_grab_jpeg()
+                    for n in self._notifiers:
+                        task = asyncio.create_task(
+                            self._deliver_print_completed_alert(
+                                n, self._current_filename, float(duration), jpeg
+                            )
+                        )
+                        _loop_tasks.add(task)
+                        task.add_done_callback(_loop_tasks.discard)
+
                 self._current_job_id = None
 
             self._prev_print_state = None
             self._current_filename = None
+            self._paused_since = None
+            self._alerted_new_print = False
             return
 
         # Printer is printing
         if self._print_start is None:
             self._print_start = datetime.now(tz=UTC)
+
+        if not self._alerted_new_print:
+            self._alerted_new_print = True
+            task = asyncio.create_task(self._check_and_send_state_reminders())
+            _loop_tasks.add(task)
+            task.add_done_callback(_loop_tasks.discard)
+            if getattr(self._settings, "notify_on_print_start", False):
+                jpeg = await self._safe_grab_jpeg()
+                for n in self._notifiers:
+                    t2 = asyncio.create_task(
+                        self._deliver_print_started_alert(n, status.filename, jpeg)
+                    )
+                    _loop_tasks.add(t2)
+                    t2.add_done_callback(_loop_tasks.discard)
 
         # Handle back-to-back print job transitions (filename changed while printing)
         if (
@@ -212,6 +285,16 @@ class WatcherLoop:
                 0.0,
                 "completed",
             )
+            if self._settings.notify_on_print_completed:
+                jpeg = await self._safe_grab_jpeg()
+                for n in self._notifiers:
+                    task = asyncio.create_task(
+                        self._deliver_print_completed_alert(
+                            n, self._current_filename, float(duration), jpeg
+                        )
+                    )
+                    _loop_tasks.add(task)
+                    task.add_done_callback(_loop_tasks.discard)
             self._current_job_id = None
 
         # Start job tracking if not already active
@@ -250,6 +333,14 @@ class WatcherLoop:
                 logger.info("Printer paused externally — transitioning PAUSED")
                 self.state = WatcherState.PAUSED
                 self._confirm_count = 0
+                if getattr(self._settings, "notify_on_print_paused", True):
+                    jpeg = await self._safe_grab_jpeg()
+                    for n in self._notifiers:
+                        task = asyncio.create_task(
+                            self._deliver_external_pause_alert(n, jpeg)
+                        )
+                        _loop_tasks.add(task)
+                        task.add_done_callback(_loop_tasks.discard)
             return
 
         if elapsed < warmup:
@@ -382,10 +473,11 @@ class WatcherLoop:
         )
 
         for n in self._notifiers:
-            try:
-                await n.send_detection_alert(result.score, snapshot_id, jpeg)
-            except Exception:
-                logger.exception("Notifier detection_alert failed")
+            task = asyncio.create_task(
+                self._deliver_detection_alert_with_retry(n, result.score, snapshot_id, jpeg)
+            )
+            _loop_tasks.add(task)
+            task.add_done_callback(_loop_tasks.discard)
 
         # Cleanup old snapshots (keep last 50)
         try:
@@ -439,3 +531,98 @@ class WatcherLoop:
                     await n.send_stall_alert()
                 except Exception:
                     logger.exception("Notifier stall_alert failed")
+
+    async def _deliver_detection_alert_with_retry(
+        self, n: Notifier, score: float, snapshot_id: str | None, jpeg: bytes | None
+    ) -> None:
+        import tenacity
+        retryer = tenacity.AsyncRetrying(
+            wait=tenacity.wait_exponential(multiplier=0.5, min=0.5, max=60.0),
+            before_sleep=tenacity.before_sleep_log(logger, logging.WARNING),
+        )
+        try:
+            async for attempt in retryer:
+                with attempt:
+                    await n.send_detection_alert(score, snapshot_id, jpeg)
+        except Exception:
+            logger.exception("Persistent detection alert failed completely (should not happen)")
+
+    async def _deliver_text_alert_with_retry(self, n: Notifier, text: str) -> None:
+        import tenacity
+        retryer = tenacity.AsyncRetrying(
+            wait=tenacity.wait_exponential(multiplier=0.5, min=0.5, max=60.0),
+            before_sleep=tenacity.before_sleep_log(logger, logging.WARNING),
+        )
+        try:
+            async for attempt in retryer:
+                with attempt:
+                    await n.send_text(text)
+        except Exception:
+            logger.exception("Persistent text alert failed completely (should not happen)")
+
+    async def _check_and_send_state_reminders(self) -> None:
+        detection_enabled = await self._db.get_setting("detection_enabled", "true")
+        if detection_enabled == "false":
+            for n in self._notifiers:
+                text = "⚠️ A new print has started, but failure detection is currently DISABLED."
+                task = asyncio.create_task(self._deliver_text_alert_with_retry(n, text))
+                _loop_tasks.add(task)
+                task.add_done_callback(_loop_tasks.discard)
+        if self.state == WatcherState.CAMERA_OFFLINE:
+            for n in self._notifiers:
+                text = (
+                    "⚠️ A new print has started, but the camera is offline. "
+                    "Detection is suspended."
+                )
+                task = asyncio.create_task(self._deliver_text_alert_with_retry(n, text))
+                _loop_tasks.add(task)
+                task.add_done_callback(_loop_tasks.discard)
+
+    async def _safe_grab_jpeg(self) -> bytes | None:
+        try:
+            return await self._camera.grab()
+        except Exception:
+            return None
+
+    async def _deliver_print_started_alert(
+        self, n: Notifier, filename: str | None, jpeg: bytes | None
+    ) -> None:
+        import tenacity
+        retryer = tenacity.AsyncRetrying(
+            wait=tenacity.wait_exponential(multiplier=0.5, min=0.5, max=60.0),
+            before_sleep=tenacity.before_sleep_log(logger, logging.WARNING),
+        )
+        try:
+            async for attempt in retryer:
+                with attempt:
+                    await n.send_print_started_alert(filename, jpeg)
+        except Exception:
+            logger.exception("Persistent print started alert failed")
+
+    async def _deliver_print_completed_alert(
+        self, n: Notifier, filename: str | None, elapsed: float, jpeg: bytes | None
+    ) -> None:
+        import tenacity
+        retryer = tenacity.AsyncRetrying(
+            wait=tenacity.wait_exponential(multiplier=0.5, min=0.5, max=60.0),
+            before_sleep=tenacity.before_sleep_log(logger, logging.WARNING),
+        )
+        try:
+            async for attempt in retryer:
+                with attempt:
+                    await n.send_print_completed_alert(filename, elapsed, jpeg)
+        except Exception:
+            logger.exception("Persistent print completed alert failed")
+
+    async def _deliver_external_pause_alert(self, n: Notifier, jpeg: bytes | None) -> None:
+        import tenacity
+        retryer = tenacity.AsyncRetrying(
+            wait=tenacity.wait_exponential(multiplier=0.5, min=0.5, max=60.0),
+            before_sleep=tenacity.before_sleep_log(logger, logging.WARNING),
+        )
+        try:
+            async for attempt in retryer:
+                with attempt:
+                    await n.send_external_pause_alert(jpeg)
+        except Exception:
+            logger.exception("Persistent external pause alert failed")

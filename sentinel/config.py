@@ -38,6 +38,12 @@ class Settings(BaseSettings):
     detection_warmup_seconds: int = 300
     detection_enabled_default: bool = True
     watcher_stall_seconds: int = 60
+    auto_stop_timeout_seconds: int = 1800
+
+    # Notifications
+    notify_on_print_start: bool = False
+    notify_on_print_completed: bool = True
+    notify_on_print_paused: bool = True
 
     # Telegram
     telegram_bot_token: str | None = None

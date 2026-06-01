@@ -23,6 +23,7 @@ class NtfyNotifier:
     """Sends ntfy push notifications; no-op when ntfy_enabled=False."""
 
     def __init__(self, settings: Settings) -> None:
+        self._settings = settings
         self._enabled = settings.ntfy_enabled
         self._url = settings.ntfy_url or ""
         self._token = settings.ntfy_token
@@ -48,8 +49,12 @@ class NtfyNotifier:
 
         await self._post(
             title="Failure detected",
-            message=f"Confidence {score:.0%}.",
+            message=(
+                f"Confidence {score:.0%}.\n(Hint: if false positive, "
+                f"raise ML_SCORE_THRESHOLD, currently {self._settings.ml_score_threshold})"
+            ),
             priority="high",
+
             tags=["warning"],
             jpeg=photo_bytes,
         )
@@ -72,6 +77,58 @@ class NtfyNotifier:
             message="Camera is unreachable. Detection suspended.",
             priority="default",
             tags=["camera"],
+        )
+
+    async def send_text(self, text: str) -> None:
+        if not self._enabled:
+            return
+        await self._post(
+            title="Sentinel Alert",
+            message=text,
+            priority="default",
+            tags=["information_source"],
+        )
+
+    async def send_print_started_alert(
+        self, filename: str | None, jpeg: bytes | None = None
+    ) -> None:
+        if not self._enabled:
+            return
+        name = filename or "Unknown file"
+        await self._post(
+            title="Print Started",
+            message=f"Started printing: {name}",
+            priority="default",
+            tags=["rocket"],
+            jpeg=jpeg,
+        )
+
+    async def send_print_completed_alert(
+        self, filename: str | None, elapsed_seconds: float, jpeg: bytes | None = None
+    ) -> None:
+        if not self._enabled:
+            return
+        name = filename or "Unknown file"
+        hours = int(elapsed_seconds // 3600)
+        minutes = int((elapsed_seconds % 3600) // 60)
+        time_str = f"{hours}h {minutes}m" if hours > 0 else f"{minutes}m"
+        await self._post(
+            title="Print Completed",
+            message=f"Completed {name} in {time_str}.",
+            priority="default",
+            tags=["white_check_mark"],
+            jpeg=jpeg,
+        )
+
+    async def send_external_pause_alert(self, jpeg: bytes | None = None) -> None:
+        if not self._enabled:
+            return
+        await self._post(
+            title="Printer Paused",
+            message="Printer paused externally (possible filament runout or manual pause).",
+            priority="high",
+            tags=["pause_button"],
+            jpeg=jpeg,
         )
 
     async def _post(
