@@ -473,3 +473,82 @@ async def test_close_resets_connection_state() -> None:
     assert client._accumulated_data == {}
     assert client._last_update_time == 0.0
 
+
+import time
+def test_deep_merge_dict() -> None:
+    from sentinel.printer.client import _deep_merge
+    target = {"a": {"b": 1}}
+    source = {"a": {"c": 2}, "d": 3}
+    _deep_merge(target, source)
+    assert target == {"a": {"b": 1, "c": 2}, "d": 3}
+
+def test_parse_status_carbon2_total_layers() -> None:
+    payload = {
+        "method": 6000,
+        "result": {
+            "print_status": {
+                "state": "printing",
+                "filename": "benchy.gcode",
+            },
+            "file_list": [
+                {"filename": "benchy.gcode", "layer": 150}
+            ]
+        }
+    }
+    status = _parse_status(payload)
+    assert status.total_layers == 150
+
+async def test_close_cancels_listener_task() -> None:
+    client = PrinterClient(_SETTINGS)
+    async def dummy_listen():
+        await asyncio.sleep(10.0)
+    client._listener_task = asyncio.create_task(dummy_listen())
+    await client.close()
+    assert client._listener_task is None
+
+async def test_fetch_status_listener_done_with_exception() -> None:
+    client = PrinterClient(_SETTINGS)
+    async def fail_listen():
+        raise PrinterProtocolError("test")
+    client._listener_task = asyncio.create_task(fail_listen())
+    await asyncio.sleep(0.01)
+    with pytest.raises(PrinterProtocolError):
+        await client._fetch_status()
+
+async def test_fetch_status_listener_done_without_exception() -> None:
+    client = PrinterClient(_SETTINGS)
+    async def finish_listen():
+        pass
+    client._listener_task = asyncio.create_task(finish_listen())
+    with pytest.raises(PrinterTimeoutError): # Will timeout waiting for _accumulated_data or checking done
+        await client._fetch_status()
+
+async def test_fetch_status_stale_update() -> None:
+    client = PrinterClient(_SETTINGS)
+    client._accumulated_data = {"method": 6000}
+    client._last_update_time = time.monotonic() - 20.0
+    
+    async def dummy(): pass
+    client._listener_task = asyncio.create_task(dummy())
+    
+    with pytest.raises(PrinterTimeoutError):
+        await client._fetch_status()
+
+async def test_listen_loop_stream_clean_reconnect() -> None:
+    client = PrinterClient(_SETTINGS)
+    # Stream yields one status message, then ends naturally
+    payload = _status_payload()
+    cm, mock_client = _make_mqtt_cm([payload])
+    
+    with patch("sentinel.printer.client.aiomqtt.Client", return_value=cm),          patch("sentinel.printer.client.asyncio.sleep", side_effect=asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError):
+            await client._listen_loop()
+
+async def test_with_retry_exhaustion() -> None:
+    import tenacity
+    client = PrinterClient(_SETTINGS)
+    async def fail():
+        raise PrinterTimeoutError("fail")
+    with patch("sentinel.printer.client._RETRY_WAIT", tenacity.wait_fixed(0.01)):
+        with pytest.raises(PrinterTimeoutError, match="fail"):
+            await client._with_retry(fail)

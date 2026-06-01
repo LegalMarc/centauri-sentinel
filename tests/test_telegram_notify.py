@@ -220,3 +220,57 @@ def test_init_raises_if_all_user_ids_are_invalid() -> None:
         pytest.raises(ValueError, match="TELEGRAM_USER_IDS"),
     ):
         TelegramNotifier(settings)
+
+async def test_send_print_started_alert() -> None:
+    notifier, mock_bot = _make_notifier_enabled()
+    await notifier.send_print_started_alert("file.gcode")
+    mock_bot.send_message.assert_called_once()
+
+async def test_send_print_started_alert_with_photo() -> None:
+    notifier, mock_bot = _make_notifier_enabled()
+    await notifier.send_print_started_alert("file.gcode", b"jpeg")
+    mock_bot.send_photo.assert_called_once()
+
+async def test_send_print_started_alert_with_photo_fallback() -> None:
+    notifier, mock_bot = _make_notifier_enabled()
+    mock_bot.send_photo.side_effect = Exception("failed")
+    await notifier.send_print_started_alert("file.gcode", b"jpeg")
+    mock_bot.send_message.assert_called_once()
+
+async def test_send_print_completed_alert() -> None:
+    notifier, mock_bot = _make_notifier_enabled()
+    await notifier.send_print_completed_alert("file.gcode", 3661.0)
+    mock_bot.send_message.assert_called_once()
+
+async def test_send_print_completed_alert_with_photo() -> None:
+    notifier, mock_bot = _make_notifier_enabled()
+    await notifier.send_print_completed_alert("file.gcode", 3661.0, b"jpeg")
+    mock_bot.send_photo.assert_called_once()
+
+async def test_send_print_completed_alert_with_photo_fallback() -> None:
+    notifier, mock_bot = _make_notifier_enabled()
+    mock_bot.send_photo.side_effect = Exception("failed")
+    await notifier.send_print_completed_alert("file.gcode", 3661.0, b"jpeg")
+    mock_bot.send_message.assert_called_once()
+
+async def test_send_external_pause_alert() -> None:
+    notifier, mock_bot = _make_notifier_enabled()
+    await notifier.send_external_pause_alert()
+    mock_bot.send_message.assert_called_once()
+
+async def test_send_external_pause_alert_with_photo() -> None:
+    notifier, mock_bot = _make_notifier_enabled()
+    await notifier.send_external_pause_alert(b"jpeg")
+    mock_bot.send_photo.assert_called_once()
+
+async def test_send_external_pause_alert_with_photo_fallback() -> None:
+    notifier, mock_bot = _make_notifier_enabled()
+    mock_bot.send_photo.side_effect = Exception("failed")
+    await notifier.send_external_pause_alert(b"jpeg")
+    mock_bot.send_message.assert_called_once()
+
+async def test_send_detection_alert_disk_read_failure(tmp_path) -> None:
+    notifier, mock_bot = _make_notifier_enabled()
+    notifier._snapshots_dir = tmp_path
+    await notifier.send_detection_alert(0.9, snapshot_id="missing")
+    mock_bot.send_message.assert_called_once()

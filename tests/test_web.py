@@ -868,3 +868,115 @@ async def test_post_settings_invalid_values(
         r = await c.post("/api/settings", json=payload)
     assert r.status_code == 400
     assert expected_detail in r.json()["detail"]
+
+async def test_format_duration_edge_cases() -> None:
+    from sentinel.web.routes import format_duration
+    assert format_duration(0) == "—"
+    assert "h" in format_duration(3600)
+
+async def test_endpoints_without_deps(app: object) -> None:
+    from sentinel.web.app import create_app
+    from sentinel.config import Settings
+    bad_app = create_app(Settings(printer_ip="127.0.0.1"), db=None, watcher=None, camera=None)
+    async with _client(bad_app) as c:
+        assert (await c.get("/")).status_code == 503
+        assert (await c.get("/api/printer")).status_code == 503
+        assert (await c.post("/api/control/pause")).status_code == 503
+        assert (await c.post("/api/control/resume")).status_code == 503
+        assert (await c.post("/api/control/stop")).status_code == 503
+        assert (await c.post("/api/control/snooze", json={"seconds": 60})).status_code == 503
+        assert (await c.post("/api/settings", json={})).status_code == 503
+        assert (await c.get("/snapshot/12345678901234567890123456789012")).status_code == 503
+
+async def test_settings_update_exceptions(mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: AsyncMock) -> None:
+    from sentinel.web.app import create_app
+    from sentinel.config import Settings
+    
+    app = create_app(Settings(printer_ip="127.0.0.1"), db=mock_db, watcher=mock_watcher, camera=mock_camera)
+    
+    async def mock_set(*args, **kwargs):
+        raise Exception("db error")
+    mock_db.set_setting = AsyncMock(side_effect=mock_set)
+    
+    async with _client(app) as c:
+        res = await c.post("/api/settings", json={"ml_score_threshold": 0.5})
+        assert res.status_code == 500
+        
+        # Test 400 branches
+        assert (await c.post("/api/settings", json={"ml_score_threshold": -1})).status_code == 400
+        assert (await c.post("/api/settings", json={"ml_score_threshold": 1.5})).status_code == 400
+        assert (await c.post("/api/settings", json={"ml_confirm_count": 0})).status_code == 400
+        assert (await c.post("/api/settings", json={"ml_poll_interval_seconds": 0})).status_code == 400
+        assert (await c.post("/api/settings", json={"detection_warmup_seconds": -1})).status_code == 400
+        assert (await c.post("/api/settings", json={"printer_ip": "   "})).status_code == 400
+        assert (await c.post("/api/settings", json={"printer_ip": "bad_format!!!"})).status_code == 400
+
+async def test_snapshot_not_found_edge_cases(app: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    async with _client(app) as c:
+        assert (await c.get("/snapshot/invalid_len")).status_code == 404
+        
+        snap_id = "a" * 32
+        
+        from pathlib import Path
+        monkeypatch.setattr(Path, "exists", lambda x: False)
+        assert (await c.get(f"/snapshot/{snap_id}")).status_code == 404
+        
+        monkeypatch.setattr(Path, "exists", lambda x: True)
+        monkeypatch.setattr(Path, "read_bytes", MagicMock(side_effect=Exception("read error")))
+        assert (await c.get(f"/snapshot/{snap_id}")).status_code == 500
+
+async def test_format_duration_edge_cases() -> None:
+    from sentinel.web.routes import format_duration
+    assert format_duration(0) == "—"
+    assert "h" in format_duration(3600)
+
+async def test_endpoints_without_deps(app: object) -> None:
+    from sentinel.web.app import create_app
+    from sentinel.config import Settings
+    bad_app = create_app(Settings(printer_ip="127.0.0.1"), db=None, watcher=None, camera=None)
+    async with _client(bad_app) as c:
+        assert (await c.get("/")).status_code == 503
+        assert (await c.get("/api/printer")).status_code == 503
+        assert (await c.post("/api/control/pause")).status_code == 503
+        assert (await c.post("/api/control/resume")).status_code == 503
+        assert (await c.post("/api/control/stop")).status_code == 503
+        assert (await c.post("/api/control/snooze", json={"seconds": 60})).status_code == 503
+        assert (await c.post("/api/settings", json={})).status_code == 503
+        assert (await c.get("/snapshot/12345678901234567890123456789012")).status_code == 503
+
+async def test_settings_update_exceptions(mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: AsyncMock) -> None:
+    from sentinel.web.app import create_app
+    from sentinel.config import Settings
+    
+    app = create_app(Settings(printer_ip="127.0.0.1"), db=mock_db, watcher=mock_watcher, camera=mock_camera)
+    
+    async def mock_set(*args, **kwargs):
+        raise Exception("db error")
+    mock_db.set_setting = AsyncMock(side_effect=mock_set)
+    
+    async with _client(app) as c:
+        res = await c.post("/api/settings", json={"ml_score_threshold": 0.5})
+        assert res.status_code == 500
+        
+        # Test 400 branches
+        assert (await c.post("/api/settings", json={"ml_score_threshold": -1})).status_code == 400
+        assert (await c.post("/api/settings", json={"ml_score_threshold": 1.5})).status_code == 400
+        assert (await c.post("/api/settings", json={"ml_confirm_count": 0})).status_code == 400
+        assert (await c.post("/api/settings", json={"ml_poll_interval_seconds": 0})).status_code == 400
+        assert (await c.post("/api/settings", json={"detection_warmup_seconds": -1})).status_code == 400
+        assert (await c.post("/api/settings", json={"printer_ip": "   "})).status_code == 400
+        assert (await c.post("/api/settings", json={"printer_ip": "bad_format!!!"})).status_code == 400
+
+async def test_snapshot_not_found_edge_cases(app: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    async with _client(app) as c:
+        assert (await c.get("/snapshot/invalid_len")).status_code == 404
+        
+        snap_id = "a" * 32
+        
+        from pathlib import Path
+        monkeypatch.setattr(Path, "exists", lambda x: False)
+        assert (await c.get(f"/snapshot/{snap_id}")).status_code == 404
+        
+        monkeypatch.setattr(Path, "exists", lambda x: True)
+        monkeypatch.setattr(Path, "read_bytes", MagicMock(side_effect=Exception("read error")))
+        assert (await c.get(f"/snapshot/{snap_id}")).status_code == 500

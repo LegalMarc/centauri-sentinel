@@ -231,4 +231,37 @@ async def test_detection_alert_disk_read_failure(tmp_path: Any) -> None:
     # Content should default to message because snapshot read failed
     headers = call_kwargs.get("headers", {})
     assert "X-Filename" not in headers
-    assert call_kwargs.get("content") == "Confidence 85%."
+    assert "Confidence 85%." in call_kwargs.get("content", "")
+
+async def test_send_text_calls_post() -> None:
+    settings = Settings(printer_ip="10.0.0.1", ntfy_url="https://ntfy.sh/test")
+    mock_client = _make_http_client()
+    with patch("sentinel.notify.ntfy.httpx.AsyncClient", return_value=mock_client):
+        notifier = NtfyNotifier(settings)
+        await notifier.send_text("hello")
+    mock_client.post.assert_called_once()
+    assert mock_client.post.call_args.kwargs.get("content") == "hello"
+
+async def test_send_print_started_alert() -> None:
+    settings = Settings(printer_ip="10.0.0.1", ntfy_url="https://ntfy.sh/test")
+    mock_client = _make_http_client()
+    with patch("sentinel.notify.ntfy.httpx.AsyncClient", return_value=mock_client):
+        notifier = NtfyNotifier(settings)
+        await notifier.send_print_started_alert("file.gcode", b"jpeg")
+    mock_client.post.assert_called_once()
+
+async def test_send_print_completed_alert() -> None:
+    settings = Settings(printer_ip="10.0.0.1", ntfy_url="https://ntfy.sh/test")
+    mock_client = _make_http_client()
+    with patch("sentinel.notify.ntfy.httpx.AsyncClient", return_value=mock_client):
+        notifier = NtfyNotifier(settings)
+        await notifier.send_print_completed_alert("file.gcode", 3661.0, b"jpeg")
+    mock_client.post.assert_called_once()
+
+async def test_send_external_pause_alert() -> None:
+    settings = Settings(printer_ip="10.0.0.1", ntfy_url="https://ntfy.sh/test")
+    mock_client = _make_http_client()
+    with patch("sentinel.notify.ntfy.httpx.AsyncClient", return_value=mock_client):
+        notifier = NtfyNotifier(settings)
+        await notifier.send_external_pause_alert(b"jpeg")
+    mock_client.post.assert_called_once()

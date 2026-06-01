@@ -535,3 +535,77 @@ async def test_cmd_resume_failure() -> None:
     await handler.cmd_resume(update, None)
     update.message.reply_text.assert_called_once()
     assert "failed" in update.message.reply_text.call_args[0][0].lower()
+
+async def test_unauthorized_all_commands() -> None:
+    handler = _make_handler()
+    update = _make_update(user_id=_OTHER_USER)
+    await handler.cmd_help(update, None)
+    await handler.cmd_snapshot(update, None)
+    await handler.cmd_pause(update, None)
+    await handler.cmd_resume(update, None)
+    await handler.cmd_stop(update, None)
+    await handler.cmd_confirm(update, None)
+    await handler.cmd_enable(update, None)
+    await handler.cmd_disable(update, None)
+    update.message.reply_text.assert_not_called()
+
+async def test_handle_callback_no_cq() -> None:
+    handler = _make_handler()
+    update = _make_update()
+    update.callback_query = None
+    await handler.handle_callback(update, None)
+
+async def test_cmd_status_with_recent_detection() -> None:
+    handler = _make_handler()
+    handler._db.get_recent_detections.return_value = [{"score": 0.85, "ts_utc": "2026-06-01T12:00:00Z"}]
+    update = _make_update()
+    await handler.cmd_status(update, None)
+    caption = update.message.reply_photo.call_args[1]["caption"]
+    assert "Last detection: score=0.85" in caption
+
+async def test_cmd_confirm_printer_stop_fails() -> None:
+    handler = _make_handler()
+    handler._printer.stop.side_effect = Exception("failed")
+    handler._pending_stops[_AUTHORIZED_USER] = time.monotonic()
+    update = _make_update()
+    await handler.cmd_confirm(update, None)
+    assert "failed" in update.message.reply_text.call_args[0][0].lower()
+
+async def test_handle_callback_cancel_stop() -> None:
+    handler = _make_handler()
+    handler._pending_stops[_AUTHORIZED_USER] = time.monotonic()
+    update = _make_update(callback_data="cancel_stop")
+    await handler.handle_callback(update, None)
+    assert _AUTHORIZED_USER not in handler._pending_stops
+    update.callback_query.edit_message_reply_markup.assert_called_once()
+
+async def test_handle_callback_confirm_stop_success() -> None:
+    handler = _make_handler()
+    handler._pending_stops[_AUTHORIZED_USER] = time.monotonic()
+    update = _make_update(callback_data="confirm_stop")
+    await handler.handle_callback(update, None)
+    handler._printer.stop.assert_called_once()
+    assert "cancelled" in update.callback_query.edit_message_text.call_args[0][0].lower()
+
+async def test_handle_callback_confirm_stop_expired() -> None:
+    handler = _make_handler()
+    handler._pending_stops[_AUTHORIZED_USER] = time.monotonic() - 100.0
+    update = _make_update(callback_data="confirm_stop")
+    await handler.handle_callback(update, None)
+    handler._printer.stop.assert_not_called()
+    assert "expired" in update.callback_query.edit_message_text.call_args[0][0].lower()
+
+async def test_handle_callback_confirm_stop_fails() -> None:
+    handler = _make_handler()
+    handler._printer.stop.side_effect = Exception("failed")
+    handler._pending_stops[_AUTHORIZED_USER] = time.monotonic()
+    update = _make_update(callback_data="confirm_stop")
+    await handler.handle_callback(update, None)
+    assert "failed" in update.callback_query.edit_message_text.call_args[0][0].lower()
+
+async def test_handle_callback_enable() -> None:
+    handler = _make_handler()
+    update = _make_update(callback_data="enable")
+    await handler.handle_callback(update, None)
+    handler._db.set_setting.assert_called_once_with("detection_enabled", "true")
+    assert "re-enabled" in update.callback_query.edit_message_text.call_args[0][0].lower()

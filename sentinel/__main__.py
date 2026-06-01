@@ -62,7 +62,8 @@ async def _run(args: argparse.Namespace) -> None:
     from sentinel.notify.telegram import TelegramNotifier
     from sentinel.printer.client import PrinterClient
     from sentinel.safety import check_external_bind
-    from sentinel.watcher.loop import Notifier, WatcherLoop
+    from sentinel.notify.dispatcher import NotificationDispatcher, Notifier
+    from sentinel.watcher.loop import WatcherLoop
     from sentinel.web.app import create_app
 
     settings = get_settings()
@@ -109,7 +110,9 @@ async def _run(args: argparse.Namespace) -> None:
     if settings.ntfy_enabled:
         notifiers.append(NtfyNotifier(settings))
 
-    watcher = WatcherLoop(settings, printer, camera, ml, db, notifiers)
+    dispatcher = NotificationDispatcher(notifiers)
+
+    watcher = WatcherLoop(settings, printer, camera, ml, db, dispatcher)
 
     app = create_app(settings, db=db, watcher=watcher, camera=camera, auth_secret=auth_secret)
 
