@@ -274,7 +274,10 @@ class WatcherLoop:
         try:
             warmup = int(warmup_str)
         except (ValueError, TypeError):
-            warmup = self._settings.detection_warmup_seconds
+            try:
+                warmup = int(self._settings.detection_warmup_seconds)
+            except (ValueError, TypeError):
+                warmup = 0
 
         if status.print_state == "paused":
             if self.state != WatcherState.PAUSED:

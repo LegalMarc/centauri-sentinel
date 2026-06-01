@@ -1140,15 +1140,19 @@ async def test_watchdog_auto_stop_exception(monkeypatch) -> None:
 
 async def test_poll_interval_fallback(monkeypatch) -> None:
     watcher, printer, camera, ml, db = await _make_watcher()
-    watcher._settings.ml_poll_interval_seconds = "invalid"
+    watcher._settings.ml_poll_interval_seconds = "0.5"
     
-    import asyncio
-    asyncio.sleep = AsyncMock()
+    watcher._running = True
+    async def mock_tick():
+        watcher._running = False
+    watcher._tick = AsyncMock(side_effect=mock_tick)
     
     db.get_setting = AsyncMock(return_value="not_a_float")
-    await watcher._poll_sleep()
-    # If the fallback parsing fails (TypeError/ValueError), we expect it to fallback to the float conversion of settings string, which will fail if settings string is invalid. But in WatcherLoop settings is validated.
-    # Wait, in the test we mock the settings string to "invalid" which throws ValueError, but we just need to hit the exception branch in loop.py.
+    
+    with patch("sentinel.watcher.loop.asyncio.sleep") as mock_sleep:
+        await watcher._loop()
+        
+    mock_sleep.assert_called_once_with(0.5)
     
 async def test_warmup_fallback(monkeypatch) -> None:
     watcher, printer, camera, ml, db = await _make_watcher()

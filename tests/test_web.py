@@ -681,7 +681,12 @@ async def test_control_snooze_success(
     # Wait for the re-enable task to fire
     import asyncio
 
-    await asyncio.sleep(0.05)
+    for _ in range(20):
+        await asyncio.sleep(0.05)
+        from unittest.mock import call
+        if call("detection_enabled", "true") in mock_db.set_setting.call_args_list:
+            break
+
     mock_db.set_setting.assert_any_call("detection_enabled", "true")
 
 
