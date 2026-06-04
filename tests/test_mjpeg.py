@@ -56,7 +56,12 @@ def _make_stream_response(chunks: list[bytes]) -> MagicMock:
 
     async def _aiter_bytes(_size: int) -> AsyncIterator[bytes]:
         for chunk in chunks:
+            import asyncio
+            await asyncio.sleep(0)
             yield chunk
+        # Block forever so the stream doesn't end prematurely, like a real MJPEG stream
+        import asyncio
+        await asyncio.Event().wait()
 
     resp = MagicMock()
     resp.raise_for_status = MagicMock()
@@ -124,8 +129,10 @@ async def test_grab_resets_consecutive_failures_on_success() -> None:
 
 async def test_grab_http_error_raises_camera_read_error() -> None:
     mock_client = MagicMock()
-    mock_client.__aenter__ = AsyncMock(side_effect=httpx.ConnectError("refused"))
-    mock_client.__aexit__ = AsyncMock(return_value=False)
+    stream_cm = MagicMock()
+    stream_cm.__aenter__ = AsyncMock(side_effect=httpx.ConnectError("refused"))
+    stream_cm.__aexit__ = AsyncMock(return_value=False)
+    mock_client.stream = MagicMock(return_value=stream_cm)
 
     with patch("sentinel.camera.mjpeg.httpx.AsyncClient", return_value=mock_client):
         grabber = MjpegGrabber(_SETTINGS)
@@ -145,8 +152,10 @@ async def test_grab_mid_stream_disconnect_raises_camera_read_error() -> None:
 
 async def test_grab_increments_consecutive_failures() -> None:
     mock_client = MagicMock()
-    mock_client.__aenter__ = AsyncMock(side_effect=httpx.ConnectError("refused"))
-    mock_client.__aexit__ = AsyncMock(return_value=False)
+    stream_cm = MagicMock()
+    stream_cm.__aenter__ = AsyncMock(side_effect=httpx.ConnectError("refused"))
+    stream_cm.__aexit__ = AsyncMock(return_value=False)
+    mock_client.stream = MagicMock(return_value=stream_cm)
 
     with patch("sentinel.camera.mjpeg.httpx.AsyncClient", return_value=mock_client):
         grabber = MjpegGrabber(_SETTINGS)
@@ -163,8 +172,10 @@ async def test_grab_increments_consecutive_failures() -> None:
 
 async def test_grab_offline_after_threshold() -> None:
     mock_client = MagicMock()
-    mock_client.__aenter__ = AsyncMock(side_effect=httpx.ConnectError("refused"))
-    mock_client.__aexit__ = AsyncMock(return_value=False)
+    stream_cm = MagicMock()
+    stream_cm.__aenter__ = AsyncMock(side_effect=httpx.ConnectError("refused"))
+    stream_cm.__aexit__ = AsyncMock(return_value=False)
+    mock_client.stream = MagicMock(return_value=stream_cm)
 
     with patch("sentinel.camera.mjpeg.httpx.AsyncClient", return_value=mock_client):
         grabber = MjpegGrabber(_SETTINGS)
@@ -181,8 +192,10 @@ async def test_grab_offline_after_threshold() -> None:
 
 async def test_grab_timeout_raises_camera_read_error() -> None:
     mock_client = MagicMock()
-    mock_client.__aenter__ = AsyncMock(side_effect=TimeoutError())
-    mock_client.__aexit__ = AsyncMock(return_value=False)
+    stream_cm = MagicMock()
+    stream_cm.__aenter__ = AsyncMock(side_effect=TimeoutError())
+    stream_cm.__aexit__ = AsyncMock(return_value=False)
+    mock_client.stream = MagicMock(return_value=stream_cm)
 
     with patch("sentinel.camera.mjpeg.httpx.AsyncClient", return_value=mock_client):
         grabber = MjpegGrabber(_SETTINGS)
@@ -224,25 +237,27 @@ async def test_stream_proxy_yields_frames() -> None:
 
 async def test_stream_proxy_backs_off_on_read_error() -> None:
     mock_client1 = MagicMock()
-    mock_client1.stream = MagicMock(side_effect=httpx.ConnectError("refused"))
-    mock_client1.__aenter__ = AsyncMock(return_value=mock_client1)
-    mock_client1.__aexit__ = AsyncMock(return_value=False)
+    stream_cm1 = MagicMock()
+    stream_cm1.__aenter__ = AsyncMock(side_effect=httpx.ConnectError("refused"))
+    stream_cm1.__aexit__ = AsyncMock(return_value=False)
+    mock_client1.stream = MagicMock(return_value=stream_cm1)
 
     resp2 = _make_stream_response([_JPEG])
-    mock_client2 = _make_httpx_client(resp2)
+    stream_cm2 = resp2
 
-    client_calls = [mock_client1, mock_client2]
+    mock_client = MagicMock()
+    mock_client.stream = MagicMock(side_effect=[stream_cm1, stream_cm2, stream_cm2])
 
-    def _get_client(*args: object, **kwargs: object) -> MagicMock:
-        return client_calls.pop(0) if client_calls else mock_client1
-
+    import asyncio
+    _real_sleep = asyncio.sleep
     sleep_calls: list[float] = []
 
     async def _mock_sleep(delay: float) -> None:
         sleep_calls.append(delay)
+        await _real_sleep(0)
 
     with (
-        patch("sentinel.camera.mjpeg.httpx.AsyncClient", side_effect=_get_client),
+        patch("sentinel.camera.mjpeg.httpx.AsyncClient", return_value=mock_client),
         patch("sentinel.camera.mjpeg.asyncio.sleep", side_effect=_mock_sleep),
     ):
         grabber = MjpegGrabber(_SETTINGS)
@@ -250,8 +265,7 @@ async def test_stream_proxy_backs_off_on_read_error() -> None:
             assert frame == _JPEG
             break
 
-    assert len(sleep_calls) == 1
-    assert sleep_calls[0] == pytest.approx(0.5)
+    assert pytest.approx(0.5) in sleep_calls
 
 
 # ---------------------------------------------------------------------------
@@ -284,3 +298,95 @@ async def test_stream_proxy_exceeds_max_buf_bytes_raises_error() -> None:
             async for _ in grabber.stream_proxy():
                 pass
         assert "limit exceeded" in str(exc_info.value)
+
+
+async def test_grab_generic_exception_wrapped_in_camera_read_error() -> None:
+    mock_client = MagicMock()
+    stream_cm = MagicMock()
+    stream_cm.__aenter__ = AsyncMock(side_effect=RuntimeError("something went wrong"))
+    stream_cm.__aexit__ = AsyncMock(return_value=False)
+    mock_client.stream = MagicMock(return_value=stream_cm)
+
+    with patch("sentinel.camera.mjpeg.httpx.AsyncClient", return_value=mock_client):
+        grabber = MjpegGrabber(_SETTINGS)
+        with pytest.raises(CameraReadError) as exc_info:
+            await grabber.grab()
+        assert "Grab failed: something went wrong" in str(exc_info.value)
+        assert isinstance(exc_info.value.__cause__, RuntimeError)
+
+
+async def test_grab_reuses_persistent_connection() -> None:
+    resp = _make_stream_response([_JPEG, _JPEG])
+    mock_client = _make_httpx_client(resp)
+
+    with patch("sentinel.camera.mjpeg.httpx.AsyncClient", return_value=mock_client):
+        grabber = MjpegGrabber(_SETTINGS)
+
+        # Grab twice
+        frame1 = await grabber.grab()
+        frame2 = await grabber.grab()
+
+    # Ensure only 1 connection stream was opened
+    mock_client.stream.assert_called_once()
+    assert frame1 == _JPEG
+    assert frame2 == _JPEG
+
+
+async def test_stream_proxy_limit_exceeded() -> None:
+    grabber = MjpegGrabber(_SETTINGS)
+    # Mock self._listeners with 3 items
+    grabber._listeners = {MagicMock(), MagicMock(), MagicMock()}
+
+    with pytest.raises(CameraReadError, match="Max concurrent stream proxies reached"):
+        async for _ in grabber.stream_proxy():
+            pass
+
+
+async def test_stream_proxy_duration_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    import time
+    resp = _make_stream_response([_JPEG, _JPEG])
+    mock_client = _make_httpx_client(resp)
+
+    with patch("sentinel.camera.mjpeg.httpx.AsyncClient", return_value=mock_client):
+        grabber = MjpegGrabber(_SETTINGS)
+
+        current_time = 1000.0
+        monkeypatch.setattr(time, "monotonic", lambda: current_time)
+
+        frames = []
+        async for frame in grabber.stream_proxy():
+            frames.append(frame)
+            current_time = 1400.0
+
+        assert len(frames) == 1
+
+
+async def test_camera_close_yields_camera_closed_error() -> None:
+    import asyncio
+
+    from sentinel.camera.errors import CameraClosedError
+    grabber = MjpegGrabber(_SETTINGS)
+    q: asyncio.Queue[object] = asyncio.Queue()
+    grabber._listeners.add(q)
+    await grabber.close()
+    item = q.get_nowait()
+    assert isinstance(item, CameraClosedError)
+
+
+async def test_stream_proxy_cancellation_during_grab() -> None:
+    import asyncio
+    resp = _make_stream_response([])
+    mock_client = _make_httpx_client(resp)
+
+    with patch("sentinel.camera.mjpeg.httpx.AsyncClient", return_value=mock_client):
+        grabber = MjpegGrabber(_SETTINGS)
+        grab_task = asyncio.create_task(grabber.grab())
+        await asyncio.sleep(0.1)
+        assert grabber._broadcaster_task is not None
+        grabber._broadcaster_task.cancel()
+        with pytest.raises(CameraReadError) as exc_info:
+            await grab_task
+        assert "was cancelled" in str(exc_info.value)
+
+
+

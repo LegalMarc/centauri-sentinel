@@ -24,6 +24,7 @@ def _enabled_settings() -> Settings:
         telegram_bot_token="tok",
         telegram_chat_id="99",
         telegram_user_ids="1,2,3",
+        telegram_send_snapshots=True,
     )
 
 

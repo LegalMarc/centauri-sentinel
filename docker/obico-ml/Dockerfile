@@ -26,10 +26,12 @@ RUN apt-get update -qq \
        git \
     && rm -rf /var/lib/apt/lists/*
 
-# Fetch the ml_api source from obico-server (shallow clone, copy to /app, discard)
-# ml_api expects to live at /app (model.meta hardcodes /app/model/names)
-RUN git clone --depth 1 \
-       https://github.com/TheSpaghettiDetective/obico-server.git /tmp/obico \
+# Fetch the ml_api source from obico-server using a specific pinned commit hash for reproducible builds
+# Commit corresponds to a known-working state of the ml_api
+RUN git clone https://github.com/TheSpaghettiDetective/obico-server.git /tmp/obico \
+    && cd /tmp/obico \
+    && git checkout 91fc96e7fc563d1264c7e7b51b369ad8b2f0a1c6 \
+    && cd / \
     && cp -rT /tmp/obico/ml_api /app/ \
     && rm -rf /tmp/obico
 

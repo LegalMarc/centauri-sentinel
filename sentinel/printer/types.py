@@ -51,6 +51,9 @@ class PrinterStatus:
     # Raw decoded payload for diagnostics
     raw: dict[str, Any] = field(default_factory=dict, compare=False, repr=False)
 
+    # Set to True if the status was preserved due to a network timeout
+    stale: bool = False
+
 
 # MQTT method codes (verified from spike, method 6000 = status push)
 METHOD_STATUS_PUSH = 6000

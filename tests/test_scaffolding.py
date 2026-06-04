@@ -74,7 +74,7 @@ def test_get_settings_cached() -> None:
     # We can't test global cache without clearing it, so just test it doesn't raise
     # when PRINTER_IP is unset (uses default)
     s = Settings()
-    assert s.printer_ip == "127.0.0.1"  # default from config.py
+    assert s.printer_ip == "192.168.1.10"  # default from config.py
 
 
 def test_internal_snapshot_endpoint_hit() -> None:

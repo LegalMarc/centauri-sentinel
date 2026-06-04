@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -474,13 +475,14 @@ async def test_close_resets_connection_state() -> None:
     assert client._last_update_time == 0.0
 
 
-import time
 def test_deep_merge_dict() -> None:
     from sentinel.printer.client import _deep_merge
+
     target = {"a": {"b": 1}}
     source = {"a": {"c": 2}, "d": 3}
     _deep_merge(target, source)
     assert target == {"a": {"b": 1, "c": 2}, "d": 3}
+
 
 def test_parse_status_carbon2_total_layers() -> None:
     payload = {
@@ -490,65 +492,246 @@ def test_parse_status_carbon2_total_layers() -> None:
                 "state": "printing",
                 "filename": "benchy.gcode",
             },
-            "file_list": [
-                {"filename": "benchy.gcode", "layer": 150}
-            ]
-        }
+            "file_list": [{"filename": "benchy.gcode", "layer": 150}],
+        },
     }
     status = _parse_status(payload)
     assert status.total_layers == 150
 
+
 async def test_close_cancels_listener_task() -> None:
     client = PrinterClient(_SETTINGS)
+
     async def dummy_listen():
         await asyncio.sleep(10.0)
+
     client._listener_task = asyncio.create_task(dummy_listen())
     await client.close()
     assert client._listener_task is None
 
+
 async def test_fetch_status_listener_done_with_exception() -> None:
     client = PrinterClient(_SETTINGS)
+
     async def fail_listen():
         raise PrinterProtocolError("test")
+
     client._listener_task = asyncio.create_task(fail_listen())
     await asyncio.sleep(0.01)
     with pytest.raises(PrinterProtocolError):
         await client._fetch_status()
 
+
 async def test_fetch_status_listener_done_without_exception() -> None:
     client = PrinterClient(_SETTINGS)
+
     async def finish_listen():
         pass
+
     client._listener_task = asyncio.create_task(finish_listen())
-    with pytest.raises(PrinterTimeoutError): # Will timeout waiting for _accumulated_data or checking done
+    with pytest.raises(
+        PrinterTimeoutError
+    ):  # Will timeout waiting for _accumulated_data or checking done
         await client._fetch_status()
+
 
 async def test_fetch_status_stale_update() -> None:
     client = PrinterClient(_SETTINGS)
     client._accumulated_data = {"method": 6000}
     client._last_update_time = time.monotonic() - 20.0
-    
-    async def dummy(): pass
+
+    async def dummy():
+        pass
+
     client._listener_task = asyncio.create_task(dummy())
-    
+
     with pytest.raises(PrinterTimeoutError):
         await client._fetch_status()
+
 
 async def test_listen_loop_stream_clean_reconnect() -> None:
     client = PrinterClient(_SETTINGS)
     # Stream yields one status message, then ends naturally
     payload = _status_payload()
-    cm, mock_client = _make_mqtt_cm([payload])
-    
-    with patch("sentinel.printer.client.aiomqtt.Client", return_value=cm),          patch("sentinel.printer.client.asyncio.sleep", side_effect=asyncio.CancelledError):
-        with pytest.raises(asyncio.CancelledError):
-            await client._listen_loop()
+    cm, _ = _make_mqtt_cm([payload])
+    with (
+        patch("sentinel.printer.client.aiomqtt.Client", return_value=cm),
+        patch("sentinel.printer.client.asyncio.sleep", side_effect=asyncio.CancelledError),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await client._listen_loop()
+
 
 async def test_with_retry_exhaustion() -> None:
     import tenacity
+
     client = PrinterClient(_SETTINGS)
+
     async def fail():
         raise PrinterTimeoutError("fail")
-    with patch("sentinel.printer.client._RETRY_WAIT", tenacity.wait_fixed(0.01)):
-        with pytest.raises(PrinterTimeoutError, match="fail"):
-            await client._with_retry(fail)
+
+    with (
+        patch("sentinel.printer.client._RETRY_WAIT", tenacity.wait_fixed(0.01)),
+        pytest.raises(PrinterTimeoutError, match="fail"),
+    ):
+        await client._with_retry(fail)
+
+
+# ---------------------------------------------------------------------------
+# BUG-04 MQTT Schema Validation and Field Distinction Tests
+# ---------------------------------------------------------------------------
+
+
+def test_parse_status_missing_key_warning_legacy() -> None:
+
+    # Missing CurrentStatus, PrintTime, CurrentLayer, TotalLayer
+    payload = {"method": 6000, "data": {"Attributes": {"Filename": "test.gcode"}}}
+    with patch("sentinel.printer.client.logger.warning") as mock_warn:
+        status = _parse_status(payload)
+        mock_warn.assert_called_once()
+        warning_msg = mock_warn.call_args[0][0]
+        assert "Missing key fields in legacy" in warning_msg
+
+    assert status.printing is False
+    assert status.elapsed_seconds == 0.0
+    assert status.current_layer == 0
+    assert status.total_layers == 0
+
+
+def test_parse_status_missing_key_warning_modern() -> None:
+
+    # Missing extruder block, heater_bed block entirely, and missing fields in other blocks
+    payload = {
+        "method": 6000,
+        "result": {
+            "print_status": {
+                "state": "printing"
+                # missing print_duration, current_layer, remaining_time_sec
+            },
+            "machine_status": {},  # missing progress
+            # missing extruder block entirely
+            # missing heater_bed block entirely
+            # missing external_device block entirely
+        },
+    }
+    with patch("sentinel.printer.client.logger.warning") as mock_warn:
+        status = _parse_status(payload)
+        # Warning called once for missing blocks, once for missing fields
+        assert mock_warn.call_count >= 1
+
+    assert status.printing is True
+    assert status.elapsed_seconds == 0.0
+    assert status.current_layer == 0
+    assert status.extruder_temp is None
+    assert status.extruder_target is None
+    assert status.bed_temp is None
+    assert status.bed_target is None
+    assert status.progress == 0.0
+    assert status.remaining_seconds == 0.0
+    assert status.camera_connected is False
+
+
+def test_parse_status_field_distinction_zero_vs_missing() -> None:
+    # 1. Zero values present
+    payload_zero = {
+        "method": 6000,
+        "result": {
+            "print_status": {
+                "state": "printing",
+                "print_duration": 0.0,
+                "current_layer": 0,
+                "remaining_time_sec": 0.0,
+            },
+            "machine_status": {"progress": 0.0},
+            "extruder": {"temperature": 0.0, "target": 0.0},
+            "heater_bed": {"temperature": 0.0, "target": 0.0},
+            "external_device": {"camera": False},
+        },
+    }
+
+    with patch("sentinel.printer.client.logger.warning") as mock_warn:
+        status_zero = _parse_status(payload_zero)
+        mock_warn.assert_not_called()
+
+    assert status_zero.extruder_temp == 0.0
+    assert status_zero.extruder_target == 0.0
+    assert status_zero.bed_temp == 0.0
+    assert status_zero.bed_target == 0.0
+
+    # 2. Missing values
+    payload_missing = {
+        "method": 6000,
+        "result": {
+            "print_status": {
+                "state": "printing",
+                "print_duration": 120.0,
+                "current_layer": 10,
+                "remaining_time_sec": 300.0,
+            },
+            "machine_status": {"progress": 40.0},
+            "extruder": {},  # missing temperature & target
+            "heater_bed": {},  # missing temperature & target
+            "external_device": {"camera": True},
+        },
+    }
+
+    with patch("sentinel.printer.client.logger.warning") as mock_warn:
+        status_missing = _parse_status(payload_missing)
+        mock_warn.assert_called_once()  # warns about extruder.temperature, etc.
+
+    assert status_missing.extruder_temp is None
+    assert status_missing.extruder_target is None
+    assert status_missing.bed_temp is None
+    assert status_missing.bed_target is None
+
+
+async def test_listen_loop_skips_malformed_json_and_increments_counter() -> None:
+    client = PrinterClient(_SETTINGS)
+    assert client.malformed_messages_count == 0
+
+    msg_malformed = MagicMock()
+    msg_malformed.payload = b"this is not valid JSON!!!"
+    msg_malformed.topic = "elegoo/serial1/api_status"
+
+    payload_valid = _status_payload()
+    msg_valid = MagicMock()
+    msg_valid.payload = json.dumps(payload_valid).encode()
+    msg_valid.topic = "elegoo/serial1/api_status"
+
+    async def _aiter_messages():
+        yield msg_malformed
+        yield msg_valid
+
+    client_mock = AsyncMock()
+    client_mock.subscribe = AsyncMock()
+    client_mock.messages.__aiter__ = lambda _: _aiter_messages()
+
+    cm = AsyncMock()
+    cm.__aenter__ = AsyncMock(return_value=client_mock)
+    cm.__aexit__ = AsyncMock(return_value=False)
+
+    with (
+        patch("sentinel.printer.client.aiomqtt.Client", return_value=cm),
+        patch("sentinel.printer.client.asyncio.sleep", side_effect=asyncio.CancelledError),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await client._listen_loop()
+
+    assert client.malformed_messages_count == 1
+    assert client._serial_number == "serial1"
+
+
+async def test_printer_client_stop_pending() -> None:
+    client = PrinterClient(_SETTINGS)
+    assert client.stop_pending is False
+
+    # Mock _send_command to fail
+    with patch.object(client, "_send_command", side_effect=RuntimeError("Timeout")), pytest.raises(RuntimeError):
+        await client.stop()
+    assert client.stop_pending is True
+
+    # Mock _send_command to succeed
+    with patch.object(client, "_send_command", return_value=None):
+        await client.stop()
+    assert client.stop_pending is False
+

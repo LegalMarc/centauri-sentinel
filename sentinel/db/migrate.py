@@ -11,7 +11,7 @@ import aiosqlite
 logger = logging.getLogger(__name__)
 
 _SCHEMA_SQL = (Path(__file__).parent / "schema.sql").read_text()
-CURRENT_VERSION = 3
+CURRENT_VERSION = 5
 
 
 async def migrate(db_path: str) -> None:
@@ -22,6 +22,7 @@ async def migrate(db_path: str) -> None:
     async with aiosqlite.connect(db_path) as db:
         await db.execute("PRAGMA journal_mode=WAL")
         await db.execute("PRAGMA foreign_keys=ON")
+        await db.execute("PRAGMA busy_timeout=30000")
 
         # Determine current version before executing the schema script
         current = 0

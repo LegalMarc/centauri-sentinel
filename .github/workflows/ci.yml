@@ -50,15 +50,8 @@ jobs:
   # Docker multi-arch build (push to GHCR on tags)
   # ---------------------------------------------------------------------------
   docker:
-    name: Docker build (${{ matrix.platform }})
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      matrix:
-        include:
-          - platform: linux/amd64
-            runner: ubuntu-latest
-          - platform: linux/arm64
-            runner: ubuntu-latest  # QEMU emulation; swap to arm64 runner if available
+    name: Docker build
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -91,7 +84,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: ${{ matrix.platform }}
+          platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name != 'pull_request' && startsWith(github.ref, 'refs/tags/') }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

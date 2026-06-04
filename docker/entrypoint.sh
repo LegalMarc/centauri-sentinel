@@ -11,8 +11,9 @@
 
 set -eu
 
-# Fix ownership of the data volume on every startup.
+# Fix ownership of the data and shared token volumes on every startup.
 # chown is idempotent — safe to run even when ownership is already correct.
 chown -R sentinel:sentinel /data 2>/dev/null || true
+chown -R sentinel:sentinel /shared 2>/dev/null || true
 
 exec gosu sentinel "$@"

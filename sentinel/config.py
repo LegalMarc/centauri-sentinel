@@ -21,24 +21,31 @@ class Settings(BaseSettings):
     )
 
     # Printer
-    printer_ip: str = "127.0.0.1"
+    printer_ip: str = "192.168.1.10"
     printer_access_code: str = "123456"
     printer_mqtt_port: int = 1883
     printer_mjpeg_port: int = 8080
     printer_mjpeg_path: str = "/mjpeg"
 
     # ML
+    # WARNING: When ml_api_token_file is used, transmitting bearer tokens
+    # over cleartext HTTP exposes them to network interception. Always
+    # use HTTPS for external ML endpoints.
     ml_api_url: str = "http://obico-ml:3333"
     ml_api_token_file: str = "/shared/token"
     ml_confirm_count: int = 3
     ml_poll_interval_seconds: int = 10
     ml_score_threshold: float = 0.4
+    ml_callback_host: str | None = None
 
     # Detection
     detection_warmup_seconds: int = 300
     detection_enabled_default: bool = True
     watcher_stall_seconds: int = 60
     auto_stop_timeout_seconds: int = 1800
+    snapshot_cleanup_interval_seconds: int = 3600
+    snapshot_retention_limit: int = 50
+    resume_cooldown_seconds: int = 5
 
     # Notifications
     notify_on_print_start: bool = False
@@ -49,23 +56,29 @@ class Settings(BaseSettings):
     telegram_bot_token: str | None = None
     telegram_chat_id: str | None = None
     telegram_user_ids: str | None = None
+    telegram_send_snapshots: bool = False
 
     # ntfy
     ntfy_url: str | None = None
     ntfy_token: str | None = None
+    ntfy_send_snapshots: bool = False
 
     # Auth
     # Set either AUTH_PASSWORD_BCRYPT (a bcrypt hash starting with $2b$) or the
-    # plain-text AUTH_PASSWORD — the latter is hashed at startup and then cleared
-    # from memory so it never persists beyond process launch.
+    # plain-text AUTH_PASSWORD.
+    # WARNING: Plain-text AUTH_PASSWORD in environment variables is visible via
+    # `docker inspect` and `/proc/<pid>/environ`. For production, always use
+    # AUTH_PASSWORD_BCRYPT.
     auth_username: str | None = None
     auth_password_bcrypt: str | None = None
     auth_password: str | None = None
+    auth_cookie_secure: str = "auto"
 
     # Web server
     bind_host: str = "0.0.0.0"
     bind_port: int = 8000
     external_bind_allowed: bool = False
+    trust_proxies: bool = False
 
     # Misc
     log_level: str = "INFO"
@@ -112,12 +125,25 @@ class Settings(BaseSettings):
 
         # 3. Hash plain password
         if self.auth_password and not self.auth_password_bcrypt:
+            import logging
+
+            logging.getLogger("sentinel.config").warning(
+                "Plain-text AUTH_PASSWORD is set. This is insecure as it remains visible "
+                "in process environment variables (e.g., via docker inspect). "
+                "Please use AUTH_PASSWORD_BCRYPT instead."
+            )
             import bcrypt  # lazy import
 
             self.auth_password_bcrypt = bcrypt.hashpw(
                 self.auth_password.encode(), bcrypt.gensalt()
             ).decode()
         self.auth_password = None
+        # Clear the plain-text password from Python's os.environ wrapper.
+        # Note: This does not hide the password from `docker inspect` or `/proc/<pid>/environ`
+        # if it was passed as a container environment variable at process launch.
+        import os
+
+        os.environ.pop("AUTH_PASSWORD", None)
         return self
 
     @field_validator("log_level")
@@ -129,35 +155,69 @@ class Settings(BaseSettings):
             raise ValueError(msg)
         return v.upper()
 
+    @field_validator("ml_score_threshold")
+    @classmethod
+    def _validate_ml_score_threshold(cls, v: float) -> float:
+        if not 0.0 <= v <= 1.0:
+            msg = "ML_SCORE_THRESHOLD must be between 0.0 and 1.0"
+            raise ValueError(msg)
+        return v
+
+    @field_validator("ml_confirm_count")
+    @classmethod
+    def _validate_ml_confirm_count(cls, v: int) -> int:
+        if v < 1:
+            msg = "ML_CONFIRM_COUNT must be at least 1"
+            raise ValueError(msg)
+        return v
+
+    @field_validator("ml_poll_interval_seconds")
+    @classmethod
+    def _validate_ml_poll_interval(cls, v: int) -> int:
+        if v < 1:
+            msg = "ML_POLL_INTERVAL_SECONDS must be at least 1 second"
+            raise ValueError(msg)
+        return v
+
+    @field_validator("snapshot_cleanup_interval_seconds")
+    @classmethod
+    def _validate_snapshot_cleanup_interval(cls, v: int) -> int:
+        if v < 1:
+            msg = "SNAPSHOT_CLEANUP_INTERVAL_SECONDS must be at least 1 second"
+            raise ValueError(msg)
+        return v
+
+    @field_validator("snapshot_retention_limit")
+    @classmethod
+    def _validate_snapshot_retention_limit(cls, v: int) -> int:
+        if v < 1:
+            msg = "SNAPSHOT_RETENTION_LIMIT must be at least 1"
+            raise ValueError(msg)
+        return v
+
+    @field_validator("resume_cooldown_seconds")
+    @classmethod
+    def _validate_resume_cooldown_seconds(cls, v: int) -> int:
+        if v < 0:
+            msg = "RESUME_COOLDOWN_SECONDS must be at least 0"
+            raise ValueError(msg)
+        return v
+
     @field_validator("printer_ip")
     @classmethod
     def _validate_printer_ip(cls, v: str) -> str:
-        v_str = v.strip()
-        if not v_str:
-            raise ValueError("printer_ip cannot be empty")
+        from sentinel.network import validate_printer_ip
 
-        # Check if IP address
-        import ipaddress
+        return validate_printer_ip(v)
 
-        try:
-            ipaddress.ip_address(v_str)
-            return v_str
-        except ValueError:
-            pass
-
-        # Check if domain/hostname
-        import re
-
-        hostname_regex = re.compile(
-            r"^(?:[a-zA-Z0-9]"
-            r"(?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)*"
-            r"[a-zA-Z0-9]"
-            r"(?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$"
-        )
-        if not hostname_regex.match(v_str):
-            raise ValueError(f"printer_ip must be a valid IP address or hostname: {v_str}")
-
-        return v_str
+    @field_validator("auth_cookie_secure")
+    @classmethod
+    def _validate_auth_cookie_secure(cls, v: str) -> str:
+        valid = {"auto", "always", "never"}
+        if v.lower() not in valid:
+            msg = f"AUTH_COOKIE_SECURE must be one of {valid}"
+            raise ValueError(msg)
+        return v.lower()
 
 
 @lru_cache

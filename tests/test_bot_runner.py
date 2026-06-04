@@ -199,3 +199,51 @@ async def test_bot_runner_stop_times_out() -> None:
             await runner.stop()
 
     assert runner._app is None
+
+
+# ---------------------------------------------------------------------------
+# BotRunner Supervisor Tests
+# ---------------------------------------------------------------------------
+
+async def test_bot_runner_supervisor_restart_and_alert() -> None:
+    import asyncio
+    handler = _make_handler()
+    app, builder = _make_ptb_app()
+    dispatcher = MagicMock()
+
+    # Initially, the bot is running
+    app.updater.running = True
+
+    # Use a mock sleep that yields but does not delay
+    original_sleep = asyncio.sleep
+    async def mock_sleep(delay: float) -> None:
+        await original_sleep(0)
+
+    with (
+        patch("telegram.ext.Application") as mock_app_class,
+        patch("telegram.ext.CommandHandler"),
+        patch("telegram.ext.CallbackQueryHandler"),
+        patch("asyncio.sleep", side_effect=mock_sleep),
+    ):
+        mock_app_class.builder.return_value = builder
+        runner = BotRunner(_SETTINGS_TG, handler, dispatcher)
+
+        # Start bot and supervisor
+        await runner.start()
+        await asyncio.sleep(0.01)
+
+        assert runner.is_running() is True
+        assert runner.crash_count == 0
+
+        # Simulate a crash
+        app.updater.running = False
+
+        # Wait a few event loop iterations for the supervisor loop to tick
+        for _ in range(50):
+            await asyncio.sleep(0.001)
+            if runner.crash_count > 0:
+                break
+
+        assert runner.crash_count >= 1
+        await runner.stop()
+

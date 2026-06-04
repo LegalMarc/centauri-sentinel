@@ -73,7 +73,7 @@ class TelegramNotifier:
             return
 
         photo_bytes = jpeg
-        if not photo_bytes and snapshot_id:
+        if not photo_bytes and snapshot_id and self._settings.telegram_send_snapshots:
             p = self._snapshots_dir / f"{snapshot_id}.jpg"
             if p.exists():
                 try:
@@ -97,7 +97,7 @@ class TelegramNotifier:
             f"currently {self._settings.ml_score_threshold})"
         )
 
-        if photo_bytes:
+        if photo_bytes and self._settings.telegram_send_snapshots:
 
             async def _attempt_photo() -> None:
                 await self._bot.send_photo(
@@ -112,12 +112,14 @@ class TelegramNotifier:
 
             await self._send_with_retry_fn(_attempt_photo)
         else:
-            caption_with_error = caption + "\n(Snapshot not available)"
+            text_to_send = caption
+            if self._settings.telegram_send_snapshots:
+                text_to_send += "\n(Snapshot not available)"
 
             async def _attempt_msg() -> None:
                 await self._bot.send_message(
                     chat_id=self._chat_id,
-                    text=caption_with_error,
+                    text=text_to_send,
                     reply_markup=keyboard,
                     read_timeout=_TIMEOUT,
                     write_timeout=_TIMEOUT,
@@ -198,7 +200,7 @@ class TelegramNotifier:
         caption = f"🚀 Print started: {name}"
 
         async def _send() -> None:
-            if jpeg:
+            if jpeg and self._settings.telegram_send_snapshots:
                 try:
                     await self._bot.send_photo(
                         chat_id=self._chat_id,
@@ -241,7 +243,7 @@ class TelegramNotifier:
         caption = f"✅ Print completed: {name}\nTime: {time_str}"
 
         async def _send() -> None:
-            if jpeg:
+            if jpeg and self._settings.telegram_send_snapshots:
                 try:
                     await self._bot.send_photo(
                         chat_id=self._chat_id,
@@ -278,7 +280,7 @@ class TelegramNotifier:
         caption = "⏸️ Printer paused externally (possible filament runout or manual pause)."
 
         async def _send() -> None:
-            if jpeg:
+            if jpeg and self._settings.telegram_send_snapshots:
                 try:
                     await self._bot.send_photo(
                         chat_id=self._chat_id,

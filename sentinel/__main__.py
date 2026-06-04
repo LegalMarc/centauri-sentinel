@@ -58,17 +58,52 @@ async def _run(args: argparse.Namespace) -> None:
     from sentinel.config import get_settings
     from sentinel.db.repo import Database
     from sentinel.ml.client import MlClient
+    from sentinel.notify.dispatcher import NotificationDispatcher, Notifier
     from sentinel.notify.ntfy import NtfyNotifier
     from sentinel.notify.telegram import TelegramNotifier
     from sentinel.printer.client import PrinterClient
     from sentinel.safety import check_external_bind
-    from sentinel.notify.dispatcher import NotificationDispatcher, Notifier
     from sentinel.watcher.loop import WatcherLoop
     from sentinel.web.app import create_app
 
+    if args.host:
+        os.environ["BIND_HOST"] = args.host
+    if args.port:
+        os.environ["BIND_PORT"] = str(args.port)
+
+    import logging.config
+
+    get_settings.cache_clear()
     settings = get_settings()
-    host = args.host or settings.bind_host
-    port = args.port or settings.bind_port
+    
+    # Configure python-json-logger
+    logging.config.dictConfig({
+        "version": 1,
+        "disable_existing_loggers": False,
+        "formatters": {
+            "json": {
+                "()": "pythonjsonlogger.jsonlogger.JsonFormatter",
+                "fmt": "%(asctime)s %(levelname)s %(name)s %(message)s",
+            },
+        },
+        "handlers": {
+            "console": {
+                "class": "logging.StreamHandler",
+                "formatter": "json",
+            },
+        },
+        "root": {
+            "handlers": ["console"],
+            "level": settings.log_level,
+        },
+    })
+    
+    if args.host:
+        settings.bind_host = args.host
+    if args.port:
+        settings.bind_port = args.port
+    host = settings.bind_host
+    port = settings.bind_port
 
     check_external_bind(settings)
 
@@ -91,7 +126,13 @@ async def _run(args: argparse.Namespace) -> None:
 
     db_printer_ip = await db.get_setting("printer_ip")
     if db_printer_ip:
-        settings.printer_ip = db_printer_ip
+        from sentinel.network import validate_printer_ip
+        try:
+            settings.printer_ip = validate_printer_ip(db_printer_ip)
+        except ValueError as exc:
+            logger.error("Stored printer_ip failed SSRF validation: %s", exc)
+            # fallback to the config default
+            pass
 
     camera = MjpegGrabber(settings)
     printer = PrinterClient(settings)
@@ -122,12 +163,9 @@ async def _run(args: argparse.Namespace) -> None:
     bot: BotRunner | None = None
     if telegram is not None:
         handler = BotCommandHandler(settings, printer, camera, db, watcher, telegram)
-        bot = BotRunner(settings, handler)
-        try:
-            await bot.start()
-        except Exception:
-            logger.exception("Telegram bot failed to start — bot commands disabled")
-            bot = None
+        bot = BotRunner(settings, handler, dispatcher)
+        app.state.bot = bot
+        await bot.start()
 
     watcher_task: asyncio.Task[None] = asyncio.create_task(watcher.run_forever(), name="watcher")
 
@@ -138,9 +176,25 @@ async def _run(args: argparse.Namespace) -> None:
         await asyncio.gather(watcher_task, return_exceptions=True)
         if bot is not None:
             await bot.stop()
-        # Clean up the persistent MQTT status listener
+        # Clean up client resources concurrently to avoid slow shutdown
+        cleanup_tasks = []
         if hasattr(printer, "close"):
-            await printer.close()
+            cleanup_tasks.append(printer.close())
+        if hasattr(ml, "close"):
+            cleanup_tasks.append(ml.close())
+        if hasattr(camera, "close"):
+            cleanup_tasks.append(camera.close())
+        for notifier in notifiers:
+            if hasattr(notifier, "close"):
+                cleanup_tasks.append(notifier.close())
+        
+        if cleanup_tasks:
+            results = await asyncio.gather(*cleanup_tasks, return_exceptions=True)
+            for res in results:
+                if isinstance(res, Exception):
+                    logger.exception("Failed to close a resource cleanly: %s", res)
+        
+        await db.checkpoint()
         await db.close()
 
 

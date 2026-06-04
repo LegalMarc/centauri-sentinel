@@ -1,0 +1,44 @@
+<USER_REQUEST>
+Create individual markdown stub files in /Users/mhm/Documents/Dev/centauri-sentinel/docs/backlog/ for all audit findings and existing backlog items. Create the following files:
+
+IMPORTANT: The existing docs/backlog/tickets.md and docs/backlog/beta_audit_fixes.md should NOT be modified or deleted.
+
+## New Audit Findings (19 files)
+
+1. **SEC-01-login-rate-limit-proxy.md** — ID: SEC-01, Severity: High, Category: Security. Login rate limiter uses scope['client'] IP which may be the reverse proxy IP. X-Forwarded-For is parsed for __internal_snapshot but NOT for login rate limiting. Affected: sentinel/web/auth.py lines 135-149. Acceptance: rate limiter uses resolved client IP from X-Forwarded-For when present.
+
+2. **SEC-03-ml-token-permissions.md** — ID: SEC-03, Severity: Medium, Category: Security. ML API token file written with default permissions (644) in Docker volume. Affected: docker/token-init/. Acceptance: token file created with mode 600.
+
+3. **SEC-04-auth-password-env-clear.md** — ID: SEC-04, Severity: Medium, Category: Security. AUTH_PASSWORD remains in os.environ after bcrypt hashing at startup. config.py clears self.auth_password but not os.environ. Affected: sentinel/config.py. Acceptance: os.environ.pop('AUTH_PASSWORD', None) after hashing.
+
+4. **SEC-05-content-security-policy.md** — ID: SEC-05, Severity: Medium, Category: Security. No Content-Security-Policy header on dashboard. Affected: sentinel/web/app.py, templates. Acceptance: CSP header set with nonce-based script directives.
+
+5. **SEC-07-telegram-bot-rate-limit.md** — ID: SEC-07, Severity: Low, Category: Security. No per-user rate limiting on Telegram bot commands. Affected: sentinel/bot/commands.py. Acceptance: max 5 commands/minute per user.
+
+6. **BUG-02-resume-re-detection-cooldown.md** — ID: BUG-02, Severity: Medium, Category: Bugs. After resume, watcher may re-detect on stale frames. Partially mitigated by 5s grace window and confirm count reset. Affected: sentinel/watcher/loop.py. Acceptance: configurable cooldown
+<truncated 7708 bytes>
+, Category: Security. Lack of request size limit on JSON endpoints. Affected: sentinel/web/routes.py.
+
+41. **3.6-auth-timing-oracle.md** — ID: 3.6, Severity: Low, Category: Security. User enumeration via Basic Authentication timing oracle. Affected: sentinel/web/auth.py.
+
+42. **4.1-ml-failure-resets-counter.md** — ID: 4.1, Severity: Medium, Category: Maintainability. ML API network failures silently reset consecutive detection counter. Affected: sentinel/watcher/loop.py.
+
+43. **4.2-offline-masks-detection-halt.md** — ID: 4.2, Severity: Medium, Category: Maintainability. Printer offline state masks complete detection halts. Affected: sentinel/watcher/loop.py.
+
+44. **4.3-pause-failure-resets-progress.md** — ID: 4.3, Severity: Medium, Category: Maintainability. Failed pause attempt during detection resets confirmation progress. Affected: sentinel/watcher/loop.py.
+
+45. **4.4-stop-timeout-reset.md** — ID: 4.4, Severity: Medium, Category: Maintainability. Stop command timeout resets auto-stop timer. Affected: sentinel/watcher/loop.py.
+
+46. **4.5-unbounded-stream-proxy.md** — ID: 4.5, Severity: Medium, Category: Performance. Unbounded MJPEG stream proxying for web dashboard. Affected: sentinel/camera/mjpeg.py.
+
+47. **4.6-internal-snapshot-auth.md** — ID: 4.6, Severity: Medium, Category: Security. External bind allows unauthenticated access to internal snapshot endpoint. Affected: sentinel/web/auth.py.
+
+48. **4.7-stale-cached-status.md** — ID: 4.7, Severity: Low, Category: Maintainability. Web UI and Telegram cached status displays stale printer progress. Affected: sentinel/web/routes.py, sentinel/bot/commands.py.
+
+Create all files with the template format. Each file should have the standard frontmatter (Title, ID, Severity, Category, Status: Open), Affected Files, Description, Evidence, Impact, and Acceptance Criteria sections.
+
+When done, send me a message confirming all files were created.
+</USER_REQUEST>
+<ADDITIONAL_METADATA>
+The current local time is: 2026-06-02T09:32:15-04:00.
+</ADDITIONAL_METADATA>

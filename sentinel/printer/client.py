@@ -60,6 +60,15 @@ def _parse_status(payload: dict[str, Any]) -> PrinterStatus:
         data: dict[str, Any] = payload.get("data", payload)
         attrs: dict[str, Any] = data.get("Attributes", {})
         if attrs:
+            missing_keys = []
+            for k in ["CurrentStatus", "PrintTime", "CurrentLayer", "TotalLayer"]:
+                if k not in attrs:
+                    missing_keys.append(k)
+            if missing_keys:
+                logger.warning(
+                    "Missing key fields in legacy MQTT payload attributes: %s", missing_keys
+                )
+
             printing = int(attrs.get("CurrentStatus", 0)) == 1
             elapsed = float(attrs.get("PrintTime", 0))
             current_layer = int(attrs.get("CurrentLayer", 0))
@@ -77,12 +86,58 @@ def _parse_status(payload: dict[str, Any]) -> PrinterStatus:
             )
 
         # 2. Modern Elegoo Carbon 2 format
+        if "result" not in payload:
+            logger.warning("MQTT payload missing 'result' block for modern format")
+
         result: dict[str, Any] = payload.get("result", {})
+
+        # Check for key blocks in result
+        missing_blocks = []
+        for block in [
+            "print_status",
+            "machine_status",
+            "extruder",
+            "heater_bed",
+            "external_device",
+        ]:
+            if block not in result:
+                missing_blocks.append(block)
+        if missing_blocks:
+            logger.warning(
+                "Missing key status blocks in modern MQTT payload result: %s", missing_blocks
+            )
+
         print_status = result.get("print_status", {})
         machine_status = result.get("machine_status", {})
         extruder = result.get("extruder", {})
         heater_bed = result.get("heater_bed", {})
         external_device = result.get("external_device", {})
+
+        # Check key fields in blocks
+        missing_fields = []
+        if "state" not in print_status:
+            missing_fields.append("print_status.state")
+        if "print_duration" not in print_status:
+            missing_fields.append("print_status.print_duration")
+        if "current_layer" not in print_status:
+            missing_fields.append("print_status.current_layer")
+        if "remaining_time_sec" not in print_status:
+            missing_fields.append("print_status.remaining_time_sec")
+        if "progress" not in machine_status:
+            missing_fields.append("machine_status.progress")
+        if "temperature" not in extruder:
+            missing_fields.append("extruder.temperature")
+        if "target" not in extruder:
+            missing_fields.append("extruder.target")
+        if "temperature" not in heater_bed:
+            missing_fields.append("heater_bed.temperature")
+        if "target" not in heater_bed:
+            missing_fields.append("heater_bed.target")
+        if "camera" not in external_device:
+            missing_fields.append("external_device.camera")
+
+        if missing_fields:
+            logger.warning("Missing key fields in modern MQTT payload: %s", missing_fields)
 
         print_state = print_status.get("state", "idle")
         printing = print_state in ("printing", "paused") or print_status.get("enable") is True
@@ -99,10 +154,14 @@ def _parse_status(payload: dict[str, Any]) -> PrinterStatus:
                     total_layers = int(file_info.get("layer", 0))
                     break
 
-        extruder_temp = float(extruder.get("temperature", 0.0))
-        extruder_target = float(extruder.get("target", 0.0))
-        bed_temp = float(heater_bed.get("temperature", 0.0))
-        bed_target = float(heater_bed.get("target", 0.0))
+        extruder_temp = (
+            float(extruder["temperature"]) if extruder.get("temperature") is not None else None
+        )
+        extruder_target = float(extruder["target"]) if extruder.get("target") is not None else None
+        bed_temp = (
+            float(heater_bed["temperature"]) if heater_bed.get("temperature") is not None else None
+        )
+        bed_target = float(heater_bed["target"]) if heater_bed.get("target") is not None else None
         progress = float(machine_status.get("progress", 0.0))
         remaining_seconds = float(print_status.get("remaining_time_sec", 0.0))
         camera_connected = bool(external_device.get("camera", False))
@@ -144,6 +203,20 @@ class PrinterClient:
         self._listener_task: asyncio.Task[None] | None = None
         self._state_lock = asyncio.Lock()
         self._last_update_time: float = 0.0
+        self.malformed_messages_count: int = 0
+        self._stop_pending: bool = False
+
+    @property
+    def is_connected(self) -> bool:
+        """Return True if the background listener is running and status updates are fresh."""
+        if self._listener_task is None or self._listener_task.done():
+            return False
+        return (time.monotonic() - self._last_update_time) <= 15.0
+
+    @property
+    def stop_pending(self) -> bool:
+        """Return True if a stop command was sent but has not yet taken effect."""
+        return self._stop_pending
 
     # ------------------------------------------------------------------
     # Public API
@@ -155,7 +228,10 @@ class PrinterClient:
         Raises PrinterTimeoutError after _TIMEOUT_S seconds.
         Retries up to _RETRY_ATTEMPTS times with exponential backoff.
         """
-        return await self._with_retry(self._fetch_status)
+        s = await self._with_retry(self._fetch_status)
+        if s and not s.printing:
+            self._stop_pending = False
+        return s
 
     async def is_printing(self) -> bool:
         return (await self.status()).printing
@@ -193,7 +269,13 @@ class PrinterClient:
         CRITICAL: This terminates the active print permanently. Only call
         when the user has given explicit approval. See project safety rules.
         """
-        await self._with_retry(lambda: self._send_command({"method": 1003}))
+        self._stop_pending = True
+        try:
+            await self._with_retry(lambda: self._send_command({"method": 1003}))
+            self._stop_pending = False
+        except Exception:
+            logger.exception("Stop command failed, flag remains pending")
+            raise
 
     async def close(self) -> None:
         """Clean up the persistent background listener and reset state."""
@@ -218,6 +300,9 @@ class PrinterClient:
                 if exc:
                     self._listener_task = None
                     raise exc
+            # Clear state on listener restart to prevent infinite timeout loops from stale data
+            self._accumulated_data = {}
+            self._last_update_time = time.monotonic()
             self._listener_task = asyncio.create_task(self._listen_loop())
 
         if not self._accumulated_data:
@@ -243,8 +328,8 @@ class PrinterClient:
     async def _listen_loop(self) -> None:
         """Background loop that maintains a persistent connection to MQTT."""
         delay = 0.5
-        has_received = False
         while True:
+            has_received = False
             try:
                 client_id = f"{self._client_id}-status-{uuid.uuid4().hex[:8]}"
                 async with aiomqtt.Client(
@@ -254,17 +339,38 @@ class PrinterClient:
                     password=self._access_code,
                     identifier=client_id,
                     timeout=_TIMEOUT_S,
+                    keepalive=60,
                 ) as client:
                     await client.subscribe("elegoo/+/api_status")
                     delay = 0.5  # reset backoff on successful connect
 
                     stream_empty = True
-                    async for message in client.messages:
+                    messages_iter = aiter(client.messages)
+                    while True:
+                        try:
+                            async with asyncio.timeout(15.0):
+                                message = await anext(messages_iter)
+                        except StopAsyncIteration:
+                            break
+                        except TimeoutError as exc:
+                            raise PrinterTimeoutError(
+                                "MQTT read timeout (no status push for 15s)"
+                            ) from exc
                         stream_empty = False
                         try:
                             payload: dict[str, Any] = json.loads(message.payload)
                         except json.JSONDecodeError as exc:
-                            raise PrinterProtocolError(f"Bad JSON: {exc}") from exc
+                            logger.warning("Skipping malformed MQTT message: %s", exc)
+                            self.malformed_messages_count += 1
+                            continue
+
+                        if not isinstance(payload, dict) or "method" not in payload:
+                            logger.warning(
+                                "MQTT message protocol mismatch: "
+                                "payload lacks expected structure or method key"
+                            )
+                            self.malformed_messages_count += 1
+                            continue
 
                         if payload.get("method") == METHOD_STATUS_PUSH:
                             has_received = True
@@ -301,8 +407,14 @@ class PrinterClient:
                 raise
             except (PrinterProtocolError, PrinterTimeoutError):
                 raise
-            except Exception as exc:
+            except (aiomqtt.MqttError, OSError, TimeoutError, ConnectionError) as exc:
+                code = getattr(exc, "code", None)
+                if isinstance(exc, aiomqtt.MqttCodeError) and code in (4, 5):
+                    logger.critical("MQTT permanent authentication failure: %s", exc)
+                    raise
                 logger.warning("Printer MQTT status connection failed: %s. Reconnecting...", exc)
+                async with self._state_lock:
+                    self._accumulated_data.clear()
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, 30.0)
 
@@ -317,6 +429,7 @@ class PrinterClient:
                     username="elegoo",
                     password=self._access_code,
                     identifier=client_id,
+                    keepalive=60,
                 ) as client:
                     serial = self._serial_number or self._host
                     topic = f"elegoo/{serial}/{self._client_id}/api_request"

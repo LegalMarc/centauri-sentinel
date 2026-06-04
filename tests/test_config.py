@@ -9,7 +9,7 @@ from sentinel.config import Settings
 
 def test_printer_ip_default() -> None:
     s = Settings()
-    assert s.printer_ip == "127.0.0.1"
+    assert s.printer_ip == "192.168.1.10"
 
 
 def test_printer_ip_custom() -> None:
@@ -111,6 +111,14 @@ def test_auth_plain_password_is_hashed() -> None:
     assert bcrypt.checkpw(b"secret", s.auth_password_bcrypt.encode())
 
 
+def test_auth_password_cleared_from_environ(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTH_PASSWORD", "should-be-cleared")
+    import os
+
+    Settings(auth_username="admin", auth_password="should-be-cleared")
+    assert os.environ.get("AUTH_PASSWORD") is None
+
+
 def test_auth_plain_password_does_not_override_existing_bcrypt() -> None:
     import bcrypt
 
@@ -130,6 +138,7 @@ def test_external_bind_allowed_default() -> None:
 def test_ml_defaults() -> None:
     s = Settings()
     assert s.ml_api_url == "http://obico-ml:3333"
+    assert s.ml_api_token_file == "/shared/token"
     assert s.ml_confirm_count == 3
     assert s.ml_score_threshold == 0.4
 
@@ -174,14 +183,116 @@ def test_printer_ip_validation_valid_ip() -> None:
     assert s.printer_ip == "192.168.1.10"
 
 
-def test_printer_ip_validation_valid_hostname() -> None:
+def test_printer_ip_validation_valid_hostname(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("sentinel.network.socket.gethostbyname", lambda x: "192.168.1.50")
     s = Settings(printer_ip="printer.local")
-    assert s.printer_ip == "printer.local"
+    assert s.printer_ip == "192.168.1.50"
 
-    s2 = Settings(printer_ip="localhost")
-    assert s2.printer_ip == "localhost"
+
+def test_printer_ip_validation_ssrf_disallowed() -> None:
+    with pytest.raises(ValueError, match="SSRF Protection"):
+        Settings(printer_ip="127.0.0.1")
+    with pytest.raises(ValueError, match="SSRF Protection"):
+        Settings(printer_ip="::1")
+    with pytest.raises(ValueError, match="SSRF Protection"):
+        Settings(printer_ip="localhost")
+    with pytest.raises(ValueError, match="SSRF Protection"):
+        Settings(printer_ip="localhost.localdomain")
+    with pytest.raises(ValueError, match="SSRF Protection"):
+        Settings(printer_ip="8.8.8.8")
+    with pytest.raises(ValueError, match="SSRF Protection"):
+        Settings(printer_ip="169.254.169.254")
+    with pytest.raises(ValueError, match="SSRF Protection"):
+        Settings(printer_ip="0.0.0.0")
+    with pytest.raises(ValueError, match="SSRF Protection"):
+        Settings(printer_ip="::")
+    with pytest.raises(ValueError, match="SSRF Protection"):
+        Settings(printer_ip="::ffff:127.0.0.1")
+    with pytest.raises(ValueError, match="SSRF Protection"):
+        Settings(printer_ip="::ffff:8.8.8.8")
 
 
 def test_printer_ip_validation_invalid() -> None:
     with pytest.raises(ValueError, match="printer_ip must be a valid IP"):
         Settings(printer_ip="invalid_ip_or_hostname_!!")
+
+def test_printer_ip_validation_hostname_resolves_to_loopback(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("sentinel.network.socket.gethostbyname", lambda x: "127.0.0.1")
+    with pytest.raises(ValueError, match="SSRF Protection"):
+        Settings(printer_ip="malicious.com")
+
+def test_printer_ip_validation_hostname_resolution_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    import socket
+    def mock_gethostbyname(x: str) -> str:
+        raise socket.gaierror("not found")
+    monkeypatch.setattr("sentinel.network.socket.gethostbyname", mock_gethostbyname)
+    with pytest.raises(ValueError, match="SSRF Protection: Cannot resolve hostname"):
+        Settings(printer_ip="notfound.local")
+
+
+# ---------------------------------------------------------------------------
+# ML parameter validation tests
+# ---------------------------------------------------------------------------
+
+
+def test_ml_score_threshold_valid_range() -> None:
+    s = Settings(ml_score_threshold=0.0)
+    assert s.ml_score_threshold == 0.0
+
+    s = Settings(ml_score_threshold=1.0)
+    assert s.ml_score_threshold == 1.0
+
+    s = Settings(ml_score_threshold=0.5)
+    assert s.ml_score_threshold == 0.5
+
+
+def test_ml_score_threshold_too_high() -> None:
+    with pytest.raises(ValueError, match="ML_SCORE_THRESHOLD must be between"):
+        Settings(ml_score_threshold=1.1)
+
+
+def test_ml_score_threshold_negative() -> None:
+    with pytest.raises(ValueError, match="ML_SCORE_THRESHOLD must be between"):
+        Settings(ml_score_threshold=-0.1)
+
+
+def test_ml_confirm_count_valid() -> None:
+    s = Settings(ml_confirm_count=1)
+    assert s.ml_confirm_count == 1
+
+    s = Settings(ml_confirm_count=10)
+    assert s.ml_confirm_count == 10
+
+
+def test_ml_confirm_count_zero() -> None:
+    with pytest.raises(ValueError, match="ML_CONFIRM_COUNT must be at least 1"):
+        Settings(ml_confirm_count=0)
+
+
+def test_ml_confirm_count_negative() -> None:
+    with pytest.raises(ValueError, match="ML_CONFIRM_COUNT must be at least 1"):
+        Settings(ml_confirm_count=-1)
+
+
+def test_ml_poll_interval_valid() -> None:
+    s = Settings(ml_poll_interval_seconds=1)
+    assert s.ml_poll_interval_seconds == 1
+
+
+def test_ml_poll_interval_zero() -> None:
+    with pytest.raises(ValueError, match="ML_POLL_INTERVAL_SECONDS must be at least 1"):
+        Settings(ml_poll_interval_seconds=0)
+
+
+def test_resume_cooldown_seconds_valid() -> None:
+    s = Settings(resume_cooldown_seconds=0)
+    assert s.resume_cooldown_seconds == 0
+    s = Settings(resume_cooldown_seconds=10)
+    assert s.resume_cooldown_seconds == 10
+
+
+def test_resume_cooldown_seconds_invalid() -> None:
+    with pytest.raises(ValueError, match="RESUME_COOLDOWN_SECONDS must be at least 0"):
+        Settings(resume_cooldown_seconds=-1)
+
+

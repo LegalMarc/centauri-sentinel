@@ -10,6 +10,8 @@ from typing import TYPE_CHECKING
 import httpx
 import tenacity
 
+from sentinel.network import validate_https
+
 if TYPE_CHECKING:
     from sentinel.config import Settings
 
@@ -25,9 +27,22 @@ class NtfyNotifier:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self._enabled = settings.ntfy_enabled
-        self._url = settings.ntfy_url or ""
+
+        url = settings.ntfy_url or ""
+        if self._enabled and url:
+            url = validate_https(url)
+
+        self._url = url
         self._token = settings.ntfy_token
         self._snapshots_dir = Path(settings.db_path).parent / "snapshots"
+        self._client = httpx.AsyncClient(timeout=_TIMEOUT)
+
+        if self._enabled and "ntfy.sh" in self._url.lower() and not self._token:
+            raise ValueError(
+                "PRIVACY RISK: Using public ntfy.sh without an auth token is blocked. "
+                "Anyone who guesses your topic URL can view your 3D printer snapshots. "
+                "Please configure an auth token or use a self-hosted instance."
+            )
 
     async def send_detection_alert(
         self,
@@ -140,16 +155,27 @@ class NtfyNotifier:
         tags: list[str] | None = None,
         jpeg: bytes | None = None,
     ) -> None:
+        import base64
+
+        def _encode_header(val: str) -> str:
+            if any(ord(c) < 32 or ord(c) > 126 for c in val):
+                encoded = base64.b64encode(val.encode("utf-8")).decode("utf-8")
+                return f"=?utf-8?B?{encoded}?="
+            return val
+
+        def _sanitize(val: str) -> str:
+            return val.replace("\r", " ").replace("\n", " ").strip()
+
         headers: dict[str, str] = {
-            "Title": title,
-            "Priority": priority,
-            "Tags": ",".join(tags or []),
+            "Title": _encode_header(title),
+            "Priority": _sanitize(priority),
+            "Tags": _sanitize(",".join(tags or [])),
         }
         if self._token:
             headers["Authorization"] = f"Bearer {self._token}"
 
         if jpeg:
-            headers["X-Message"] = message
+            headers["X-Message"] = _encode_header(message)
             headers["X-Filename"] = "snapshot.jpg"
             content: bytes | str = jpeg
         else:
@@ -163,6 +189,9 @@ class NtfyNotifier:
         )
         async for attempt in retryer:
             with attempt:
-                async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-                    resp = await client.post(self._url, content=content, headers=headers)
-                    resp.raise_for_status()
+                resp = await self._client.post(self._url, content=content, headers=headers)
+                resp.raise_for_status()
+
+    async def close(self) -> None:
+        """Close the underlying HTTP client."""
+        await self._client.aclose()

@@ -7,12 +7,14 @@ never replies to unknown senders.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 from typing import TYPE_CHECKING, Any
 
 from telegram import KeyboardButton, ReplyKeyboardMarkup
+
+if TYPE_CHECKING:
+    import asyncio
 
 _background_tasks: set[asyncio.Task[None]] = set()
 
@@ -59,6 +61,8 @@ class BotCommandHandler:
         self._snooze_seconds = snooze_seconds
         # Maps user_id → timestamp of /stop command; cleared after confirm or expiry
         self._pending_stops: dict[int, float] = {}
+        # Maps user_id → command timestamps for rate limiting
+        self._rate_limit_history: dict[int, list[float]] = {}
 
     # ------------------------------------------------------------------
     # Auth guard
@@ -97,12 +101,47 @@ class BotCommandHandler:
             )
         return authorized
 
+    async def _check_rate_limit(self, update: Update) -> bool:
+        user = None
+        if update.message is not None:
+            user = update.message.from_user
+        elif update.callback_query is not None:
+            user = update.callback_query.from_user
+
+        if user is None:
+            return True
+
+        now = time.monotonic()
+        history = self._rate_limit_history.get(user.id, [])
+        # Keep only timestamps from the last 60 seconds
+        history = [ts for ts in history if now - ts < 60.0]
+        self._rate_limit_history[user.id] = history
+
+        if len(history) >= 5:
+            logger.warning("Telegram user %d is rate limited", user.id)
+            if update.message is not None:
+                await update.message.reply_text(
+                    "⚠️ Slow down! Maximum 5 commands per minute allowed.",
+                    reply_markup=_TUI_KEYBOARD,
+                )
+            elif update.callback_query is not None:
+                await update.callback_query.answer(
+                    "⚠️ Slow down! Maximum 5 commands per minute allowed.",
+                    show_alert=True,
+                )
+            return False
+
+        self._rate_limit_history[user.id].append(now)
+        return True
+
     # ------------------------------------------------------------------
     # Commands
     # ------------------------------------------------------------------
 
     async def cmd_help(self, update: Update, context: Any) -> None:
         if not self._authorized(update):
+            return
+        if not await self._check_rate_limit(update):
             return
         assert update.message is not None
         await update.message.reply_text(
@@ -121,13 +160,15 @@ class BotCommandHandler:
     async def cmd_status(self, update: Update, context: Any) -> None:
         if not self._authorized(update):
             return
+        if not await self._check_rate_limit(update):
+            return
         assert update.message is not None
         detection_enabled = await self._db.get_setting("detection_enabled", "true")
         recent = await self._db.get_recent_detections(limit=1)
         last_det = recent[0] if recent else None
 
         # Expose printer state and elapsed print time
-        p_status = self._watcher.last_printer_status
+        p_status = await self._watcher.get_fresh_status()
         printer_state = "Offline"
         print_elapsed = "—"
         extruder_temp = None
@@ -142,7 +183,7 @@ class BotCommandHandler:
 
         if p_status:
             print_state = p_status.print_state or ("printing" if p_status.printing else "idle")
-            printer_state = print_state.capitalize()
+            print_state = "offline (stale data)" if p_status.stale else print_state.capitalize()
             is_active = p_status.printing or print_state == "paused"
             print_elapsed = f"{p_status.elapsed_seconds:.0f}s" if is_active else "—"
             extruder_temp = p_status.extruder_temp
@@ -202,6 +243,8 @@ class BotCommandHandler:
     async def cmd_snapshot(self, update: Update, context: Any) -> None:
         if not self._authorized(update):
             return
+        if not await self._check_rate_limit(update):
+            return
         assert update.message is not None
         try:
             jpeg = await self._camera.grab()
@@ -212,6 +255,8 @@ class BotCommandHandler:
 
     async def cmd_pause(self, update: Update, context: Any) -> None:
         if not self._authorized(update):
+            return
+        if not await self._check_rate_limit(update):
             return
         assert update.message is not None
         try:
@@ -225,6 +270,7 @@ class BotCommandHandler:
             return
         if sent:
             await self._db.record_pause(source="telegram", result="ok")
+            await self._watcher.get_fresh_status(force=True)
             await update.message.reply_text("Print paused.", reply_markup=_TUI_KEYBOARD)
         else:
             await self._db.record_pause(
@@ -237,6 +283,8 @@ class BotCommandHandler:
     async def cmd_resume(self, update: Update, context: Any) -> None:
         if not self._authorized(update):
             return
+        if not await self._check_rate_limit(update):
+            return
         assert update.message is not None
         try:
             await self._printer.resume()
@@ -244,6 +292,7 @@ class BotCommandHandler:
 
             if self._watcher.state == WatcherState.PAUSED:
                 self._watcher.state = WatcherState.ARMED
+            await self._watcher.get_fresh_status(force=True)
             await update.message.reply_text("Print resumed.", reply_markup=_TUI_KEYBOARD)
         except Exception:
             logger.exception("Resume failed via Telegram command")
@@ -253,6 +302,8 @@ class BotCommandHandler:
 
     async def cmd_stop(self, update: Update, context: Any) -> None:
         if not self._authorized(update):
+            return
+        if not await self._check_rate_limit(update):
             return
         assert update.message is not None
         user = update.message.from_user
@@ -264,6 +315,8 @@ class BotCommandHandler:
 
     async def cmd_confirm(self, update: Update, context: Any) -> None:
         if not self._authorized(update):
+            return
+        if not await self._check_rate_limit(update):
             return
         assert update.message is not None
         user = update.message.from_user
@@ -281,6 +334,7 @@ class BotCommandHandler:
         self._pending_stops.pop(user.id)
         try:
             await self._printer.stop()
+            await self._watcher.get_fresh_status(force=True)
             await update.message.reply_text("Print cancelled.", reply_markup=_TUI_KEYBOARD)
         except Exception:
             logger.exception("Stop failed via Telegram /confirm")
@@ -291,20 +345,39 @@ class BotCommandHandler:
     async def cmd_enable(self, update: Update, context: Any) -> None:
         if not self._authorized(update):
             return
+        if not await self._check_rate_limit(update):
+            return
         assert update.message is not None
+        self._watcher.cancel_snooze()
         await self._db.set_setting("detection_enabled", "true")
         await update.message.reply_text("Failure detection enabled.", reply_markup=_TUI_KEYBOARD)
 
     async def cmd_disable(self, update: Update, context: Any) -> None:
         if not self._authorized(update):
             return
+        if not await self._check_rate_limit(update):
+            return
         assert update.message is not None
+        self._watcher.cancel_snooze()
         await self._db.set_setting("detection_enabled", "false")
         await update.message.reply_text("Failure detection disabled.", reply_markup=_TUI_KEYBOARD)
 
     # ------------------------------------------------------------------
     # Inline keyboard callbacks
     # ------------------------------------------------------------------
+
+    async def _edit_text_or_caption(self, cq: Any, text: str, reply_markup: Any = None) -> None:
+        """Helper to edit text or caption depending on message type."""
+        if cq.message and getattr(cq.message, "photo", None):
+            if reply_markup is not None:
+                await cq.edit_message_caption(caption=text, reply_markup=reply_markup)
+            else:
+                await cq.edit_message_caption(caption=text)
+        else:
+            if reply_markup is not None:
+                await cq.edit_message_text(text, reply_markup=reply_markup)
+            else:
+                await cq.edit_message_text(text)
 
     async def handle_callback(self, update: Update, context: Any) -> None:
         """Dispatch inline keyboard button presses from alert messages."""
@@ -313,6 +386,8 @@ class BotCommandHandler:
             return
         if not self._authorized(update):
             await cq.answer()
+            return
+        if not await self._check_rate_limit(update):
             return
 
         await cq.answer()
@@ -325,10 +400,10 @@ class BotCommandHandler:
 
                 if self._watcher.state == WatcherState.PAUSED:
                     self._watcher.state = WatcherState.ARMED
-                await cq.edit_message_text("Print resumed.")
+                await self._edit_text_or_caption(cq, "Print resumed.")
             except Exception:
                 logger.exception("Resume failed via inline keyboard")
-                await cq.edit_message_text("Resume failed — check the printer.")
+                await self._edit_text_or_caption(cq, "Resume failed — check the printer.")
 
         elif data == "stop":
             user = cq.from_user
@@ -365,19 +440,21 @@ class BotCommandHandler:
             ts = self._pending_stops.get(user.id)
             if ts is None or (time.monotonic() - ts) > _STOP_CONFIRM_WINDOW:
                 self._pending_stops.pop(user.id, None)
-                await cq.edit_message_text("Stop request expired. Use the Stop button again.")
+                await self._edit_text_or_caption(
+                    cq, "Stop request expired. Use the Stop button again."
+                )
                 return
 
             self._pending_stops.pop(user.id)
             try:
                 await self._printer.stop()
-                await cq.edit_message_text("Print cancelled.")
+                await self._edit_text_or_caption(cq, "Print cancelled.")
             except Exception:
                 logger.exception("Stop failed via inline confirm")
-                await cq.edit_message_text("Stop failed — check the printer.")
+                await self._edit_text_or_caption(cq, "Stop failed — check the printer.")
 
         elif data == "snooze":
-            await self._db.set_setting("detection_enabled", "false")
+            await self._watcher.snooze(self._snooze_seconds)
             from telegram import InlineKeyboardButton, InlineKeyboardMarkup
             keyboard = InlineKeyboardMarkup(
                 [
@@ -385,22 +462,14 @@ class BotCommandHandler:
                 ]
             )
             snooze_mins = int(self._snooze_seconds // 60)
-            await cq.edit_message_text(
-                f"Detection snoozed for {snooze_mins} minutes.", reply_markup=keyboard
+            await self._edit_text_or_caption(
+                cq, f"Detection snoozed for {snooze_mins} minutes.", reply_markup=keyboard
             )
-            task = asyncio.create_task(self._re_enable_after(self._snooze_seconds))
-            _background_tasks.add(task)
-            task.add_done_callback(_background_tasks.discard)
 
         elif data == "enable":
+            self._watcher.cancel_snooze()
             await self._db.set_setting("detection_enabled", "true")
-            await cq.edit_message_text("Detection re-enabled.")
-
-    async def _re_enable_after(self, delay: float) -> None:
-        await asyncio.sleep(delay)
-        await self._db.set_setting("detection_enabled", "true")
-        await self._notifier.send_text("Detection re-enabled after snooze.")
-        logger.info("Detection re-enabled after %.0fs snooze", delay)
+            await self._edit_text_or_caption(cq, "Detection re-enabled.")
 
     def cancel_background_tasks(self) -> None:
         """Cancel all pending snooze / background tasks (M9)."""

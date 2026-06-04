@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import Response
@@ -23,6 +23,46 @@ _TEMPLATES_DIR = Path(__file__).parent / "templates"
 logger = logging.getLogger(__name__)
 
 
+class LimitUploadSizeMiddleware:
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        if scope["method"] not in ("POST", "PUT", "PATCH"):
+            await self.app(scope, receive, send)
+            return
+
+        cl = dict(scope.get("headers", [])).get(b"content-length")
+        if cl and int(cl) > 1024 * 1024:
+            response = Response(status_code=413, content="Payload Too Large")
+            await response(scope, receive, send)
+            return
+
+        body_size = 0
+
+        async def bounded_receive() -> dict[str, Any]:
+            nonlocal body_size
+            msg: dict[str, Any] = await receive()
+            if msg["type"] == "http.request":
+                body_size += len(msg.get("body", b""))
+                if body_size > 1024 * 1024:
+                    raise RuntimeError("Payload Too Large")
+            return msg
+
+        try:
+            await self.app(scope, bounded_receive, send)
+        except RuntimeError as exc:
+            if str(exc) == "Payload Too Large":
+                response = Response(status_code=413, content="Payload Too Large")
+                await response(scope, receive, send)
+                return
+            raise
+
+
 def create_app(
     settings: Settings,
     *,
@@ -36,6 +76,19 @@ def create_app(
 
     app = FastAPI(title="centauri-sentinel", version=__version__)
 
+    @app.middleware("http")
+    async def add_csp_header(request: Request, call_next: Any) -> Response:
+        import secrets
+        nonce = secrets.token_urlsafe(16)
+        request.state.csp_nonce = nonce
+        response = cast("Response", await call_next(request))
+        response.headers["Content-Security-Policy"] = (
+            f"default-src 'self'; script-src 'self' 'nonce-{nonce}'; "
+            "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+            "connect-src 'self'; frame-ancestors 'none';"
+        )
+        return response
+
     templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 
     router = make_router(
@@ -46,10 +99,15 @@ def create_app(
         settings,
     )
     app.include_router(router)
+    app.add_middleware(LimitUploadSizeMiddleware)
 
     @app.get("/healthz")
-    async def healthz() -> dict[str, str]:
-        return {"status": "ok"}
+    async def healthz(request: Request) -> dict[str, Any]:
+        res: dict[str, Any] = {"status": "ok"}
+        bot = getattr(request.app.state, "bot", None)
+        if bot is not None:
+            res["telegram_bot_crash_count"] = getattr(bot, "crash_count", 0)
+        return res
 
     @app.get("/__internal_snapshot/{nonce}")
     async def internal_snapshot(nonce: str, request: Request) -> Response:

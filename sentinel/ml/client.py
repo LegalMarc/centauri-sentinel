@@ -17,9 +17,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import httpx
+import tenacity
 
 from sentinel.ml.nonce import NonceStore, get_nonce_store
 from sentinel.ml.types import MlResult
+from sentinel.network import validate_https
 
 if TYPE_CHECKING:
     from sentinel.config import Settings
@@ -27,7 +29,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _TIMEOUT = 10.0
-_FAIL_OPEN = MlResult(score=0.0)
+_FAIL_OPEN = MlResult(score=0.0, error=True)
 
 
 class MlClient:
@@ -38,13 +40,18 @@ class MlClient:
         settings: Settings,
         nonce_store: NonceStore | None = None,
     ) -> None:
-        self._api_url = settings.ml_api_url.rstrip("/")
+        url = settings.ml_api_url.rstrip("/")
+        if url:
+            url = validate_https(url)
+        self._api_url = url
         self._token_file = Path(settings.ml_api_token_file)
         self._bind_host = settings.bind_host
         self._bind_port = settings.bind_port
+        self._ml_callback_host = settings.ml_callback_host
         self._store = nonce_store if nonce_store is not None else get_nonce_store()
         self._token: str | None = None
         self._token_mtime: float = 0.0
+        self._client = httpx.AsyncClient(timeout=_TIMEOUT)
         if not self._token_file.exists():
             logger.warning(
                 "ML API token file not found: %s — "
@@ -72,23 +79,39 @@ class MlClient:
     async def _detect(self, jpeg: bytes) -> MlResult:
         nonce = self._store.put(jpeg)
         try:
-            host = self._bind_host
-            if host == "0.0.0.0":
-                host = "sentinel" if Path("/.dockerenv").exists() else "127.0.0.1"
-            snapshot_url = f"http://{host}:{self._bind_port}/__internal_snapshot/{nonce}"
+            if self._ml_callback_host:
+                cb_host = self._ml_callback_host.strip()
+                if "://" in cb_host:
+                    snapshot_url = f"{cb_host.rstrip('/')}/__internal_snapshot/{nonce}"
+                else:
+                    snapshot_url = f"http://{cb_host}:{self._bind_port}/__internal_snapshot/{nonce}"
+            else:
+                host = self._bind_host
+                if host == "0.0.0.0":
+                    host = "sentinel" if Path("/.dockerenv").exists() else "127.0.0.1"
+                snapshot_url = f"http://{host}:{self._bind_port}/__internal_snapshot/{nonce}"
             token = await asyncio.to_thread(self._load_token)
             headers: dict[str, str] = {}
             if token:
                 headers["Authorization"] = f"Bearer {token}"
 
-            async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-                resp = await client.get(
-                    f"{self._api_url}/p/",
-                    params={"img": snapshot_url},
-                    headers=headers,
-                )
-                resp.raise_for_status()
-                return self._parse(resp.json())
+            async for attempt in tenacity.AsyncRetrying(
+                stop=tenacity.stop_after_attempt(3),
+                wait=tenacity.wait_exponential(multiplier=0.5, min=0.5, max=2.0),
+                retry=tenacity.retry_if_exception_type((httpx.RequestError, httpx.HTTPStatusError, httpx.TimeoutException)),
+                reraise=True,
+            ):
+                with attempt:
+                    resp = await self._client.get(
+                        f"{self._api_url}/p/",
+                        params={"img": snapshot_url},
+                        headers=headers,
+                    )
+                    resp.raise_for_status()
+                    return self._parse(resp.json())
+            
+            # This line should be unreachable due to reraise=True
+            return _FAIL_OPEN
         finally:
             self._store.remove(nonce)
 
@@ -105,17 +128,37 @@ class MlClient:
             return None
         return self._token
 
+    async def close(self) -> None:
+        """Close the underlying HTTP client session."""
+        await self._client.aclose()
+
     @staticmethod
     def _parse(data: Any) -> MlResult:
         """Extract the spaghetti score from the API response."""
         try:
-            # Obico response: {"results": [{"score": 0.73}]} or {"score": 0.73}
+            # Obico response: {"detections": [["label", confidence, [x, y, w, h]], ...]}
             if isinstance(data, dict):
+                if "detections" in data and isinstance(data["detections"], list):
+                    detections = data["detections"]
+                    if not detections:
+                        return MlResult(score=0.0)
+                    max_score = 0.0
+                    for detection in detections:
+                        if isinstance(detection, list) and len(detection) >= 2:
+                            try:
+                                score = float(detection[1])
+                                if score > max_score:
+                                    max_score = score
+                            except (ValueError, TypeError):
+                                continue
+                    return MlResult(score=max_score)
+                # Fallback for older API shape just in case
                 if "results" in data and isinstance(data["results"], list):
                     results = data["results"]
-                    if results:
-                        score = float(results[0].get("score", 0.0))
-                        return MlResult(score=score)
+                    if not results:
+                        return MlResult(score=0.0)
+                    score = float(results[0].get("score", 0.0))
+                    return MlResult(score=score)
                 if "score" in data:
                     return MlResult(score=float(data["score"]))
             return _FAIL_OPEN

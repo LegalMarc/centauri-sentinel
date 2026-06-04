@@ -22,6 +22,8 @@ class Database:
         self._path = db_path
         self._conn: aiosqlite.Connection | None = None
         self._lock = asyncio.Lock()
+        self._settings_cache: dict[str, str | None] = {}
+        self._analytics_cache: dict[str, Any] | None = None
 
     async def connect(self) -> None:
         from sentinel.db.migrate import migrate
@@ -31,14 +33,24 @@ class Database:
         self._conn.row_factory = aiosqlite.Row
         await self._conn.execute("PRAGMA journal_mode=WAL")
         await self._conn.execute("PRAGMA foreign_keys=ON")
+        await self._conn.execute("PRAGMA busy_timeout=30000")
 
     async def close(self) -> None:
         if self._conn:
             await self._conn.close()
             self._conn = None
 
+    async def checkpoint(self) -> None:
+        """Flush SQLite WAL to database file using PRAGMA wal_checkpoint(TRUNCATE)."""
+        if self._conn:
+            try:
+                await self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                logger.info("Database WAL checkpoint completed successfully.")
+            except Exception as exc:
+                logger.warning("Database WAL checkpoint failed: %s", exc)
+
     @asynccontextmanager
-    async def _write(self) -> AsyncGenerator[aiosqlite.Connection, None]:
+    async def _write(self, clear_analytics_cache: bool = False) -> AsyncGenerator[aiosqlite.Connection, None]:
         # Reads do NOT need this lock: aiosqlite serialises via its own
         # connection thread and SQLite WAL provides snapshot isolation.
         async with self._lock:
@@ -46,6 +58,8 @@ class Database:
             try:
                 yield self._conn
                 await self._conn.commit()
+                if clear_analytics_cache:
+                    self._analytics_cache = None
             except Exception:
                 await self._conn.rollback()
                 raise
@@ -93,28 +107,29 @@ class Database:
             rows = await cur.fetchall()
             return [dict(r) for r in rows]
 
-    async def get_snapshots_for_cleanup(self, keep_limit: int = 50) -> list[str]:
+    async def get_snapshots_for_cleanup(self, keep_limit: int = 50, limit: int = -1) -> list[str]:
         """Return snapshot_paths of old detection events that should be deleted."""
         async with self._db.execute(
             "SELECT snapshot_path FROM detection_events WHERE snapshot_path IS NOT NULL"
-            " ORDER BY id DESC"
+            " ORDER BY id DESC LIMIT ? OFFSET ?",
+            (limit, keep_limit),
         ) as cur:
-            rows = list(await cur.fetchall())
-            if len(rows) <= keep_limit:
-                return []
-            return [row["snapshot_path"] for row in rows[keep_limit:]]
+            rows = await cur.fetchall()
+            return [row["snapshot_path"] for row in rows]
 
     async def delete_old_snapshots(self, snapshot_paths: list[str]) -> None:
         """Clear snapshot_path fields for deleted snapshots."""
         if not snapshot_paths:
             return
         async with self._write() as db:
-            placeholders = ",".join("?" for _ in snapshot_paths)
-            query = (
-                "UPDATE detection_events SET snapshot_path = NULL"
-                f" WHERE snapshot_path IN ({placeholders})"
-            )
-            await db.execute(query, snapshot_paths)
+            for i in range(0, len(snapshot_paths), 500):
+                chunk = snapshot_paths[i : i + 500]
+                placeholders = ",".join("?" for _ in chunk)
+                query = (
+                    "UPDATE detection_events SET snapshot_path = NULL"
+                    f" WHERE snapshot_path IN ({placeholders})"
+                )
+                await db.execute(query, chunk)
 
     # ------------------------------------------------------------------
     # Pause history
@@ -143,11 +158,17 @@ class Database:
     # ------------------------------------------------------------------
 
     async def get_setting(self, key: str, default: str | None = None) -> str | None:
+        if key in self._settings_cache:
+            val = self._settings_cache[key]
+            return val if val is not None else default
+
         async with self._db.execute(
             "SELECT value FROM runtime_settings WHERE key = ?", (key,)
         ) as cur:
             row = await cur.fetchone()
-            return str(row["value"]) if row else default
+            val = str(row["value"]) if row else None
+            self._settings_cache[key] = val
+            return val if val is not None else default
 
     async def set_setting(self, key: str, value: str) -> None:
         async with self._write() as db:
@@ -158,6 +179,7 @@ class Database:
                 "   updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
                 (key, value),
             )
+        self._settings_cache[key] = value
 
     # ------------------------------------------------------------------
     # Auth session secret
@@ -220,7 +242,7 @@ class Database:
         status: str,
     ) -> None:
         """Update job entry when print ends."""
-        async with self._write() as db:
+        async with self._write(clear_analytics_cache=True) as db:
             await db.execute(
                 "UPDATE print_jobs SET ended_at = ?, duration_seconds = ?,"
                 " filament_used_g = ?, status = ?"
@@ -230,7 +252,7 @@ class Database:
 
     async def increment_job_pauses(self, job_id: int) -> None:
         """Increment the pauses count for the given print job."""
-        async with self._write() as db:
+        async with self._write(clear_analytics_cache=True) as db:
             await db.execute(
                 "UPDATE print_jobs SET pauses_count = pauses_count + 1 WHERE id = ?",
                 (job_id,),
@@ -249,17 +271,21 @@ class Database:
 
     async def get_analytics_summary(self) -> dict[str, Any]:
         """Calculate and return key statistics for completed/failed prints."""
-        async with self._db.execute(
-            "SELECT COUNT(*) as total_jobs,"
-            " SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed_jobs,"
-            " SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed_jobs,"
-            " SUM(duration_seconds) as total_duration_seconds,"
-            " SUM(filament_used_g) as total_filament_g,"
-            " SUM(pauses_count) as total_pauses"
-            " FROM print_jobs WHERE status IN ('completed', 'failed')"
-        ) as cur:
-            row = await cur.fetchone()
-            res = dict(row) if row else {}
+        async with self._lock:
+            if self._analytics_cache is not None:
+                return self._analytics_cache
+
+            async with self._db.execute(
+                "SELECT COUNT(*) as total_jobs,"
+                " SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed_jobs,"
+                " SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed_jobs,"
+                " SUM(duration_seconds) as total_duration_seconds,"
+                " SUM(filament_used_g) as total_filament_g,"
+                " SUM(pauses_count) as total_pauses"
+                " FROM print_jobs WHERE status IN ('completed', 'failed')"
+            ) as cur:
+                row = await cur.fetchone()
+                res = dict(row) if row else {}
 
             total = res.get("total_jobs") or 0
             completed = res.get("completed_jobs") or 0
@@ -277,10 +303,12 @@ class Database:
                     else 0.0
                 )
 
-            return {
+            summary = {
                 "total_prints": total,
                 "success_rate_percent": success_rate,
                 "total_filament_g": res.get("total_filament_g") or 0.0,
                 "total_pauses": res.get("total_pauses") or 0,
                 "avg_duration_seconds": avg_duration,
             }
+            self._analytics_cache = summary
+            return summary

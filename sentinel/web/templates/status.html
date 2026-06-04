@@ -782,10 +782,31 @@ footer a {
   </div>
 </div>
 
+{% if notification_failures %}
+<div class="banner banner-danger" id="notification-failures-banner" style="background: rgba(239, 68, 68, 0.15); border: 1px solid var(--danger-color); border-radius: 8px; padding: 1rem; margin-bottom: 1.5rem; display: flex; flex-direction: column; gap: 0.5rem; font-family: var(--font-sans);">
+  <div style="font-weight: 700; color: #ef4444; display: flex; align-items: center; gap: 0.5rem; font-size: 1.05rem;">
+    ⚠️ Notification Delivery Failures
+  </div>
+  <div style="color: var(--text-primary); font-size: 0.95rem;">
+    The system failed to deliver notification alerts to the following channels:
+    <ul style="margin: 0.25rem 0 0 1.5rem; padding: 0;">
+      {% for fail in notification_failures %}
+        <li style="margin-bottom: 0.25rem; list-style-type: disc;">
+          <strong>{{ fail.channel }}</strong>: Failed to send alert.
+          {% if fail.snapshot_id %}
+            <a href="/snapshot/{{ fail.snapshot_id }}" target="_blank" style="color: #60a5fa; text-decoration: underline; margin-left: 0.5rem;">View Snapshot</a>
+          {% endif %}
+        </li>
+      {% endfor %}
+    </ul>
+  </div>
+</div>
+{% endif %}
+
 <div class="tabs">
-  <button class="tab-btn active" onclick="switchTab('live')">Live Monitor</button>
-  <button class="tab-btn" onclick="switchTab('history')">History & Analytics</button>
-  <button class="tab-btn" onclick="switchTab('settings')">System & ML Settings</button>
+  <button class="tab-btn active" data-tab="live">Live Monitor</button>
+  <button class="tab-btn" data-tab="history">History & Analytics</button>
+  <button class="tab-btn" data-tab="settings">System & ML Settings</button>
 </div>
 
 <!-- LIVE MONITOR TAB -->
@@ -798,11 +819,11 @@ footer a {
       </span>
     </div>
     <div class="controls-buttons">
-      <button id="btn-pause" class="btn btn-warning" onclick="sendControl('pause')" {% if not is_printing %}disabled{% endif %}>⏸️ Pause</button>
-      <button id="btn-resume" class="btn btn-success" onclick="sendControl('resume')" {% if not is_paused %}disabled{% endif %}>▶️ Resume</button>
-      <button id="btn-stop" class="btn btn-danger" onclick="confirmStop()" {% if not (is_printing or is_paused) %}disabled{% endif %}>⏹️ Stop Print</button>
+      <button id="btn-pause" class="btn btn-warning" {% if not is_printing %}disabled{% endif %}>⏸️ Pause</button>
+      <button id="btn-resume" class="btn btn-success" {% if not is_paused %}disabled{% endif %}>▶️ Resume</button>
+      <button id="btn-stop" class="btn btn-danger" {% if not (is_printing or is_paused) %}disabled{% endif %}>⏹️ Stop Print</button>
       <div style="display: flex; gap: 0.25rem;">
-        <button id="btn-snooze" class="btn btn-secondary" onclick="snoozeDetection()" style="border-top-right-radius: 0; border-bottom-right-radius: 0;">🔕 Snooze</button>
+        <button id="btn-snooze" class="btn btn-secondary" style="border-top-right-radius: 0; border-bottom-right-radius: 0;">🔕 Snooze</button>
         <select id="snooze-duration" class="form-input" style="width: auto; border-top-left-radius: 0; border-bottom-left-radius: 0; border-left: none; padding: 0.5rem 1.5rem 0.5rem 0.5rem; font-family: var(--font-sans); font-weight: 600; cursor: pointer; color: var(--text-primary); background: rgba(255, 255, 255, 0.08); font-size: 0.95rem;">
           <option value="300">5m</option>
           <option value="600" selected>10m</option>
@@ -1073,7 +1094,7 @@ footer a {
     <div class="controls-header">
       <h3>⚙️ System & ML Settings</h3>
     </div>
-    <form id="settings-form" class="settings-form" onsubmit="saveSettings(event)" novalidate>
+    <form id="settings-form" class="settings-form" novalidate>
       <div class="form-group form-group-full">
         <label class="form-label" for="input-printer-ip">Printer IP Address or Hostname</label>
         <input type="text" id="input-printer-ip" name="printer_ip" class="form-input" value="{{ printer_ip }}" required pattern="^[a-zA-Z0-9.-]+$" placeholder="e.g. 192.168.1.100 or printer.local" aria-describedby="printer-ip-error">
@@ -1140,7 +1161,7 @@ footer a {
   <div>Elegoo Centauri Carbon 2 AI Watcher &mdash; Contact <a href="https://www.linkedin.com/in/marcmandel/" target="_blank">Marc Mandel</a></div>
 </footer>
 
-<script>
+<script nonce="{{ request.state.csp_nonce }}">
 const remainingSeconds = {{ remaining_seconds | int }};
 const timeRemainingEl = document.getElementById("time-remaining");
 if (remainingSeconds > 0) {
@@ -1187,7 +1208,7 @@ document.querySelectorAll(".job-duration").forEach(el => {
 function switchTab(tabId) {
   document.querySelectorAll('.tab-btn').forEach(btn => { btn.classList.remove('active'); });
   document.querySelectorAll('.tab-content').forEach(content => { content.classList.remove('active'); });
-  const activeBtn = Array.from(document.querySelectorAll('.tab-btn')).find(btn => btn.getAttribute('onclick').includes(tabId));
+  const activeBtn = Array.from(document.querySelectorAll('.tab-btn')).find(btn => btn.getAttribute('data-tab') === tabId);
   if (activeBtn) activeBtn.classList.add('active');
   const activeContent = document.getElementById(`tab-${tabId}`);
   if (activeContent) activeContent.classList.add('active');
@@ -1537,6 +1558,22 @@ document.querySelectorAll("#settings-form .form-input").forEach(input => {
   };
   input.addEventListener("input", updateValidationClass);
   input.addEventListener("blur", updateValidationClass);
+});
+
+// Wire up event listeners to satisfy strict CSP
+document.addEventListener("DOMContentLoaded", () => {
+  document.querySelectorAll('.tab-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const tabId = btn.getAttribute('data-tab');
+      if (tabId) switchTab(tabId);
+    });
+  });
+
+  document.getElementById("btn-pause")?.addEventListener("click", () => sendControl("pause"));
+  document.getElementById("btn-resume")?.addEventListener("click", () => sendControl("resume"));
+  document.getElementById("btn-stop")?.addEventListener("click", () => confirmStop());
+  document.getElementById("btn-snooze")?.addEventListener("click", () => snoozeDetection());
+  document.getElementById("settings-form")?.addEventListener("submit", (e) => saveSettings(e));
 });
 </script>
 </body>

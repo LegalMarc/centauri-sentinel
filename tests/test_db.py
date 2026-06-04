@@ -381,3 +381,78 @@ async def test_write_exception_rolls_back(db: Database) -> None:
     val = await db.get_setting("test_rollback")
     assert val is None
 
+
+async def test_db_checkpoint(db: Database) -> None:
+    # Verify checkpoint method runs successfully
+    await db.checkpoint()
+
+
+async def test_db_busy_timeout_configured(db: Database) -> None:
+    # Verify busy_timeout is set to 30000 ms
+    async with db._db.execute("PRAGMA busy_timeout") as cur:
+        row = await cur.fetchone()
+        assert row is not None
+        assert row[0] == 30000
+
+
+async def test_db_concurrency_heartbeats(db: Database) -> None:
+    # Concurrent write/read operations simulating high-frequency heartbeats
+    # and concurrent queries. All operations must complete without locking exceptions.
+    import random
+
+    async def run_heartbeats() -> None:
+        for i in range(50):
+            await db.update_heartbeat(f"2026-06-03T12:00:{i:02d}Z", "ARMED")
+            await asyncio.sleep(0.001)
+
+    async def run_writes() -> None:
+        for i in range(30):
+            await db.record_detection(score=random.random(), consecutive=i, confirmed=0)
+            await db.set_setting(f"key_{i}", f"val_{i}")
+            await asyncio.sleep(0.001)
+
+    async def run_reads() -> None:
+        for _ in range(40):
+            await db.get_recent_detections(limit=10)
+            await db.get_setting("key_1")
+            await asyncio.sleep(0.001)
+
+    import asyncio
+    await asyncio.gather(
+        run_heartbeats(),
+        run_writes(),
+        run_reads(),
+    )
+
+
+async def test_explain_query_plan_indices(db: Database) -> None:
+    # Verify that status / confirmed / result filters utilize indices instead of scanning tables.
+
+    # 1. print_jobs (status)
+    async with db._db.execute(
+        "EXPLAIN QUERY PLAN SELECT COUNT(*) FROM print_jobs WHERE status = 'completed'"
+    ) as cur:
+        rows = await cur.fetchall()
+        details = [row["detail"] for row in rows]
+        assert any("idx_print_jobs_status" in detail for detail in details)
+
+    # 2. detection_events (confirmed)
+    async with db._db.execute(
+        "EXPLAIN QUERY PLAN SELECT id FROM detection_events WHERE confirmed = 1"
+    ) as cur:
+        rows = await cur.fetchall()
+        details = [row["detail"] for row in rows]
+        assert any("idx_detection_events_confirmed" in detail for detail in details)
+
+    # 3. pause_history (result)
+    async with db._db.execute(
+        "EXPLAIN QUERY PLAN SELECT id FROM pause_history WHERE result = 'ok'"
+    ) as cur:
+        rows = await cur.fetchall()
+        details = [row["detail"] for row in rows]
+        assert any("idx_pause_history_result" in detail for detail in details)
+
+
+
+
+

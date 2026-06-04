@@ -2,7 +2,9 @@
 
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
+
 from sentinel.notify.dispatcher import NotificationDispatcher
+
 
 async def test_dispatch_all_methods_fire_and_forget():
     notifier1 = MagicMock()
@@ -40,14 +42,13 @@ async def test_dispatch_retry_swallows_exceptions():
     notifier1 = MagicMock()
     # Always fails
     notifier1.send_stall_alert = AsyncMock(side_effect=Exception("network error"))
-    
+
     dispatcher = NotificationDispatcher([notifier1])
-    
+
     # We want to patch tenacity wait so it doesn't take 60s
     import tenacity
-    original_retry = dispatcher._with_retry
-    
-    async def fast_retry(fn):
+
+    async def fast_retry(fn, channel_name, snapshot_id=None):
         retryer = tenacity.AsyncRetrying(
             stop=tenacity.stop_after_attempt(2),
             wait=tenacity.wait_fixed(0.01),
@@ -63,6 +64,28 @@ async def test_dispatch_retry_swallows_exceptions():
 
     dispatcher.dispatch_stall()
     await asyncio.sleep(0.05)
-    
+
     # It should have tried twice and then swallowed the exception
     assert notifier1.send_stall_alert.call_count == 2
+
+
+async def test_concurrent_tasks_limit():
+    notifier = MagicMock()
+    # Slow call that sleeps
+    async def slow_call(*args, **kwargs):
+        await asyncio.sleep(10.0)
+
+    notifier.send_text = AsyncMock(side_effect=slow_call)
+    dispatcher = NotificationDispatcher([notifier])
+
+    # Fire 25 notifications
+    for i in range(25):
+        dispatcher.dispatch_text(f"text {i}")
+
+    # The tasks queue size should be capped at 20
+    assert len(dispatcher._tasks) == 20
+
+    # Clean up by cancelling remaining tasks
+    for task in list(dispatcher._tasks):
+        task.cancel()
+    await asyncio.sleep(0.01)

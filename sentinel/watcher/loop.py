@@ -14,13 +14,15 @@ Pause is logged and sent to notifiers; it is NOT called during IDLE/WARMUP.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import copy
+import dataclasses
 import logging
+import time
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
-
-from sentinel.notify.dispatcher import NotificationDispatcher
 
 from sentinel.camera.errors import CameraOfflineError
 from sentinel.watcher.state import WatcherState
@@ -29,10 +31,10 @@ if TYPE_CHECKING:
     from sentinel.config import Settings
     from sentinel.db.repo import Database
     from sentinel.ml.types import MlResult
+    from sentinel.notify.dispatcher import NotificationDispatcher
     from sentinel.printer.types import PrinterStatus
 
 logger = logging.getLogger(__name__)
-
 
 
 class Camera(Protocol):
@@ -41,6 +43,12 @@ class Camera(Protocol):
 
 class MLClient(Protocol):
     async def detect(self, jpeg: bytes) -> MlResult: ...
+
+
+class Printer(Protocol):
+    async def status(self) -> PrinterStatus: ...
+    async def pause(self) -> bool: ...
+    async def stop(self) -> None: ...
 
 
 class WatcherLoop:
@@ -67,11 +75,18 @@ class WatcherLoop:
         self._print_start: datetime | None = None
         self._running = False
         self.last_printer_status: PrinterStatus | None = None
+        self.last_printed_status: PrinterStatus | None = None
+        self._last_status_fetch_time: float = 0.0
         self._current_job_id: int | None = None
         self._prev_print_state: str | None = None
         self._current_filename: str | None = None
         self._paused_since: datetime | None = None
         self._alerted_new_print: bool = False
+        self._last_heartbeat_time = 0.0
+        self._last_heartbeat_state: WatcherState | None = None
+        self._snooze_task: asyncio.Task[None] | None = None
+        self._tick_lock = asyncio.Lock()
+        self._last_resume_time = 0.0
 
     @property
     def state(self) -> WatcherState:
@@ -79,7 +94,14 @@ class WatcherLoop:
 
     @state.setter
     def state(self, value: WatcherState) -> None:
+        if self._state == WatcherState.PAUSED and value == WatcherState.ARMED:
+            self._last_resume_time = time.monotonic()
+            logger.info("Printer resumed — setting resume cooldown anchor")
         self._state = value
+
+    @property
+    def dispatcher(self) -> NotificationDispatcher:
+        return self._dispatcher
 
     @property
     def printer(self) -> Printer:
@@ -92,13 +114,69 @@ class WatcherLoop:
     async def run_forever(self) -> None:
         """Start the main loop and heartbeat watchdog; runs until cancelled."""
         self._running = True
-        async with asyncio.TaskGroup() as tg:
-            tg.create_task(self._loop())
-            tg.create_task(self._watchdog())
+        try:
+            async with asyncio.TaskGroup() as tg:
+                tg.create_task(self._loop())
+                tg.create_task(self._watchdog())
+                tg.create_task(self._periodic_cleanup())
+        finally:
+            self.cancel_snooze()
 
     async def tick(self) -> None:
         """Run one iteration of the detection loop (useful for tests)."""
         await self._tick()
+
+    async def snooze(self, seconds: float) -> None:
+        """Snooze detection for the given number of seconds."""
+        self.cancel_snooze()
+        await self._db.set_setting("detection_enabled", "false")
+        self._snooze_task = asyncio.create_task(self._re_enable_after(seconds))
+
+    def cancel_snooze(self) -> None:
+        """Cancel any pending snooze task."""
+        if self._snooze_task and not self._snooze_task.done():
+            self._snooze_task.cancel()
+        self._snooze_task = None
+
+    async def get_fresh_status(self, force: bool = False) -> PrinterStatus | None:
+        """Fetch fresh status from the printer, updating cache and timestamp.
+
+        If force is True, bypasses the cache.
+        """
+        now = time.monotonic()
+        if not force and self.last_printer_status and (now - self._last_status_fetch_time < 2.0):
+            return self.last_printer_status
+
+        try:
+            status = await self._printer.status()
+            self.last_printer_status = status
+            self._last_status_fetch_time = now
+        except Exception:
+            logger.warning(
+                "Could not get fresh printer status; using last known status if available"
+            )
+            if self.last_printer_status is not None:
+                self.last_printer_status = dataclasses.replace(self.last_printer_status, stale=True)
+            self._last_status_fetch_time = now
+
+        return self.last_printer_status
+
+    async def _re_enable_after(self, delay: float) -> None:
+        current_task = asyncio.current_task()
+        try:
+            with contextlib.suppress(ValueError):
+                # If delay is negative or invalid, sleep raises ValueError,
+                # we just skip the wait and re-enable immediately.
+                await asyncio.sleep(delay)
+            if self._snooze_task is current_task:
+                await self._db.set_setting("detection_enabled", "true")
+                self._dispatcher.dispatch_text("Detection re-enabled after snooze.")
+                logger.info("Detection re-enabled after %.0fs snooze", delay)
+        except asyncio.CancelledError:
+            pass
+        finally:
+            if self._snooze_task is current_task:
+                self._snooze_task = None
 
     # ------------------------------------------------------------------
     # Internal loop
@@ -126,72 +204,118 @@ class WatcherLoop:
             await asyncio.sleep(poll_interval)
 
     async def _tick(self) -> None:
-        ts = datetime.now(tz=UTC).isoformat()
-        await self._db.update_heartbeat(ts, self.state.name)
-
-        try:
-            printer_status: PrinterStatus = await self._printer.status()
-            self.last_printer_status = printer_status
-        except Exception:
-            logger.warning("Could not get printer status; staying in current state")
+        if self._tick_lock.locked():
+            logger.warning("Watcher loop tick overlapping skipped.")
             return
+        async with self._tick_lock:
+            now_ts = time.monotonic()
+            try:
+                stall_s = int(self._settings.watcher_stall_seconds)
+            except (ValueError, TypeError):
+                stall_s = 60
+            hb_interval = max(10.0, stall_s / 2.0)
 
-        prev_state = self.state
-        await self._update_state(printer_status)
+            if (
+                self.state != self._last_heartbeat_state
+                or now_ts - self._last_heartbeat_time >= hb_interval
+            ):
+                ts = datetime.now(tz=UTC).isoformat()
+                await self._db.update_heartbeat(ts, self.state.name)
+                self._last_heartbeat_time = now_ts
+                self._last_heartbeat_state = self.state
 
-        if self.state == WatcherState.PAUSED:
-            if self._paused_since is None:
-                self._paused_since = datetime.now(tz=UTC)
-            else:
-                pause_duration = (datetime.now(tz=UTC) - self._paused_since).total_seconds()
+            if getattr(self._printer, "stop_pending", False) is True:
+                logger.warning("Retrying pending print stop command")
                 try:
-                    auto_stop_timeout = int(self._settings.auto_stop_timeout_seconds)
-                except (ValueError, TypeError):
-                    auto_stop_timeout = 1800
+                    await self._printer.stop()
+                except Exception:
+                    logger.warning("Pending print stop command retry failed")
 
-                if auto_stop_timeout > 0 and pause_duration > auto_stop_timeout:
-                    logger.warning(
-                        "Auto-stop timeout reached (%.0f s) — stopping printer",
-                        pause_duration,
-                    )
+            printer_status = await self.get_fresh_status(force=True)
+            if printer_status is None:
+                return
+
+            prev_state = self.state
+            await self._update_state(printer_status)
+
+            if self.state == WatcherState.PAUSED:
+                if self._paused_since is None:
+                    self._paused_since = datetime.now(tz=UTC)
+                else:
+                    pause_duration = (datetime.now(tz=UTC) - self._paused_since).total_seconds()
                     try:
-                        await self._printer.stop()
+                        auto_stop_timeout = int(self._settings.auto_stop_timeout_seconds)
+                    except (ValueError, TypeError):
+                        auto_stop_timeout = 1800
+
+                    if auto_stop_timeout > 0 and pause_duration > auto_stop_timeout:
+                        logger.warning(
+                            "Auto-stop timeout reached (%.0f s) — dispatching notification and stopping printer",
+                            pause_duration,
+                        )
                         text = (
-                            f"⚠️ Print automatically stopped after "
-                            f"{auto_stop_timeout // 60} minutes of pause inactivity."
+                            f"⚠️ Printer has been paused for over {auto_stop_timeout // 60} "
+                            "minutes. Initiating automatic stop."
                         )
                         self._dispatcher.dispatch_text(text)
-                    except Exception:
-                        logger.exception("Auto-stop failed")
-                    self._paused_since = None  # reset to prevent spamming
-        else:
-            self._paused_since = None
-
-        if self.state == WatcherState.ARMED:
-            detection_enabled = await self._db.get_setting("detection_enabled", "true")
-            if detection_enabled == "true":
-                await self._check_frame(prev_state)
+                        
+                        try:
+                            # Actually call stop to halt the printer
+                            await self._printer.stop()
+                        except Exception:
+                            logger.exception("Failed to automatically stop the printer after timeout")
+                        
+                        self._paused_since = None  # reset to prevent spamming
             else:
-                # Reset the confirm counter so that re-enabling detection
-                # does not carry stale consecutive hits into the new window.
-                if self._confirm_count > 0:
-                    logger.debug("Detection disabled — resetting confirm counter")
-                    self._confirm_count = 0
+                self._paused_since = None
+
+            if self.state == WatcherState.ARMED:
+                detection_enabled = await self._db.get_setting("detection_enabled", "true")
+                if detection_enabled == "true":
+                    await self._check_frame(prev_state)
+                else:
+                    # Reset the confirm counter so that re-enabling detection
+                    # does not carry stale consecutive hits into the new window.
+                    if self._confirm_count > 0:
+                        logger.debug("Detection disabled — resetting confirm counter")
+                        self._confirm_count = 0
+
+            self.last_printer_status = copy.copy(printer_status)
 
     async def _update_state(self, status: PrinterStatus) -> None:
+        if getattr(status, "stale", False):
+            if self.state not in (WatcherState.STALLED, WatcherState.OFFLINE, WatcherState.IDLE):
+                logger.warning(
+                    "Printer status is stale — transitioning OFFLINE and suspending detection"
+                )
+                self.state = WatcherState.OFFLINE
+            return
         if not status.printing:
             if self.state != WatcherState.IDLE:
                 logger.info("Printer idle — transitioning IDLE")
             self.state = WatcherState.IDLE
             self._confirm_count = 0
-            self._print_start = None
 
             # Record print end if a job was active
             if self._current_job_id is not None:
                 ended_at = datetime.now(tz=UTC).isoformat().replace("+00:00", "Z")
-                duration = int(status.elapsed_seconds)
-                if duration == 0 and self.last_printer_status:
-                    duration = int(self.last_printer_status.elapsed_seconds)
+                elapsed_duration = 0
+                if (
+                    status.filename == self._current_filename
+                    and getattr(status, "elapsed_seconds", 0) > 0
+                ):
+                    elapsed_duration = int(status.elapsed_seconds)
+                elif (
+                    self.last_printed_status
+                    and self.last_printed_status.filename == self._current_filename
+                    and getattr(self.last_printed_status, "elapsed_seconds", 0) > 0
+                ):
+                    elapsed_duration = int(self.last_printed_status.elapsed_seconds)
+                wall_duration = 0
+                if self._print_start is not None:
+                    wall_duration = int((datetime.now(tz=UTC) - self._print_start).total_seconds())
+                duration = max(0, elapsed_duration, wall_duration)
+
                 final_status = "completed" if status.print_state == "completed" else "failed"
                 await self._db.record_print_end(
                     self._current_job_id,
@@ -202,10 +326,13 @@ class WatcherLoop:
                 )
                 if final_status == "completed" and self._settings.notify_on_print_completed:
                     jpeg = await self._safe_grab_jpeg()
-                    self._dispatcher.dispatch_print_completed(self._current_filename, float(duration), jpeg)
+                    self._dispatcher.dispatch_print_completed(
+                        self._current_filename, float(duration), jpeg
+                    )
 
                 self._current_job_id = None
 
+            self._print_start = None
             self._prev_print_state = None
             self._current_filename = None
             self._paused_since = None
@@ -230,20 +357,34 @@ class WatcherLoop:
             and status.filename != self._current_filename
         ):
             ended_at = datetime.now(tz=UTC).isoformat().replace("+00:00", "Z")
-            duration = 0
-            if self.last_printer_status:
-                duration = int(self.last_printer_status.elapsed_seconds)
+            elapsed_duration = 0
+            if (
+                self.last_printed_status
+                and self.last_printed_status.filename == self._current_filename
+                and getattr(self.last_printed_status, "elapsed_seconds", 0) > 0
+            ):
+                elapsed_duration = int(self.last_printed_status.elapsed_seconds)
+            wall_duration = 0
+            if self._print_start is not None:
+                wall_duration = int((datetime.now(tz=UTC) - self._print_start).total_seconds())
+            duration = max(0, elapsed_duration, wall_duration)
+            final_status = "completed" if self._prev_print_state == "completed" else "failed"
             await self._db.record_print_end(
                 self._current_job_id,
                 ended_at,
                 duration,
                 0.0,
-                "completed",
+                final_status,
             )
-            if self._settings.notify_on_print_completed:
+            if final_status == "completed" and getattr(
+                self._settings, "notify_on_print_completed", True
+            ):
                 jpeg = await self._safe_grab_jpeg()
-                self._dispatcher.dispatch_print_completed(self._current_filename, float(duration), jpeg)
+                self._dispatcher.dispatch_print_completed(
+                    self._current_filename, float(duration), jpeg
+                )
             self._current_job_id = None
+            self._print_start = datetime.now(tz=UTC)
 
         # Start job tracking if not already active
         if self._current_job_id is None:
@@ -287,6 +428,8 @@ class WatcherLoop:
                 if getattr(self._settings, "notify_on_print_paused", True):
                     jpeg = await self._safe_grab_jpeg()
                     self._dispatcher.dispatch_external_pause(jpeg)
+            if status.printing and not getattr(status, "stale", False):
+                self.last_printed_status = copy.copy(status)
             return
 
         if elapsed < warmup:
@@ -300,12 +443,28 @@ class WatcherLoop:
                 logger.info("Camera offline — retrying grab on next tick")
                 self.state = WatcherState.ARMED
             elif self.state == WatcherState.PAUSED and status.print_state == "printing":
-                logger.info("Printer resumed externally — transitioning ARMED")
-                self.state = WatcherState.ARMED
+                if (
+                    self._paused_since is not None
+                    and (datetime.now(tz=UTC) - self._paused_since).total_seconds() > 5.0
+                ):
+                    logger.info("Printer resumed externally — transitioning ARMED")
+                    self.state = WatcherState.ARMED
             elif self.state != WatcherState.PAUSED:
                 self.state = WatcherState.ARMED
 
+        if status.printing and not getattr(status, "stale", False):
+            self.last_printed_status = copy.copy(status)
+
     async def _check_frame(self, prev_state: WatcherState) -> None:
+        try:
+            cooldown_s = float(self._settings.resume_cooldown_seconds)
+        except (ValueError, TypeError, AttributeError):
+            cooldown_s = 5.0
+
+        if time.monotonic() - self._last_resume_time < cooldown_s:
+            logger.info("Skipping frame check: within post-resume cooldown window")
+            return
+
         try:
             jpeg = await self._camera.grab()
         except CameraOfflineError:
@@ -321,6 +480,9 @@ class WatcherLoop:
             return
 
         result: MlResult = await self._ml.detect(jpeg)
+        if result.error:
+            logger.warning("ML detection failed; preserving confirm counter and skipping this tick")
+            return
 
         score_threshold_str = await self._db.get_setting(
             "ml_score_threshold",
@@ -401,6 +563,14 @@ class WatcherLoop:
             raise
         except Exception:
             logger.exception("Printer pause failed — notifying anyway")
+            # Do NOT restore _confirm_count. Reset it so we don't instantly loop on the next tick.
+            # We also ensure we don't transition to PAUSED if the command failed,
+            # letting normal armed frame checks continue (which may re-trigger detection).
+            self._confirm_count = 0
+            self._dispatcher.dispatch_text(
+                "⚠️ Printer pause command failed during failure detection! G-code is still running. "
+                "The watcher remains armed and will retry if failure is still detected."
+            )
 
         pause_id = await self._db.record_pause(
             source="auto",
@@ -416,27 +586,105 @@ class WatcherLoop:
 
         self._dispatcher.dispatch_detection(result.score, snapshot_id, jpeg)
 
-        # Cleanup old snapshots (keep last 50)
-        try:
-            old_paths = await self._db.get_snapshots_for_cleanup(keep_limit=50)
-            if old_paths:
-                await self._db.delete_old_snapshots(old_paths)
-
-                def _delete_files() -> None:
-                    for path_str in old_paths:
-                        p = Path(path_str)
-                        if p.exists():
-                            try:
-                                p.unlink()
-                            except OSError:
-                                logger.exception("Failed to delete old snapshot file: %s", p)
-
-                await asyncio.to_thread(_delete_files)
-        except Exception:
-            logger.exception("Failed to clean up old snapshots")
+        # Cleanup old snapshots
+        await self.cleanup_old_snapshots()
 
         # pause_id is available for future audit-log / resume-wiring use.
         del pause_id
+
+    async def cleanup_old_snapshots(self) -> None:
+        """Clean up old snapshot files from disk and database based on retention limit."""
+        try:
+            keep_limit = int(self._settings.snapshot_retention_limit)
+        except (ValueError, TypeError):
+            keep_limit = 50
+
+        try:
+            # Batch cleanup in chunks of 100 to bound memory consumption under large row counts
+            chunk_size = 100
+            while True:
+                old_paths = await self._db.get_snapshots_for_cleanup(
+                    keep_limit=keep_limit, limit=chunk_size
+                )
+                if not old_paths:
+                    break
+
+                def _delete_files(paths: list[str]) -> list[str]:
+                    # We return all paths to clear them from the DB even if disk deletion
+                    # fails. Orphaned files are retried by fallback_directory_cleanup().
+                    for path_str in paths:
+                        p = Path(path_str)
+                        try:
+                            p.unlink(missing_ok=True)
+                        except OSError:
+                            logger.exception("Failed to delete old snapshot file: %s", p)
+                    return paths
+
+                deleted_paths = await asyncio.to_thread(_delete_files, old_paths)
+                if deleted_paths:
+                    await self._db.delete_old_snapshots(deleted_paths)
+
+                if len(old_paths) < chunk_size:
+                    break
+
+            # Fallback directory cleanup for orphaned snapshots on disk
+            await self.fallback_directory_cleanup()
+        except Exception:
+            logger.exception("Failed to clean up old snapshots")
+
+    async def fallback_directory_cleanup(self) -> None:
+        """Scan snapshots directory and delete any files that are not referenced in the database."""
+        snapshots_dir = Path(self._settings.db_path).parent / "snapshots"
+        if not snapshots_dir.exists():
+            return
+
+        try:
+            async with self._db._db.execute(
+                "SELECT snapshot_path FROM detection_events WHERE snapshot_path IS NOT NULL"
+            ) as cur:
+                rows = await cur.fetchall()
+                active_filenames = {
+                    Path(row["snapshot_path"]).name
+                    for row in rows
+                    if row["snapshot_path"]
+                }
+        except Exception:
+            logger.exception("Failed to query active snapshot paths for fallback cleanup")
+            return
+
+        def _cleanup_disk() -> None:
+            for p in snapshots_dir.glob("*.jpg"):
+                if p.name not in active_filenames:
+                    try:
+                        # Exclude fresh snapshots (modified within 60s) to prevent deletion races
+                        try:
+                            mtime = p.stat().st_mtime
+                            if time.time() - mtime < 60.0:
+                                continue
+                        except OSError:
+                            # If stat fails, be safe and skip deletion this round
+                            continue
+
+                        p.unlink()
+                        logger.info("Cleaned up orphaned snapshot file: %s", p)
+                    except OSError as exc:
+                        logger.warning("Failed to delete orphaned snapshot file %s: %s", p, exc)
+
+        await asyncio.to_thread(_cleanup_disk)
+
+    async def _periodic_cleanup(self) -> None:
+        """Periodic background task that runs snapshot cleanup on a configurable interval."""
+        while self._running:
+            await self.cleanup_old_snapshots()
+            try:
+                interval = int(self._settings.snapshot_cleanup_interval_seconds)
+            except (ValueError, TypeError):
+                interval = 3600
+
+            for _ in range(interval):
+                if not self._running:
+                    break
+                await asyncio.sleep(1)
 
     async def _watchdog(self) -> None:
         # Sleep for half the stall window so the maximum alert latency is
@@ -471,10 +719,7 @@ class WatcherLoop:
             text = "⚠️ A new print has started, but failure detection is currently DISABLED."
             self._dispatcher.dispatch_text(text)
         if self.state == WatcherState.CAMERA_OFFLINE:
-            text = (
-                "⚠️ A new print has started, but the camera is offline. "
-                "Detection is suspended."
-            )
+            text = "⚠️ A new print has started, but the camera is offline. Detection is suspended."
             self._dispatcher.dispatch_text(text)
 
     async def _safe_grab_jpeg(self) -> bytes | None:
@@ -482,4 +727,3 @@ class WatcherLoop:
             return await self._camera.grab()
         except Exception:
             return None
-

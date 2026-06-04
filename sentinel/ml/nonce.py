@@ -14,7 +14,7 @@ import threading
 import time
 
 _TTL_S = 60.0  # 2x the default poll interval; long enough for any ML round-trip
-_MAX_SIZE = 50  # hard cap; oldest entry evicted when reached
+_MAX_SIZE = 3  # hard cap; oldest entry evicted when reached
 
 
 class NonceStore:

@@ -28,12 +28,6 @@ logger = logging.getLogger(__name__)
 _web_background_tasks: set[asyncio.Task[None]] = set()
 
 
-async def _re_enable_after(db: Any, delay: float) -> None:
-    await asyncio.sleep(delay)
-    await db.set_setting("detection_enabled", "true")
-    logger.info("Detection re-enabled after %.0fs snooze", delay)
-
-
 def _age_seconds(heartbeat: str | None) -> float | None:
     """Return seconds since the last heartbeat, or None if no heartbeat recorded."""
     if not heartbeat:
@@ -129,7 +123,7 @@ def make_router(
             d["snapshot_id"] = Path(str(path_str)).stem if path_str else None
 
         # Expose printer state and elapsed print time
-        p_status = watcher.last_printer_status
+        p_status = await watcher.get_fresh_status()
         printer_state = "Offline"
         print_elapsed = "—"
         extruder_temp = None
@@ -149,7 +143,11 @@ def make_router(
 
         if p_status:
             print_state = p_status.print_state or ("printing" if p_status.printing else "idle")
-            printer_state = print_state.capitalize()
+            if p_status.stale:
+                print_state = "offline (stale data)"
+                printer_state = "Offline (Unreachable)"
+            else:
+                printer_state = print_state.capitalize()
             is_printing = print_state == "printing"
             is_paused = print_state == "paused"
             is_active = p_status.printing or is_paused or print_state == "completed"
@@ -166,6 +164,14 @@ def make_router(
             total_layers = p_status.total_layers
             thumbnail_base64 = p_status.thumbnail_base64
 
+        notification_failures = None
+        if watcher is not None and watcher.dispatcher is not None:
+            failures = watcher.dispatcher.failed_channels
+            if failures:
+                notification_failures = [
+                    {"channel": ch, "snapshot_id": snap} for ch, snap in failures.items()
+                ]
+
         return templates.TemplateResponse(
             request,
             "status.html",
@@ -173,6 +179,7 @@ def make_router(
                 "watcher_state": watcher.state.name,
                 "tick_age": f"{age:.0f}s ago" if age is not None else "never",
                 "tick_age_stale": age is not None and age > stall_seconds,
+                "notification_failures": notification_failures,
                 "detections": detections,
                 "pauses": pauses,
                 "recent_jobs": recent_jobs,
@@ -218,7 +225,7 @@ def make_router(
             "tick_age_stale": age is not None and age > stall_seconds,
         }
 
-        p_status = watcher.last_printer_status
+        p_status = await watcher.get_fresh_status()
         if p_status:
             data.update(
                 {
@@ -233,7 +240,9 @@ def make_router(
                     "bed_target": p_status.bed_target,
                     "progress": p_status.progress,
                     "remaining_seconds": p_status.remaining_seconds,
-                    "print_state": p_status.print_state,
+                    "print_state": (
+                        "offline (stale data)" if p_status.stale else p_status.print_state
+                    ),
                     "camera_connected": p_status.camera_connected,
                     "thumbnail_base64": p_status.thumbnail_base64,
                 }
@@ -272,6 +281,7 @@ def make_router(
             raise HTTPException(status_code=500, detail=f"Pause failed: {exc}") from exc
         if sent:
             await db.record_pause(source="web", result="ok")
+            await watcher.get_fresh_status(force=True)
             return Response(
                 content='{"status": "ok", "message": "Print paused"}', media_type="application/json"
             )
@@ -295,6 +305,7 @@ def make_router(
 
             if watcher.state == WatcherState.PAUSED:
                 watcher.state = WatcherState.ARMED
+            await watcher.get_fresh_status(force=True)
             return Response(
                 content='{"status": "ok", "message": "Print resumed"}',
                 media_type="application/json",
@@ -309,6 +320,7 @@ def make_router(
             raise HTTPException(status_code=503, detail="Service not initialised")
         try:
             await watcher.printer.stop()
+            await watcher.get_fresh_status(force=True)
             return Response(
                 content='{"status": "ok", "message": "Print cancelled"}',
                 media_type="application/json",
@@ -319,7 +331,7 @@ def make_router(
 
     @router.post("/api/control/snooze")
     async def control_snooze(request: Request) -> Response:
-        if db is None:
+        if watcher is None or db is None:
             raise HTTPException(status_code=503, detail="Service not initialised")
 
         seconds = 600
@@ -327,14 +339,16 @@ def make_router(
             body = await request.json()
             if isinstance(body, dict) and "seconds" in body:
                 seconds = int(body["seconds"])
+                if seconds < 0:
+                    raise HTTPException(
+                        status_code=400, detail="Snooze duration cannot be negative"
+                    )
+        except HTTPException:
+            raise
         except Exception:
             pass
 
-        await db.set_setting("detection_enabled", "false")
-
-        task = asyncio.create_task(_re_enable_after(db, float(seconds)))
-        _web_background_tasks.add(task)
-        task.add_done_callback(_web_background_tasks.discard)
+        await watcher.snooze(float(seconds))
 
         return Response(
             content=json.dumps(
@@ -356,39 +370,19 @@ def make_router(
             detection_warmup_seconds = body.get("detection_warmup_seconds")
 
             if printer_ip is not None:
-                printer_ip = printer_ip.strip()
-                if not printer_ip:
-                    raise HTTPException(
-                        status_code=400, detail="Printer IP/Hostname cannot be empty"
-                    )
-
-                # Verify IP or Domain hostname format
-                import ipaddress
-                import re
-
-                is_valid = False
                 try:
-                    ipaddress.ip_address(printer_ip)
-                    is_valid = True
-                except ValueError:
-                    pass
-                if not is_valid and not re.match(r"^[0-9.]+$", printer_ip):
-                    hostname_regex = re.compile(
-                        r"^(?:[a-zA-Z0-9]"
-                        r"(?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)*"
-                        r"[a-zA-Z0-9]"
-                        r"(?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$"
-                    )
-                    if hostname_regex.match(printer_ip):
-                        is_valid = True
-                if not is_valid:
+                    from sentinel.network import validate_printer_ip
+                    printer_ip = await asyncio.to_thread(validate_printer_ip, printer_ip)
+                except ValueError as exc:
                     raise HTTPException(
                         status_code=400,
-                        detail=f"Invalid IP address or hostname format: {printer_ip}",
-                    )
+                        detail=f"Invalid printer IP: {exc}",
+                    ) from exc
 
                 await db.set_setting("printer_ip", printer_ip)
                 watcher.printer._host = printer_ip
+                if hasattr(camera, "close"):
+                    await camera.close()
                 camera._url = f"http://{printer_ip}:{settings.printer_mjpeg_port}{settings.printer_mjpeg_path}"
                 if hasattr(watcher.printer, "close"):
                     await watcher.printer.close()
@@ -474,8 +468,12 @@ def make_router(
             raise HTTPException(status_code=503, detail="Camera not available")
 
         async def _gen() -> AsyncIterator[bytes]:
-            async for frame in camera.stream_proxy():
-                yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
+            from sentinel.camera.errors import CameraClosedError
+            try:
+                async for frame in camera.stream_proxy():
+                    yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
+            except CameraClosedError:
+                logger.info("Camera stream closed cleanly")
 
         return StreamingResponse(
             _gen(),
@@ -487,24 +485,74 @@ def make_router(
         reasons: list[str] = []
 
         if db is None:
-            body = json.dumps({"status": "not ready", "reasons": ["service not initialised"]})
+            body = json.dumps({
+                "status": "not ready",
+                "reasons": ["service not initialised"],
+                "subsystems": {
+                    "db": "unreachable",
+                    "watcher": "no heartbeat",
+                    "mqtt": "disconnected",
+                    "camera": "unreachable",
+                }
+            })
             return Response(content=body, status_code=503, media_type="application/json")
 
         heartbeat = await db.get_heartbeat()
         last_tick = heartbeat.get("last_tick_utc") if heartbeat else None
         age = _age_seconds(last_tick)
 
+        db_reachable = False
+        try:
+            if await db.ping():
+                db_reachable = True
+            else:
+                reasons.append("db not reachable")
+        except Exception:
+            reasons.append("db not reachable")
+
+        watcher_healthy = False
         if age is None:
             reasons.append("no heartbeat recorded")
         elif age > stall_seconds:
             reasons.append(f"watcher stalled ({age:.0f}s since last tick)")
+        else:
+            watcher_healthy = True
 
-        if not await db.ping():
-            reasons.append("db not reachable")
+        mqtt_connected = False
+        if watcher is not None and watcher.printer is not None:
+            mqtt_connected = bool(watcher.printer.is_connected)
+        if not mqtt_connected:
+            reasons.append("mqtt printer disconnected")
+
+        camera_connected = False
+        if camera is not None:
+            camera_connected = bool(camera.is_connected)
+        if not camera_connected:
+            reasons.append("camera unreachable")
+
+        subsystems = {
+            "db": "reachable" if db_reachable else "unreachable",
+            "watcher": (
+                "healthy"
+                if watcher_healthy
+                else ("stalled" if age is not None else "no heartbeat")
+            ),
+            "mqtt": "connected" if mqtt_connected else "disconnected",
+            "camera": "reachable" if camera_connected else "unreachable",
+        }
 
         if reasons:
-            body = json.dumps({"status": "not ready", "reasons": reasons})
+            body = json.dumps({
+                "status": "not ready",
+                "reasons": reasons,
+                "subsystems": subsystems,
+            })
             return Response(content=body, status_code=503, media_type="application/json")
-        return Response(content='{"status":"ready"}', media_type="application/json")
+
+        body = json.dumps({
+            "status": "ready",
+            "subsystems": subsystems,
+        })
+        return Response(content=body, media_type="application/json")
 
     return router

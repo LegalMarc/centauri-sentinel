@@ -28,7 +28,7 @@ def _settings(
     *, chat_id: int = _AUTHORIZED_CHAT, user_ids: str = str(_AUTHORIZED_USER)
 ) -> Settings:
     return Settings(
-        printer_ip="127.0.0.1",
+        printer_ip="192.168.1.10",
         printer_access_code="000000",
         telegram_bot_token="fake:token",
         telegram_chat_id=str(chat_id),
@@ -84,6 +84,11 @@ def _make_handler(
     watcher.state = WatcherState.ARMED
     watcher.last_printer_status = None
 
+    async def get_fresh_status(force: bool = False) -> object:
+        return watcher.last_printer_status
+
+    watcher.get_fresh_status = get_fresh_status
+
     return BotCommandHandler(
         _settings(),
         printer,
@@ -100,6 +105,7 @@ def _make_update(
     chat_id: int = _AUTHORIZED_CHAT,
     *,
     callback_data: str | None = None,
+    is_photo: bool = False,
 ) -> MagicMock:
     """Build a minimal mock Update, either a message or a callback_query."""
     update = MagicMock()
@@ -114,10 +120,12 @@ def _make_update(
         cq.data = callback_data
         cq.from_user = user
         cq.message = MagicMock()
+        cq.message.photo = (MagicMock(),) if is_photo else ()
         cq.message.chat = MagicMock()
         cq.message.chat.id = chat_id
         cq.answer = AsyncMock()
         cq.edit_message_text = AsyncMock()
+        cq.edit_message_caption = AsyncMock()
         update.callback_query = cq
     else:
         # Regular command message
@@ -370,21 +378,14 @@ async def test_callback_stop_sets_pending() -> None:
     assert _AUTHORIZED_USER in handler._pending_stops
 
 
-async def test_callback_snooze_disables_detection_and_reenables() -> None:
-    db = AsyncMock()
-    db.set_setting.return_value = None
-    notifier = _make_notifier()
-    handler = _make_handler(db=db, notifier=notifier, snooze_seconds=0.05)
+async def test_callback_snooze_calls_watcher_snooze() -> None:
+    handler = _make_handler(snooze_seconds=3600.0)
+    handler._watcher.snooze = AsyncMock()
     update = _make_update(callback_data="snooze")
     await handler.handle_callback(update, None)
 
-    # Check that detection was disabled immediately
-    db.set_setting.assert_any_call("detection_enabled", "false")
-
-    # Wait for the re-enable task to fire
-    await asyncio.sleep(0.2)
-    db.set_setting.assert_any_call("detection_enabled", "true")
-    notifier.send_text.assert_called_once()
+    handler._watcher.snooze.assert_called_once_with(3600.0)
+    assert "snoozed" in update.callback_query.edit_message_text.call_args[0][0].lower()
 
 
 async def test_callback_unauthorized_no_action() -> None:
@@ -609,3 +610,59 @@ async def test_handle_callback_enable() -> None:
     await handler.handle_callback(update, None)
     handler._db.set_setting.assert_called_once_with("detection_enabled", "true")
     assert "re-enabled" in update.callback_query.edit_message_text.call_args[0][0].lower()
+
+
+async def test_telegram_bot_rate_limiting() -> None:
+    notifier = _make_notifier(user_ids="222222,99999")
+    handler = _make_handler(notifier=notifier)
+
+    update1 = _make_update(user_id=_AUTHORIZED_USER)
+    for _ in range(5):
+        await handler.cmd_help(update1, None)
+
+    assert update1.message.reply_text.call_count == 5
+
+    await handler.cmd_help(update1, None)
+    assert update1.message.reply_text.call_count == 6
+    last_call = update1.message.reply_text.call_args[0][0]
+    assert "Slow down" in last_call
+
+    update2 = _make_update(user_id=99999)
+    await handler.cmd_help(update2, None)
+    assert update2.message.reply_text.call_count == 1
+    assert "Slow down" not in update2.message.reply_text.call_args[0][0]
+
+
+async def test_callback_resume_photo_message() -> None:
+    printer = AsyncMock()
+    handler = _make_handler(printer=printer)
+    handler._watcher.state = WatcherState.PAUSED
+    update = _make_update(callback_data="resume", is_photo=True)
+    await handler.handle_callback(update, None)
+    printer.resume.assert_called_once()
+    update.callback_query.edit_message_caption.assert_called_once()
+    assert "resumed" in update.callback_query.edit_message_caption.call_args[1]["caption"].lower()
+    update.callback_query.edit_message_text.assert_not_called()
+
+
+async def test_callback_snooze_photo_message() -> None:
+    handler = _make_handler(snooze_seconds=3600.0)
+    handler._watcher.snooze = AsyncMock()
+    update = _make_update(callback_data="snooze", is_photo=True)
+    await handler.handle_callback(update, None)
+    handler._watcher.snooze.assert_called_once_with(3600.0)
+    update.callback_query.edit_message_caption.assert_called_once()
+    assert "snoozed" in update.callback_query.edit_message_caption.call_args[1]["caption"].lower()
+    update.callback_query.edit_message_text.assert_not_called()
+
+
+async def test_callback_confirm_stop_photo_message() -> None:
+    handler = _make_handler()
+    handler._pending_stops[_AUTHORIZED_USER] = time.monotonic()
+    update = _make_update(callback_data="confirm_stop", is_photo=True)
+    await handler.handle_callback(update, None)
+    handler._printer.stop.assert_called_once()
+    update.callback_query.edit_message_caption.assert_called_once()
+    assert "cancelled" in update.callback_query.edit_message_caption.call_args[1]["caption"].lower()
+    update.callback_query.edit_message_text.assert_not_called()
+

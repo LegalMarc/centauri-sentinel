@@ -25,3 +25,6 @@ class WatcherState(Enum):
 
     STALLED = auto()
     """Heartbeat watchdog fired — watcher loop may have hung."""
+
+    OFFLINE = auto()
+    """Printer is offline/unreachable."""

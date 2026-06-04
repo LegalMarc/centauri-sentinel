@@ -285,3 +285,60 @@ def test_ml_result_score_zero() -> None:
 
 def test_ml_result_score_above_zero() -> None:
     assert MlResult(score=0.1).score > 0.0
+
+
+async def test_ml_client_connection_reuse() -> None:
+    client_mock = _make_http_client({"score": 0.5})
+    store = NonceStore()
+
+    with patch(
+        "sentinel.ml.client.httpx.AsyncClient", return_value=client_mock
+    ) as mock_async_client:
+        ml = MlClient(_SETTINGS, nonce_store=store)
+
+        # Verify the client constructor was called once
+        mock_async_client.assert_called_once()
+
+        # Make multiple detect calls
+        res1 = await ml.detect(_JPEG)
+        res2 = await ml.detect(_JPEG)
+
+        assert res1.score == 0.5
+        assert res2.score == 0.5
+
+        # Verify get was called twice on the same client instance
+        assert client_mock.get.call_count == 2
+
+        # Verify close closes the persistent client
+        client_mock.aclose = AsyncMock()
+        await ml.close()
+        client_mock.aclose.assert_called_once()
+
+
+async def test_ml_callback_host_parameter() -> None:
+    # 1. Test when ml_callback_host is set to a hostname
+    settings = Settings(printer_ip="10.0.0.1", ml_callback_host="custom-sentinel-host")
+    client_mock = _make_http_client({"score": 0.1})
+    store = NonceStore()
+    with patch("sentinel.ml.client.httpx.AsyncClient", return_value=client_mock):
+        ml = MlClient(settings, nonce_store=store)
+        await ml.detect(_JPEG)
+
+    call_kwargs = client_mock.get.call_args
+    params_sent = call_kwargs.kwargs.get("params", {})
+    img_url = params_sent.get("img", "")
+    assert img_url.startswith("http://custom-sentinel-host:8000/__internal_snapshot/")
+
+    # 2. Test when ml_callback_host is set to a full URL
+    settings_url = Settings(printer_ip="10.0.0.1", ml_callback_host="https://sentinel.example.com/subdir")
+    client_mock_url = _make_http_client({"score": 0.1})
+    with patch("sentinel.ml.client.httpx.AsyncClient", return_value=client_mock_url):
+        ml = MlClient(settings_url, nonce_store=store)
+        await ml.detect(_JPEG)
+
+    call_kwargs_url = client_mock_url.get.call_args
+    params_sent_url = call_kwargs_url.kwargs.get("params", {})
+    img_url_url = params_sent_url.get("img", "")
+    assert img_url_url.startswith("https://sentinel.example.com/subdir/__internal_snapshot/")
+
+

@@ -95,6 +95,7 @@ Disabled if `TELEGRAM_BOT_TOKEN` is unset.
 | `TELEGRAM_BOT_TOKEN` | — | Bot token from @BotFather |
 | `TELEGRAM_CHAT_ID` | — | Chat to send alerts to |
 | `TELEGRAM_USER_IDS` | — | Comma-separated list of authorised user IDs |
+| `TELEGRAM_SEND_SNAPSHOTS` | `true` | If set to false, Telegram notifications send text-only alerts without uploading snapshots |
 
 See [Telegram setup](#telegram-setup) below.
 
@@ -139,6 +140,7 @@ python3 -c "import bcrypt; print(bcrypt.hashpw(b'yourpassword', bcrypt.gensalt()
 |---|---|---|
 | `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL` |
 | `DB_PATH` | `/data/sentinel.db` | SQLite database path (should be on a named volume) |
+| `SNAPSHOT_RETENTION_LIMIT` | `50` | Maximum number of snapshot files to keep on disk. Oldest files are deleted periodically |
 
 ---
 
@@ -161,10 +163,11 @@ python3 -c "import bcrypt; print(bcrypt.hashpw(b'yourpassword', bcrypt.gensalt()
 4. Find your **user ID**: look for `"from":{"id":...}` in the same response. This is your entry
    in `TELEGRAM_USER_IDS`. Add more users by comma-separating their IDs.
 
-**Security notes:**
+**Security & Privacy notes:**
 - centauri-sentinel enforces an allowlist on both chat ID and user ID. Messages from unknown
   chats or users are silently ignored.
 - The `/stop` command requires a `/confirm` within 30 seconds to prevent accidental pauses.
+- **Privacy Notice:** Telegram notifications upload camera snapshots to Telegram's servers. You can opt-out of image uploads while keeping text-only alerts by setting the environment variable `TELEGRAM_SEND_SNAPSHOTS=false`.
 
 **Available bot commands:**
 
@@ -187,13 +190,14 @@ python3 -c "import bcrypt; print(bcrypt.hashpw(b'yourpassword', bcrypt.gensalt()
 [ntfy](https://ntfy.sh) is an open-source push notification service.
 
 **Using ntfy.sh (public):**
-- Create a long, random topic name (treat it like a secret — anyone who knows it can read alerts):
+- **IMPORTANT Privacy Requirement:** An authentication token is **required** to use public `ntfy.sh` (via `NTFY_TOKEN`). Using `ntfy.sh` without a token is blocked at startup to prevent exposing your camera snapshots to the public.
+- Create a long, random topic name (treat it like a secret — anyone who guesses or leaks it can read alerts):
   ```
   NTFY_URL=https://ntfy.sh/my-long-random-secret-topic-abc123
+  NTFY_TOKEN=your-ntfy-access-token
   ```
 - Subscribe with the ntfy app on iOS or Android.
-- Caveat: public ntfy.sh has rate limits and your topic is technically public knowledge if
-  the URL leaks from your environment.
+- Caveat: public ntfy.sh has rate limits and your topic is technically public knowledge if the URL leaks from your environment.
 
 **Recommended: self-hosted ntfy on LAN:**
 - Run ntfy alongside your Coolify stack. Set access control and a bearer token:
@@ -216,6 +220,14 @@ python3 -c "import bcrypt; print(bcrypt.hashpw(b'yourpassword', bcrypt.gensalt()
 | SQLite database | Host root | Self-hosted norm; back up the `sentinel-data` volume. |
 
 See [docs/threat-model.md](docs/threat-model.md) for the full analysis.
+
+---
+
+## Data retention policy
+
+To protect user privacy and manage disk usage, centauri-sentinel implements the following retention rules:
+- **Detection history:** Log entries in the SQLite database (e.g. timestamp, ML score, printing stats) are preserved indefinitely for analytics purposes.
+- **Camera snapshots:** Image files stored on disk are limited to the most recent `SNAPSHOT_RETENTION_LIMIT` (default: `50`) events. A background task runs periodically to delete older snapshot files from disk and nullify their database references.
 
 ---
 

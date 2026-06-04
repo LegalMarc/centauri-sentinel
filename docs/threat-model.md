@@ -44,6 +44,7 @@ configuration.
 - Destructive commands (`/stop`) require a `/confirm` within a 30-second window, preventing
   accidental or replayed triggers.
 - The bot token is a secret — treat it like a password. Rotate via @BotFather if compromised.
+- **Privacy notice:** By default, Telegram notifications upload camera snapshots to Telegram's servers. To opt-out of uploading snapshots while keeping text-only notifications, set `TELEGRAM_SEND_SNAPSHOTS=false`.
 
 ### ntfy alerts
 
@@ -51,6 +52,7 @@ configuration.
 
 **Mitigations:**
 - Treat the topic URL as a secret. A long, random topic name provides obscurity.
+- **Safety guard:** The application refuses to start if `ntfy.sh` is configured without an auth token (`NTFY_TOKEN`), preventing unauthenticated public exposures.
 - For stronger guarantees, run a self-hosted ntfy instance on the LAN and set `NTFY_TOKEN`.
 
 ### Obico ML API (`obico-ml` container)
@@ -110,8 +112,16 @@ but worth noting explicitly.
 |---|---|
 | MQTT traffic is not encrypted | MQTT 3.1.1 on a trusted LAN; Carbon 2 does not support TLS on MQTT in v0.1. Accepted for v0.1; TLS upgrade path exists in MQTT 5. |
 | ntfy alert contains a camera snapshot | Snapshot is sent intentionally; use self-hosted ntfy if the image must not leave the LAN. |
-| Telegram snapshot in alerts | Same as above; accept or disable Telegram notifications. |
+| Telegram snapshot in alerts | Same as above; accept, disable Telegram notifications, or opt-out of snapshot uploads by setting `TELEGRAM_SEND_SNAPSHOTS=false`. |
 | ML token is a hex string, not a JWT | ML container is on an internal network; the token provides defence-in-depth only. |
+
+---
+
+## Data retention policy
+
+To protect user privacy and limit disk space consumption, the system enforces the following policies:
+- **Event history logs:** Metadata about detection events, print states, and system settings are stored indefinitely in the SQLite database to drive the historical analytics dashboard.
+- **Snapshots:** Raw camera images are stored on disk in the application data volume. A background cleanup task periodically trims these snapshot files to keep only the most recent `SNAPSHOT_RETENTION_LIMIT` (default: `50`) events, nullifying the paths of older snapshots in the database to prevent orphaned files.
 
 ---
 

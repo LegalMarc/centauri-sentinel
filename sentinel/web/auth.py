@@ -47,33 +47,85 @@ _TTL = 3600  # 1 hour
 _DUMMY_HASH = bcrypt.hashpw(b"__sentinel_dummy__", bcrypt.gensalt()).decode()
 
 
+def _resolve_client_ip(
+    scope: Scope, headers: dict[bytes, bytes], trust_proxies: bool = False
+) -> str:
+    """Return the real client IP, respecting X-Forwarded-For if trust_proxies is True."""
+    if trust_proxies:
+        x_forwarded_for = headers.get(b"x-forwarded-for")
+        if x_forwarded_for:
+            # The rightmost IP is the one added by our trusted reverse proxy.
+            return x_forwarded_for.decode().split(",")[-1].strip()
+    client = scope.get("client")
+    return client[0] if client else "0.0.0.0"
+
+
 class AuthMiddleware:
     """ASGI middleware that gates all routes behind Basic auth + cookie session."""
 
     def __init__(self, app: ASGIApp, settings: Settings, secret: bytes | None = None) -> None:
         self._app = app
+        self._settings = settings
         self._enabled = settings.auth_enabled
         self._username = settings.auth_username or ""
         self._password_hash = settings.auth_password_bcrypt or ""
         # secret must be provided by caller (loaded from DB); fall back to
         # ephemeral random only if no DB is available (e.g. tests).
         self._secret = secret if secret is not None else os.urandom(32)
-        # Add Secure flag only when the service is expected to run behind TLS.
-        # For LAN-only deployments without a reverse proxy we omit it so the
-        # browser doesn't block the cookie over plain HTTP.
-        self._secure = settings.external_bind_allowed
+        # Store auth attempts by IP: [timestamps...] (max 10 per minute)
+        # Bounded by OrderedDict to prevent memory leak (OOM) from many IPs
+        import collections
+        self._auth_attempts: collections.OrderedDict[str, list[float]] = collections.OrderedDict()
+        self._auth_cookie_secure = settings.auth_cookie_secure
+
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if not self._enabled or scope["type"] != "http":
-            await self._app(scope, receive, send)
-            return
-
-        path: str = scope.get("path", "")
-        if path.startswith("/__internal_snapshot/") or path in ("/healthz", "/readyz"):
+        if scope["type"] != "http":
             await self._app(scope, receive, send)
             return
 
         headers = dict(scope.get("headers", []))
+
+        if scope.get("method") in ("POST", "PUT", "DELETE", "PATCH"):
+            origin = headers.get(b"origin")
+            host = headers.get(b"host", b"")
+            if origin:
+                if not origin.decode().endswith(f"://{host.decode()}"):
+                    response = Response(status_code=403, content="CSRF Protection: Origin mismatch")
+                    await response(scope, receive, send)
+                    return
+            else:
+                referer = headers.get(b"referer")
+                if referer and host:
+                    from urllib.parse import urlparse
+
+                    parsed = urlparse(referer.decode())
+                    if parsed.netloc != host.decode():
+                        response = Response(
+                            status_code=403, content="CSRF Protection: Referer mismatch"
+                        )
+                        await response(scope, receive, send)
+                        return
+                else:
+                    response = Response(
+                        status_code=403, content="CSRF Protection: Missing Origin and Referer"
+                    )
+                    await response(scope, receive, send)
+                    return
+
+        path: str = scope.get("path", "")
+        if path.startswith("/__internal_snapshot/"):
+            await self._app(scope, receive, send)
+            return
+
+        if not self._enabled:
+            await self._app(scope, receive, send)
+            return
+
+        if path in ("/healthz", "/readyz"):
+            await self._app(scope, receive, send)
+            return
+
         cookie_header = headers.get(b"cookie", b"").decode()
         user_agent = headers.get(b"user-agent", b"").decode()
 
@@ -83,6 +135,21 @@ class AuthMiddleware:
 
         auth_header = headers.get(b"authorization", b"").decode()
         if auth_header.startswith("Basic "):
+            client_ip = _resolve_client_ip(scope, headers, self._settings.trust_proxies)
+            now = time.time()
+            attempts = [t for t in self._auth_attempts.get(client_ip, []) if now - t < 60]
+            if len(attempts) >= 10:
+                self._auth_attempts[client_ip] = attempts
+                self._auth_attempts.move_to_end(client_ip)
+                response = Response(status_code=429, content="Too Many Requests")
+                await response(scope, receive, send)
+                return
+            attempts.append(now)
+            self._auth_attempts[client_ip] = attempts
+            self._auth_attempts.move_to_end(client_ip)
+            while len(self._auth_attempts) > 1000:
+                self._auth_attempts.popitem(last=False)
+
             try:
                 decoded = base64.b64decode(auth_header[6:]).decode()
                 username, _, password = decoded.partition(":")
@@ -91,11 +158,32 @@ class AuthMiddleware:
 
             if await self._check_credentials(username, password):
                 cookie = self._make_cookie(user_agent)
-                secure_flag = "; Secure" if self._secure else ""
+
+                if self._auth_cookie_secure == "always":
+                    is_secure = True
+                elif self._auth_cookie_secure == "never":
+                    is_secure = False
+                else:  # "auto"
+                    headers_dict = {k.lower(): v for k, v in headers.items()}
+                    proto = headers_dict.get(b"x-forwarded-proto", b"").decode().lower()
+                    scheme = scope.get("scheme", "http").lower()
+                    is_secure = (scheme == "https" or proto == "https")
+                secure_flag = "; Secure" if is_secure else ""
+
+                query_string = scope.get("query_string", b"").decode()
+                
+                # Prevent open redirects: ensure path starts with a single slash,
+                # and doesn't use scheme-relative URLs (//) or backslashes (\).
+                safe_path = "/"
+                if path.startswith("/") and not path.startswith("//") and not path.startswith("/\\"):
+                    safe_path = path
+
+                redirect_url = f"{safe_path}?{query_string}" if query_string else safe_path
+
                 response = Response(
                     status_code=302,
                     headers={
-                        "Location": path,
+                        "Location": redirect_url,
                         "Set-Cookie": (
                             f"{_COOKIE_NAME}={cookie}; Path=/; HttpOnly; "
                             f"SameSite=Strict{secure_flag}; Max-Age={_TTL}"
@@ -104,6 +192,8 @@ class AuthMiddleware:
                 )
                 await response(scope, receive, send)
                 return
+            else:
+                await asyncio.sleep(0.5)
 
         response = Response(
             status_code=401,
@@ -115,10 +205,9 @@ class AuthMiddleware:
     async def _check_credentials(self, username: str, password: str) -> bool:
         # Constant-time username comparison prevents user-enumeration via timing.
         username_ok = hmac.compare_digest(username.encode("utf-8"), self._username.encode("utf-8"))
-        # Always run bcrypt even on a bad username so timing is indistinguishable.
-        hash_to_check = (
-            self._password_hash if (username_ok and self._password_hash) else _DUMMY_HASH
-        )
+        # Fix timing oracle: always hash against the actual password hash to maintain
+        # identical bcrypt cost/time, regardless of whether the username is correct.
+        hash_to_check = self._password_hash if self._password_hash else _DUMMY_HASH
         try:
             pw_ok = await asyncio.to_thread(
                 bcrypt.checkpw, password.encode("utf-8"), hash_to_check.encode("utf-8")

@@ -23,7 +23,7 @@ def _disabled_settings() -> Settings:
 def _enabled_settings(*, token: str | None = None) -> Settings:
     return Settings(
         printer_ip="10.0.0.1",
-        ntfy_url="https://ntfy.sh/test",
+        ntfy_url="https://my-ntfy.local/test",
         ntfy_token=token,
     )
 
@@ -75,7 +75,7 @@ async def test_detection_alert_posts() -> None:
         await notifier.send_detection_alert(0.75)
     mock_client.post.assert_called_once()
     call_kwargs = mock_client.post.call_args
-    assert "https://ntfy.sh/test" in str(call_kwargs)
+    assert "https://my-ntfy.local/test" in str(call_kwargs)
 
 
 async def test_stall_alert_posts() -> None:
@@ -188,14 +188,18 @@ async def test_detection_alert_with_photo_uploads() -> None:
     assert call_kwargs.get("content") == b"test_image_data"
     headers = call_kwargs.get("headers", {})
     assert headers.get("X-Filename") == "snapshot.jpg"
-    assert "85%" in headers.get("X-Message", "")
+    x_msg = headers.get("X-Message", "")
+    if x_msg.startswith("=?utf-8?B?"):
+        import base64
+        x_msg = base64.b64decode(x_msg[10:-2]).decode("utf-8")
+    assert "85%" in x_msg
 
 
 async def test_detection_alert_loads_photo_from_disk(tmp_path: Any) -> None:
     db_path = str(tmp_path / "sentinel.db")
     settings = Settings(
         printer_ip="10.0.0.1",
-        ntfy_url="https://ntfy.sh/test",
+        ntfy_url="https://my-ntfy.local/test",
         db_path=db_path,
     )
     # Save a fake snapshot file
@@ -217,7 +221,7 @@ async def test_detection_alert_disk_read_failure(tmp_path: Any) -> None:
     db_path = str(tmp_path / "sentinel.db")
     settings = Settings(
         printer_ip="10.0.0.1",
-        ntfy_url="https://ntfy.sh/test",
+        ntfy_url="https://my-ntfy.local/test",
         db_path=db_path,
     )
     # Don't create the file, so it fails to find/read it.
@@ -234,7 +238,7 @@ async def test_detection_alert_disk_read_failure(tmp_path: Any) -> None:
     assert "Confidence 85%." in call_kwargs.get("content", "")
 
 async def test_send_text_calls_post() -> None:
-    settings = Settings(printer_ip="10.0.0.1", ntfy_url="https://ntfy.sh/test")
+    settings = Settings(printer_ip="10.0.0.1", ntfy_url="https://my-ntfy.local/test")
     mock_client = _make_http_client()
     with patch("sentinel.notify.ntfy.httpx.AsyncClient", return_value=mock_client):
         notifier = NtfyNotifier(settings)
@@ -243,7 +247,7 @@ async def test_send_text_calls_post() -> None:
     assert mock_client.post.call_args.kwargs.get("content") == "hello"
 
 async def test_send_print_started_alert() -> None:
-    settings = Settings(printer_ip="10.0.0.1", ntfy_url="https://ntfy.sh/test")
+    settings = Settings(printer_ip="10.0.0.1", ntfy_url="https://my-ntfy.local/test")
     mock_client = _make_http_client()
     with patch("sentinel.notify.ntfy.httpx.AsyncClient", return_value=mock_client):
         notifier = NtfyNotifier(settings)
@@ -251,7 +255,7 @@ async def test_send_print_started_alert() -> None:
     mock_client.post.assert_called_once()
 
 async def test_send_print_completed_alert() -> None:
-    settings = Settings(printer_ip="10.0.0.1", ntfy_url="https://ntfy.sh/test")
+    settings = Settings(printer_ip="10.0.0.1", ntfy_url="https://my-ntfy.local/test")
     mock_client = _make_http_client()
     with patch("sentinel.notify.ntfy.httpx.AsyncClient", return_value=mock_client):
         notifier = NtfyNotifier(settings)
@@ -259,9 +263,49 @@ async def test_send_print_completed_alert() -> None:
     mock_client.post.assert_called_once()
 
 async def test_send_external_pause_alert() -> None:
-    settings = Settings(printer_ip="10.0.0.1", ntfy_url="https://ntfy.sh/test")
+    settings = Settings(printer_ip="10.0.0.1", ntfy_url="https://my-ntfy.local/test")
     mock_client = _make_http_client()
     with patch("sentinel.notify.ntfy.httpx.AsyncClient", return_value=mock_client):
         notifier = NtfyNotifier(settings)
         await notifier.send_external_pause_alert(b"jpeg")
     mock_client.post.assert_called_once()
+
+async def test_ntfy_rfc2047_header_encoding() -> None:
+    import base64
+    settings = Settings(printer_ip="10.0.0.1", ntfy_url="https://my-ntfy.local/test")
+    mock_client = _make_http_client()
+
+    with patch("sentinel.notify.ntfy.httpx.AsyncClient", return_value=mock_client):
+        notifier = NtfyNotifier(settings)
+        # Message with newlines and non-ASCII (emojis) via print started alert
+        await notifier.send_print_started_alert("My\nFile 🚀", b"jpeg_data")
+
+    mock_client.post.assert_called_once()
+    headers = mock_client.post.call_args.kwargs.get("headers", {})
+
+    # Check X-Message is encoded
+    x_msg = headers.get("X-Message", "")
+    assert x_msg.startswith("=?utf-8?B?")
+    assert x_msg.endswith("?=")
+
+    # Decode it and verify
+    encoded_payload = x_msg[10:-2]
+    decoded_msg = base64.b64decode(encoded_payload.encode()).decode("utf-8")
+    assert "My" in decoded_msg
+    assert "\n" in decoded_msg
+    assert "🚀" in decoded_msg
+
+async def test_ntfy_no_encoding_for_pure_ascii() -> None:
+    settings = Settings(printer_ip="10.0.0.1", ntfy_url="https://my-ntfy.local/test")
+    mock_client = _make_http_client()
+
+    with patch("sentinel.notify.ntfy.httpx.AsyncClient", return_value=mock_client):
+        notifier = NtfyNotifier(settings)
+        # Message without newlines and pure ASCII
+        await notifier.send_camera_offline_alert()
+
+    mock_client.post.assert_called_once()
+    headers = mock_client.post.call_args.kwargs.get("headers", {})
+    title = headers.get("Title", "")
+    assert not title.startswith("=?utf-8?B?")
+    assert title == "Camera offline"

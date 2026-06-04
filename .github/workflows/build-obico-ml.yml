@@ -28,12 +28,15 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push obico-ml (amd64)
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Build and push obico-ml (multi-arch)
         uses: docker/build-push-action@v5
         with:
           context: ./docker/obico-ml
           push: true
           tags: ghcr.io/legalmarc/centauri-sentinel/obico-ml:1.4
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           cache-from: type=gha
           cache-to: type=gha,mode=max

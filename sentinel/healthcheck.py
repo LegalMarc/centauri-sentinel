@@ -14,7 +14,7 @@ import urllib.request
 def main() -> None:
     try:
         port = os.getenv("BIND_PORT", "8000")
-        with urllib.request.urlopen(f"http://localhost:{port}/readyz", timeout=5) as resp:
+        with urllib.request.urlopen(f"http://localhost:{port}/healthz", timeout=5) as resp:
             sys.exit(0 if resp.status == 200 else 1)
     except Exception:
         sys.exit(1)

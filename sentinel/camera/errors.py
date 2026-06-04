@@ -13,3 +13,7 @@ class CameraOfflineError(CameraError):
 
 class CameraReadError(CameraError):
     """Raised on a single grab failure (connection lost, timeout, bad data)."""
+
+
+class CameraClosedError(CameraError):
+    """Raised when the camera connection is closed or reconfigured."""

@@ -1,19 +1,66 @@
-.env.local
-.env
-.venv/
+# Byte-compiled / optimized / DLL files
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
+*$py.class
+
+# Caches and Environments
+.venv/
+env/
+venv/
+ENV/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.ipynb_checkpoints/
+
+# Configuration and Secrets
+.env
+.env.local
+.env.*.local
+
+# Testing and Coverage
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+*.lcov
+nosetests.xml
+
+# Distribution / packaging
 dist/
 build/
 *.egg-info/
-htmlcov/
-.coverage
+
+# Databases and Local Data
 data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+
+# Logs
+*.log
 mjpeg_soak_*.log
+
+# macOS System Files
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon\r
+._*
+.Spotlight-V100
+.Trashes
+
+# IDEs and Editors
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+*~
 
 # Project-internal prompt files
 INITIATION_PROMPT.md
