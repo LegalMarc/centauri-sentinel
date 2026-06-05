@@ -255,7 +255,8 @@ class WatcherLoop:
 
                     if auto_stop_timeout > 0 and pause_duration > auto_stop_timeout:
                         logger.warning(
-                            "Auto-stop timeout reached (%.0f s) — dispatching notification and stopping printer",
+                            "Auto-stop timeout reached (%.0f s) — "
+                            "dispatching notification and stopping printer",
                             pause_duration,
                         )
                         text = (
@@ -263,13 +264,15 @@ class WatcherLoop:
                             "minutes. Initiating automatic stop."
                         )
                         self._dispatcher.dispatch_text(text)
-                        
+
                         try:
                             # Actually call stop to halt the printer
                             await self._printer.stop()
                         except Exception:
-                            logger.exception("Failed to automatically stop the printer after timeout")
-                        
+                            logger.exception(
+                                "Failed to automatically stop the printer after timeout"
+                            )
+
                         self._paused_since = None  # reset to prevent spamming
             else:
                 self._paused_since = None
@@ -649,9 +652,7 @@ class WatcherLoop:
             ) as cur:
                 rows = await cur.fetchall()
                 active_filenames = {
-                    Path(row["snapshot_path"]).name
-                    for row in rows
-                    if row["snapshot_path"]
+                    Path(row["snapshot_path"]).name for row in rows if row["snapshot_path"]
                 }
         except Exception:
             logger.exception("Failed to query active snapshot paths for fallback cleanup")

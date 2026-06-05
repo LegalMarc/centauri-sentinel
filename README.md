@@ -85,6 +85,7 @@ Only `PRINTER_IP` is required. Everything else has a sane default.
 | `DETECTION_WARMUP_SECONDS` | `300` | Seconds after print start before arming (skips first-layer purge) |
 | `DETECTION_ENABLED_DEFAULT` | `true` | Initial detection state — can be toggled at runtime via bot |
 | `WATCHER_STALL_SECONDS` | `60` | Heartbeat age that triggers a stall alert |
+| `AUTO_STOP_TIMEOUT_SECONDS` | `0` | Auto-stop the print after this many seconds of being paused by Sentinel (0 to disable). Must be 0 or >= 60. |
 
 ### Telegram (optional)
 
@@ -133,6 +134,7 @@ python3 -c "import bcrypt; print(bcrypt.hashpw(b'yourpassword', bcrypt.gensalt()
 | `BIND_PORT` | `8000` | Port to bind on (inside the container) |
 | `SENTINEL_PORT` | `8000` | Host-side port published by Docker Compose |
 | `EXTERNAL_BIND_ALLOWED` | `false` | Set `true` only with auth + TLS at reverse proxy |
+| `TRUST_PROXIES` | `false` | Trust X-Forwarded-For headers for IP checking when behind a reverse proxy |
 
 ### Misc
 
@@ -141,6 +143,7 @@ python3 -c "import bcrypt; print(bcrypt.hashpw(b'yourpassword', bcrypt.gensalt()
 | `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL` |
 | `DB_PATH` | `/data/sentinel.db` | SQLite database path (should be on a named volume) |
 | `SNAPSHOT_RETENTION_LIMIT` | `50` | Maximum number of snapshot files to keep on disk. Oldest files are deleted periodically |
+| `EVENT_RETENTION_DAYS` | `90` | Days to keep historical detection/pause records in SQLite |
 
 ---
 
