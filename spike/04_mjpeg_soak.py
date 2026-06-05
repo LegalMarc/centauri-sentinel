@@ -12,6 +12,7 @@ Usage:
 Findings feed issue #5 (MJPEG grabber) backoff tuning and the
 CAMERA_OFFLINE thresholds.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -105,19 +106,28 @@ async def main(args: argparse.Namespace) -> None:
     log(f"total frames: {total_frames}")
     log(f"disconnects:  {disconnects}")
     if all_intervals:
-        log(f"interval ms — min={min(all_intervals):.1f} "
+        log(
+            f"interval ms — min={min(all_intervals):.1f} "
             f"median={statistics.median(all_intervals):.1f} "
             f"p95={statistics.quantiles(all_intervals, n=20)[18]:.1f} "
-            f"max={max(all_intervals):.1f}")
+            f"max={max(all_intervals):.1f}"
+        )
         buckets = Counter()
         for v in all_intervals:
-            if v < 50: buckets["<50ms"] += 1
-            elif v < 100: buckets["50-100ms"] += 1
-            elif v < 250: buckets["100-250ms"] += 1
-            elif v < 500: buckets["250-500ms"] += 1
-            elif v < 1000: buckets["500-1000ms"] += 1
-            elif v < 5000: buckets["1-5s"] += 1
-            else: buckets[">=5s"] += 1
+            if v < 50:
+                buckets["<50ms"] += 1
+            elif v < 100:
+                buckets["50-100ms"] += 1
+            elif v < 250:
+                buckets["100-250ms"] += 1
+            elif v < 500:
+                buckets["250-500ms"] += 1
+            elif v < 1000:
+                buckets["500-1000ms"] += 1
+            elif v < 5000:
+                buckets["1-5s"] += 1
+            else:
+                buckets[">=5s"] += 1
         for b, c in buckets.most_common():
             log(f"  {b}: {c}")
 
@@ -136,8 +146,9 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--url", required=True, help="Printer MJPEG URL")
     p.add_argument("--minutes", type=int, default=60)
-    p.add_argument("--stall-seconds", type=float, default=10.0,
-                   help="No-bytes window that counts as a stall")
+    p.add_argument(
+        "--stall-seconds", type=float, default=10.0, help="No-bytes window that counts as a stall"
+    )
     return p.parse_args()
 
 

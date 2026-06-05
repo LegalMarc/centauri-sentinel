@@ -1250,7 +1250,7 @@ function snoozeDetection() {
   const durationSelect = document.getElementById("snooze-duration");
   const seconds = parseInt(durationSelect.value, 10);
   const text = durationSelect.options[durationSelect.selectedIndex].text;
-  
+
   fetch('/api/control/snooze', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -1305,7 +1305,7 @@ function saveSettings(event) {
   event.preventDefault();
   const form = document.getElementById("settings-form");
   const inputs = form.querySelectorAll(".form-input");
-  
+
   inputs.forEach(input => {
     input.classList.remove("user-invalid-fallback");
     input.classList.remove("user-valid-fallback");
@@ -1401,7 +1401,7 @@ function updateLiveStats() {
         cardWatcherBadge.className = `state-badge state-${data.watcher_state.toLowerCase()}`;
         cardWatcherBadge.textContent = data.watcher_state;
       }
-      
+
       // Update Heartbeat
       const cardHeartbeat = document.getElementById("card-heartbeat");
       if (cardHeartbeat) {

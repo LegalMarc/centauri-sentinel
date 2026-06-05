@@ -443,7 +443,6 @@ async def test_loop_swallows_unexpected_exceptions() -> None:
     assert call_count == 2  # loop executed twice despite exception on first
 
 
-
 # ---------------------------------------------------------------------------
 # _on_confirmed_detection — CancelledError sets PAUSED before re-raising
 # ---------------------------------------------------------------------------
@@ -832,18 +831,22 @@ async def test_printer_property() -> None:
     watcher, *_ = await _make_watcher()
     assert watcher.printer == watcher._printer
 
+
 async def test_watchdog_tick_stale() -> None:
     watcher, _printer, _camera, _ml, db = await _make_watcher()
-    await watcher._watchdog_tick(db) # None
+    await watcher._watchdog_tick(db)  # None
 
     db.get_heartbeat = AsyncMock(return_value={"last_tick_utc": ""})
-    await watcher._watchdog_tick(db) # empty
+    await watcher._watchdog_tick(db)  # empty
 
     # stall branch
-    db.get_heartbeat = AsyncMock(return_value={"last_tick_utc": (datetime.now(UTC) - timedelta(seconds=1000)).isoformat()})
+    db.get_heartbeat = AsyncMock(
+        return_value={"last_tick_utc": (datetime.now(UTC) - timedelta(seconds=1000)).isoformat()}
+    )
     await watcher._watchdog_tick(db)
     assert watcher.state == WatcherState.STALLED
     watcher._dispatcher.dispatch_stall.assert_called_once()
+
 
 async def test_check_and_send_state_reminders() -> None:
     watcher, _printer, _camera, _ml, db = await _make_watcher()
@@ -858,13 +861,18 @@ async def test_check_and_send_state_reminders() -> None:
     await watcher._check_and_send_state_reminders()
     watcher._dispatcher.dispatch_text.assert_called_once()
 
-async def test_on_confirmed_detection_save_and_cleanup_exceptions(monkeypatch: pytest.MonkeyPatch) -> None:
+
+async def test_on_confirmed_detection_save_and_cleanup_exceptions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     watcher, _printer, _camera, _ml, db = await _make_watcher()
 
     db.get_snapshots_for_cleanup = AsyncMock(side_effect=Exception("cleanup err"))
 
     import asyncio
+
     original_to_thread = asyncio.to_thread
+
     async def mock_to_thread(func, *args, **kwargs):
         if getattr(func, "__name__", "") == "mkdir":
             raise Exception("mkdir failed")
@@ -879,15 +887,18 @@ async def test_on_confirmed_detection_save_and_cleanup_exceptions(monkeypatch: p
     assert len(recent) == 1
     assert recent[0]["snapshot_path"] is None
 
+
 async def test_on_confirmed_detection_cleanup_oserror(monkeypatch: pytest.MonkeyPatch) -> None:
     watcher, _printer, _camera, _ml, db = await _make_watcher()
     db.get_snapshots_for_cleanup = AsyncMock(return_value=["/dummy/path1"])
 
     from pathlib import Path
+
     monkeypatch.setattr(Path, "exists", lambda x: True)
     monkeypatch.setattr(Path, "unlink", MagicMock(side_effect=OSError("unlink failed")))
 
     await watcher._on_confirmed_detection(MlResult(score=0.9), b"jpeg")
+
 
 async def test_on_confirmed_detection_pause_cancelled() -> None:
     watcher, printer, _camera, _ml, _db = await _make_watcher()
@@ -901,6 +912,7 @@ async def test_on_confirmed_detection_pause_cancelled() -> None:
         await watcher._on_confirmed_detection(MlResult(score=0.9), b"")
     assert watcher.state == WatcherState.IDLE
 
+
 async def test_on_confirmed_detection_pause_exception() -> None:
     watcher, printer, _camera, _ml, db = await _make_watcher()
 
@@ -912,6 +924,7 @@ async def test_on_confirmed_detection_pause_exception() -> None:
     assert pauses[0]["result"] == "error"
     assert pauses[0]["error_message"] == "Printer pause failed"
 
+
 async def test_watchdog_loop_cancellation() -> None:
     watcher, *_ = await _make_watcher()
     task = asyncio.create_task(watcher._watchdog())
@@ -919,6 +932,7 @@ async def test_watchdog_loop_cancellation() -> None:
     task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await task
+
 
 async def test_safe_grab_jpeg_exception() -> None:
     watcher, _printer, camera, _ml, _db = await _make_watcher()
@@ -940,6 +954,7 @@ async def test_print_started_notification_2() -> None:
 
     await watcher._update_state(printer_status)
     watcher._dispatcher.dispatch_print_started.assert_called_once()
+
 
 async def test_print_completed_notification_2() -> None:
     watcher, _printer, *_ = await _make_watcher()
@@ -975,13 +990,16 @@ async def test_watchdog_auto_stop(monkeypatch) -> None:
     watcher._dispatcher.dispatch_text.assert_called_once()
     assert watcher._paused_since is None
 
+
 async def test_poll_interval_fallback(monkeypatch) -> None:
     watcher, _printer, _camera, _ml, db = await _make_watcher()
     watcher._settings.ml_poll_interval_seconds = "0.5"
 
     watcher._running = True
+
     async def mock_tick():
         watcher._running = False
+
     watcher._tick = AsyncMock(side_effect=mock_tick)
 
     db.get_setting = AsyncMock(return_value="not_a_float")
@@ -990,6 +1008,7 @@ async def test_poll_interval_fallback(monkeypatch) -> None:
         await watcher._loop()
 
     mock_sleep.assert_called_once_with(0.5)
+
 
 async def test_warmup_fallback(monkeypatch) -> None:
     watcher, printer, _camera, _ml, db = await _make_watcher()
@@ -1005,6 +1024,7 @@ async def test_warmup_fallback(monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 # PRIV-01 Periodic Snapshot Cleanup Tests
 # ---------------------------------------------------------------------------
+
 
 async def test_cleanup_respects_configurable_limit() -> None:
     watcher, _printer, _camera, _ml, db = await _make_watcher()
@@ -1041,6 +1061,7 @@ async def test_periodic_cleanup_task_runs_and_exits() -> None:
     # Create helper mock sleep that cancels loop after 1 sleep
     sleep_calls = 0
     original_sleep = asyncio.sleep
+
     async def mock_sleep(delay: float) -> None:
         nonlocal sleep_calls
         sleep_calls += 1
@@ -1191,6 +1212,7 @@ async def test_watcher_cancel_snooze() -> None:
 async def test_print_duration_recording_and_back_to_back() -> None:
     """Verify print duration is calculated correctly and print start resets back-to-back."""
     from datetime import UTC, datetime, timedelta
+
     watcher, printer, _, _, db = await _make_watcher()
 
     # 1. Start job 1
@@ -1257,6 +1279,7 @@ async def test_print_duration_recording_and_back_to_back() -> None:
 
 async def test_stale_printer_status_transitions_to_offline() -> None:
     import dataclasses
+
     watcher, printer, _, _, _ = await _make_watcher(printer_status=_printing_status())
     watcher.state = WatcherState.ARMED
 
@@ -1300,6 +1323,7 @@ async def test_stop_command_retry_on_timeout() -> None:
 
     async def mock_stop() -> None:
         printer.stop_pending = False
+
     printer.stop.side_effect = mock_stop
 
     await watcher.tick()
@@ -1317,6 +1341,7 @@ async def test_get_fresh_status_cache(monkeypatch: pytest.MonkeyPatch) -> None:
     printer.status = AsyncMock(side_effect=[status1, status2])
 
     import time
+
     current_time = 1000.0
     monkeypatch.setattr(time, "monotonic", lambda: current_time)
 
@@ -1356,6 +1381,7 @@ async def test_snapshot_cleanup_permission_error_clears_db_reference(
 
     # Mock Path.unlink
     from pathlib import Path
+
     unlinked_paths = []
 
     def mock_unlink(self: Path, missing_ok: bool = False) -> None:
@@ -1439,9 +1465,3 @@ async def test_watcher_resume_cooldown_expiry() -> None:
     # Camera grab and ML detect should have run
     camera.grab.assert_called_once()
     ml.detect.assert_called_once()
-
-
-
-
-
-

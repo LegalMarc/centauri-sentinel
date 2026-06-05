@@ -76,4 +76,3 @@ def test_token_init_permissions(tmp_path: Path) -> None:
     # Extract permission bits
     perms = mode & 0o777
     assert perms == 0o644, f"Expected permissions 0644, got {oct(perms)}"
-

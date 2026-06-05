@@ -130,9 +130,8 @@ class MjpegGrabber:
         if self._latest_exception is not None:
             latest_exc = self._latest_exception
             self._latest_exception = None  # clear
-            is_offline = (
-                self._consecutive_failures >= _OFFLINE_THRESHOLD
-                or isinstance(latest_exc, CameraOfflineError)
+            is_offline = self._consecutive_failures >= _OFFLINE_THRESHOLD or isinstance(
+                latest_exc, CameraOfflineError
             )
             if is_offline:
                 raise CameraOfflineError(
@@ -160,7 +159,7 @@ class MjpegGrabber:
                     resp.raise_for_status()
                     buf = b""
                     search_offset = 0
-                    
+
                     aiter = resp.aiter_bytes(_CHUNK_SIZE)
                     while True:
                         try:
@@ -286,10 +285,11 @@ class MjpegGrabber:
             self._broadcaster_task.cancel()
         self._broadcaster_task = None
         from sentinel.camera.errors import CameraClosedError
+
         for q in list(self._listeners):
             if not q.full():
                 with contextlib.suppress(asyncio.QueueFull):
                     q.put_nowait(CameraClosedError("Camera closed/reconfigured"))
         self._listeners.clear()
-        
+
         await self._client.aclose()

@@ -330,7 +330,9 @@ async def test_ml_callback_host_parameter() -> None:
     assert img_url.startswith("http://custom-sentinel-host:8000/__internal_snapshot/")
 
     # 2. Test when ml_callback_host is set to a full URL
-    settings_url = Settings(printer_ip="10.0.0.1", ml_callback_host="https://sentinel.example.com/subdir")
+    settings_url = Settings(
+        printer_ip="10.0.0.1", ml_callback_host="https://sentinel.example.com/subdir"
+    )
     client_mock_url = _make_http_client({"score": 0.1})
     with patch("sentinel.ml.client.httpx.AsyncClient", return_value=client_mock_url):
         ml = MlClient(settings_url, nonce_store=store)
@@ -340,5 +342,3 @@ async def test_ml_callback_host_parameter() -> None:
     params_sent_url = call_kwargs_url.kwargs.get("params", {})
     img_url_url = params_sent_url.get("img", "")
     assert img_url_url.startswith("https://sentinel.example.com/subdir/__internal_snapshot/")
-
-

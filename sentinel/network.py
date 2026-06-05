@@ -56,6 +56,7 @@ def validate_printer_ip(v: str) -> str:
 def validate_https(url: str) -> str:
     """Enforce HTTPS for external webhooks/URLs to prevent credential exposure."""
     import urllib.parse
+
     url = url.strip()
     if url:
         parsed = urllib.parse.urlparse(url)

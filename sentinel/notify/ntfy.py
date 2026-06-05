@@ -69,7 +69,6 @@ class NtfyNotifier:
                 f"raise ML_SCORE_THRESHOLD, currently {self._settings.ml_score_threshold})"
             ),
             priority="high",
-
             tags=["warning"],
             jpeg=photo_bytes,
         )

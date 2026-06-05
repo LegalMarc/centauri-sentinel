@@ -159,6 +159,7 @@ async def test_healthz_with_deps(app: object) -> None:
 
 async def test_healthz_exposes_bot_crash_count() -> None:
     from fastapi import FastAPI
+
     settings = _base_settings()
     app = create_app(settings)
     assert isinstance(app, FastAPI)
@@ -419,9 +420,7 @@ async def test_auth_cookie_secure_options(
 ) -> None:
     # 1. always
     settings_always = _base_settings(
-        auth_username="admin",
-        auth_password_bcrypt=_HASHED_PASS,
-        auth_cookie_secure="always"
+        auth_username="admin", auth_password_bcrypt=_HASHED_PASS, auth_cookie_secure="always"
     )
     app_always = create_app(settings_always, db=mock_db, watcher=mock_watcher, camera=mock_camera)
     async with _client(app_always) as c:
@@ -430,9 +429,7 @@ async def test_auth_cookie_secure_options(
 
     # 2. never
     settings_never = _base_settings(
-        auth_username="admin",
-        auth_password_bcrypt=_HASHED_PASS,
-        auth_cookie_secure="never"
+        auth_username="admin", auth_password_bcrypt=_HASHED_PASS, auth_cookie_secure="never"
     )
     app_never = create_app(settings_never, db=mock_db, watcher=mock_watcher, camera=mock_camera)
     async with _client(app_never) as c:
@@ -447,9 +444,7 @@ async def test_auth_cookie_secure_options(
 
     # 3. auto (default) - HTTP / no headers -> not Secure
     settings_auto = _base_settings(
-        auth_username="admin",
-        auth_password_bcrypt=_HASHED_PASS,
-        auth_cookie_secure="auto"
+        auth_username="admin", auth_password_bcrypt=_HASHED_PASS, auth_cookie_secure="auto"
     )
     app_auto = create_app(settings_auto, db=mock_db, watcher=mock_watcher, camera=mock_camera)
     async with _client(app_auto) as c:
@@ -469,6 +464,7 @@ async def test_auth_cookie_secure_options(
 
 async def test_auth_failed_login_delay(auth_app: object) -> None:
     import time
+
     async with _client(auth_app) as c:
         start_time = time.time()
         r = await c.get("/", auth=("admin", "wrongpass"))
@@ -535,6 +531,7 @@ async def test_auth_timing_oracle_checkpw_always_called(
     auth_app: object, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     calls = []
+
     def mock_checkpw(password: bytes, hashed: bytes) -> bool:
         calls.append((password, hashed))
         return False
@@ -557,12 +554,6 @@ async def test_auth_timing_oracle_checkpw_always_called(
     assert calls[0][0] == b"wrongpassword"
     # Ensure it checked against the actual password hash
     assert calls[0][1].decode() == _HASHED_PASS
-
-
-
-
-
-
 
 
 async def test_auth_cookie_grants_access(auth_app: object) -> None:
@@ -609,14 +600,18 @@ async def test_internal_snapshot_unknown_nonce(app: object) -> None:
 async def test_internal_snapshot_localhost_no_token(app: object) -> None:
     # Requests from localhost / loopback do not require a token
     async with _client(app) as c:
-        r = await c.get("/__internal_snapshot/doesnotexist", headers={"X-Forwarded-For": "127.0.0.1"})
+        r = await c.get(
+            "/__internal_snapshot/doesnotexist", headers={"X-Forwarded-For": "127.0.0.1"}
+        )
     assert r.status_code == 404
 
 
 async def test_internal_snapshot_external_no_token(app: object) -> None:
     # Requests from external IP without token bypass auth and hit 404
     async with _client(app) as c:
-        r = await c.get("/__internal_snapshot/doesnotexist", headers={"X-Forwarded-For": "192.168.1.100"})
+        r = await c.get(
+            "/__internal_snapshot/doesnotexist", headers={"X-Forwarded-For": "192.168.1.100"}
+        )
     assert r.status_code == 404
 
 
@@ -711,7 +706,6 @@ async def test_internal_snapshot_external_client_scope(
 
     await middleware(scope, mock_receive, mock_send)
     assert response_status == 404
-
 
 
 # ---------------------------------------------------------------------------
@@ -1195,14 +1189,18 @@ async def test_post_settings_invalid_values(
     assert r.status_code == 400
     assert expected_detail in r.json()["detail"]
 
+
 async def test_format_duration_edge_cases() -> None:
     from sentinel.web.routes import format_duration
+
     assert format_duration(0) == "—"
     assert "h" in format_duration(3600)
+
 
 async def test_endpoints_without_deps(app: object) -> None:
     from sentinel.config import Settings
     from sentinel.web.app import create_app
+
     bad_app = create_app(Settings(printer_ip="192.168.1.10"), db=None, watcher=None, camera=None)
     async with _client(bad_app) as c:
         assert (await c.get("/")).status_code == 503
@@ -1214,14 +1212,20 @@ async def test_endpoints_without_deps(app: object) -> None:
         assert (await c.post("/api/settings", json={})).status_code == 503
         assert (await c.get("/snapshot/12345678901234567890123456789012")).status_code == 503
 
-async def test_settings_update_exceptions(mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: AsyncMock) -> None:
+
+async def test_settings_update_exceptions(
+    mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: AsyncMock
+) -> None:
     from sentinel.config import Settings
     from sentinel.web.app import create_app
 
-    app = create_app(Settings(printer_ip="192.168.1.10"), db=mock_db, watcher=mock_watcher, camera=mock_camera)
+    app = create_app(
+        Settings(printer_ip="192.168.1.10"), db=mock_db, watcher=mock_watcher, camera=mock_camera
+    )
 
     async def mock_set(*args, **kwargs):
         raise Exception("db error")
+
     mock_db.set_setting = AsyncMock(side_effect=mock_set)
 
     async with _client(app) as c:
@@ -1232,10 +1236,17 @@ async def test_settings_update_exceptions(mock_db: AsyncMock, mock_watcher: Magi
         assert (await c.post("/api/settings", json={"ml_score_threshold": -1})).status_code == 400
         assert (await c.post("/api/settings", json={"ml_score_threshold": 1.5})).status_code == 400
         assert (await c.post("/api/settings", json={"ml_confirm_count": 0})).status_code == 400
-        assert (await c.post("/api/settings", json={"ml_poll_interval_seconds": 0})).status_code == 400
-        assert (await c.post("/api/settings", json={"detection_warmup_seconds": -1})).status_code == 400
+        assert (
+            await c.post("/api/settings", json={"ml_poll_interval_seconds": 0})
+        ).status_code == 400
+        assert (
+            await c.post("/api/settings", json={"detection_warmup_seconds": -1})
+        ).status_code == 400
         assert (await c.post("/api/settings", json={"printer_ip": "   "})).status_code == 400
-        assert (await c.post("/api/settings", json={"printer_ip": "bad_format!!!"})).status_code == 400
+        assert (
+            await c.post("/api/settings", json={"printer_ip": "bad_format!!!"})
+        ).status_code == 400
+
 
 async def test_snapshot_not_found_edge_cases(app: object, monkeypatch: pytest.MonkeyPatch) -> None:
     async with _client(app) as c:
@@ -1244,6 +1255,7 @@ async def test_snapshot_not_found_edge_cases(app: object, monkeypatch: pytest.Mo
         snap_id = "a" * 32
 
         from pathlib import Path
+
         monkeypatch.setattr(Path, "exists", lambda x: False)
         assert (await c.get(f"/snapshot/{snap_id}")).status_code == 404
 
@@ -1283,5 +1295,3 @@ async def test_status_page_renders_notification_failures_banner(
     assert "Telegram" in body
     assert "View Snapshot" in body
     assert "/snapshot/12345678901234567890123456789012" in body
-
-

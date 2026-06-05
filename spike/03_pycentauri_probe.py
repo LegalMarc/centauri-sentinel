@@ -17,6 +17,7 @@ NOTE: pycentauri's exact API is unknown until installed. This script uses a
 best-effort introspection pattern — adjust attribute/method names once the
 library is installed and `dir(client)` reveals the real surface.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -73,8 +74,11 @@ def main() -> None:
         if hasattr(pycentauri, attr):
             print(f"Trying constructor: pycentauri.{attr}(ip={args.ip!r})")
             try:
-                client = getattr(pycentauri, attr)(args.ip) if args.port is None \
+                client = (
+                    getattr(pycentauri, attr)(args.ip)
+                    if args.port is None
                     else getattr(pycentauri, attr)(args.ip, args.port)
+                )
                 break
             except Exception as e:
                 print(f"  failed: {e!r}")
@@ -88,7 +92,7 @@ def main() -> None:
 
     seen_states: set[str] = set()
     for i in range(args.samples):
-        print(f"-- status call {i+1}/{args.samples} --")
+        print(f"-- status call {i + 1}/{args.samples} --")
         resp = timed("status()", getattr(client, "status", lambda: None))
         if resp is not None:
             print(dump(resp))

@@ -326,7 +326,9 @@ def make_router(
             )
         except Exception as exc:
             logger.exception("Resume failed via Web API")
-            raise HTTPException(status_code=500, detail="Resume failed — check server logs") from exc
+            raise HTTPException(
+                status_code=500, detail="Resume failed — check server logs"
+            ) from exc
 
     @router.post("/api/control/stop")
     async def control_stop() -> Response:
@@ -392,6 +394,7 @@ def make_router(
             if printer_ip is not None:
                 try:
                     from sentinel.network import validate_printer_ip
+
                     printer_ip = await asyncio.to_thread(validate_printer_ip, printer_ip)
                 except ValueError as exc:
                     raise HTTPException(
@@ -519,6 +522,7 @@ def make_router(
 
         async def _gen() -> AsyncIterator[bytes]:
             from sentinel.camera.errors import CameraClosedError
+
             try:
                 async for frame in camera.stream_proxy():
                     yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
@@ -535,16 +539,18 @@ def make_router(
         reasons: list[str] = []
 
         if db is None:
-            body = json.dumps({
-                "status": "not ready",
-                "reasons": ["service not initialised"],
-                "subsystems": {
-                    "db": "unreachable",
-                    "watcher": "no heartbeat",
-                    "mqtt": "disconnected",
-                    "camera": "unreachable",
+            body = json.dumps(
+                {
+                    "status": "not ready",
+                    "reasons": ["service not initialised"],
+                    "subsystems": {
+                        "db": "unreachable",
+                        "watcher": "no heartbeat",
+                        "mqtt": "disconnected",
+                        "camera": "unreachable",
+                    },
                 }
-            })
+            )
             return Response(content=body, status_code=503, media_type="application/json")
 
         heartbeat = await db.get_heartbeat()
@@ -583,26 +589,28 @@ def make_router(
         subsystems = {
             "db": "reachable" if db_reachable else "unreachable",
             "watcher": (
-                "healthy"
-                if watcher_healthy
-                else ("stalled" if age is not None else "no heartbeat")
+                "healthy" if watcher_healthy else ("stalled" if age is not None else "no heartbeat")
             ),
             "mqtt": "connected" if mqtt_connected else "disconnected",
             "camera": "reachable" if camera_connected else "unreachable",
         }
 
         if reasons:
-            body = json.dumps({
-                "status": "not ready",
-                "reasons": reasons,
-                "subsystems": subsystems,
-            })
+            body = json.dumps(
+                {
+                    "status": "not ready",
+                    "reasons": reasons,
+                    "subsystems": subsystems,
+                }
+            )
             return Response(content=body, status_code=503, media_type="application/json")
 
-        body = json.dumps({
-            "status": "ready",
-            "subsystems": subsystems,
-        })
+        body = json.dumps(
+            {
+                "status": "ready",
+                "subsystems": subsystems,
+            }
+        )
         return Response(content=body, media_type="application/json")
 
     return router

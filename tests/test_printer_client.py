@@ -726,7 +726,10 @@ async def test_printer_client_stop_pending() -> None:
     assert client.stop_pending is False
 
     # Mock _send_command to fail
-    with patch.object(client, "_send_command", side_effect=RuntimeError("Timeout")), pytest.raises(RuntimeError):
+    with (
+        patch.object(client, "_send_command", side_effect=RuntimeError("Timeout")),
+        pytest.raises(RuntimeError),
+    ):
         await client.stop()
     assert client.stop_pending is True
 
@@ -734,4 +737,3 @@ async def test_printer_client_stop_pending() -> None:
     with patch.object(client, "_send_command", return_value=None):
         await client.stop()
     assert client.stop_pending is False
-

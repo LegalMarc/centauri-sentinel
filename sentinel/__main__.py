@@ -75,29 +75,31 @@ async def _run(args: argparse.Namespace) -> None:
 
     get_settings.cache_clear()
     settings = get_settings()
-    
+
     # Configure python-json-logger
-    logging.config.dictConfig({
-        "version": 1,
-        "disable_existing_loggers": False,
-        "formatters": {
-            "json": {
-                "()": "pythonjsonlogger.jsonlogger.JsonFormatter",
-                "fmt": "%(asctime)s %(levelname)s %(name)s %(message)s",
+    logging.config.dictConfig(
+        {
+            "version": 1,
+            "disable_existing_loggers": False,
+            "formatters": {
+                "json": {
+                    "()": "pythonjsonlogger.jsonlogger.JsonFormatter",
+                    "fmt": "%(asctime)s %(levelname)s %(name)s %(message)s",
+                },
             },
-        },
-        "handlers": {
-            "console": {
-                "class": "logging.StreamHandler",
-                "formatter": "json",
+            "handlers": {
+                "console": {
+                    "class": "logging.StreamHandler",
+                    "formatter": "json",
+                },
             },
-        },
-        "root": {
-            "handlers": ["console"],
-            "level": settings.log_level,
-        },
-    })
-    
+            "root": {
+                "handlers": ["console"],
+                "level": settings.log_level,
+            },
+        }
+    )
+
     if args.host:
         settings.bind_host = args.host
     if args.port:
@@ -127,6 +129,7 @@ async def _run(args: argparse.Namespace) -> None:
     db_printer_ip = await db.get_setting("printer_ip")
     if db_printer_ip:
         from sentinel.network import validate_printer_ip
+
         try:
             settings.printer_ip = validate_printer_ip(db_printer_ip)
         except ValueError as exc:
@@ -187,13 +190,13 @@ async def _run(args: argparse.Namespace) -> None:
         for notifier in notifiers:
             if hasattr(notifier, "close"):
                 cleanup_tasks.append(notifier.close())
-        
+
         if cleanup_tasks:
             results = await asyncio.gather(*cleanup_tasks, return_exceptions=True)
             for res in results:
                 if isinstance(res, Exception):
                     logger.exception("Failed to close a resource cleanly: %s", res)
-        
+
         await db.checkpoint()
         await db.close()
 

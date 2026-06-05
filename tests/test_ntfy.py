@@ -191,6 +191,7 @@ async def test_detection_alert_with_photo_uploads() -> None:
     x_msg = headers.get("X-Message", "")
     if x_msg.startswith("=?utf-8?B?"):
         import base64
+
         x_msg = base64.b64decode(x_msg[10:-2]).decode("utf-8")
     assert "85%" in x_msg
 
@@ -237,6 +238,7 @@ async def test_detection_alert_disk_read_failure(tmp_path: Any) -> None:
     assert "X-Filename" not in headers
     assert "Confidence 85%." in call_kwargs.get("content", "")
 
+
 async def test_send_text_calls_post() -> None:
     settings = Settings(printer_ip="10.0.0.1", ntfy_url="https://my-ntfy.local/test")
     mock_client = _make_http_client()
@@ -246,6 +248,7 @@ async def test_send_text_calls_post() -> None:
     mock_client.post.assert_called_once()
     assert mock_client.post.call_args.kwargs.get("content") == "hello"
 
+
 async def test_send_print_started_alert() -> None:
     settings = Settings(printer_ip="10.0.0.1", ntfy_url="https://my-ntfy.local/test")
     mock_client = _make_http_client()
@@ -253,6 +256,7 @@ async def test_send_print_started_alert() -> None:
         notifier = NtfyNotifier(settings)
         await notifier.send_print_started_alert("file.gcode", b"jpeg")
     mock_client.post.assert_called_once()
+
 
 async def test_send_print_completed_alert() -> None:
     settings = Settings(printer_ip="10.0.0.1", ntfy_url="https://my-ntfy.local/test")
@@ -262,6 +266,7 @@ async def test_send_print_completed_alert() -> None:
         await notifier.send_print_completed_alert("file.gcode", 3661.0, b"jpeg")
     mock_client.post.assert_called_once()
 
+
 async def test_send_external_pause_alert() -> None:
     settings = Settings(printer_ip="10.0.0.1", ntfy_url="https://my-ntfy.local/test")
     mock_client = _make_http_client()
@@ -270,8 +275,10 @@ async def test_send_external_pause_alert() -> None:
         await notifier.send_external_pause_alert(b"jpeg")
     mock_client.post.assert_called_once()
 
+
 async def test_ntfy_rfc2047_header_encoding() -> None:
     import base64
+
     settings = Settings(printer_ip="10.0.0.1", ntfy_url="https://my-ntfy.local/test")
     mock_client = _make_http_client()
 
@@ -294,6 +301,7 @@ async def test_ntfy_rfc2047_header_encoding() -> None:
     assert "My" in decoded_msg
     assert "\n" in decoded_msg
     assert "🚀" in decoded_msg
+
 
 async def test_ntfy_no_encoding_for_pure_ascii() -> None:
     settings = Settings(printer_ip="10.0.0.1", ntfy_url="https://my-ntfy.local/test")

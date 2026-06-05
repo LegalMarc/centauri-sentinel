@@ -38,6 +38,7 @@ async def test_dispatch_all_methods_fire_and_forget():
     notifier1.send_print_completed_alert.assert_called_once_with("file.gcode", 100.0, b"jpeg")
     notifier1.send_external_pause_alert.assert_called_once_with(b"jpeg")
 
+
 async def test_dispatch_retry_swallows_exceptions():
     notifier1 = MagicMock()
     # Always fails
@@ -71,6 +72,7 @@ async def test_dispatch_retry_swallows_exceptions():
 
 async def test_concurrent_tasks_limit():
     notifier = MagicMock()
+
     # Slow call that sleeps
     async def slow_call(*args, **kwargs):
         await asyncio.sleep(10.0)

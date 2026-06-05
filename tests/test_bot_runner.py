@@ -205,8 +205,10 @@ async def test_bot_runner_stop_times_out() -> None:
 # BotRunner Supervisor Tests
 # ---------------------------------------------------------------------------
 
+
 async def test_bot_runner_supervisor_restart_and_alert() -> None:
     import asyncio
+
     handler = _make_handler()
     app, builder = _make_ptb_app()
     dispatcher = MagicMock()
@@ -216,6 +218,7 @@ async def test_bot_runner_supervisor_restart_and_alert() -> None:
 
     # Use a mock sleep that yields but does not delay
     original_sleep = asyncio.sleep
+
     async def mock_sleep(delay: float) -> None:
         await original_sleep(0)
 
@@ -246,4 +249,3 @@ async def test_bot_runner_supervisor_restart_and_alert() -> None:
 
         assert runner.crash_count >= 1
         await runner.stop()
-

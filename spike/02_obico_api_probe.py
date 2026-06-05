@@ -14,6 +14,7 @@ What it checks:
 
 Output is a citable block for docs/verified-assumptions.md.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -50,39 +51,62 @@ async def main(args: argparse.Namespace) -> None:
         results = []
 
         # 1. URL-fetch mode with token as query param.
-        results.append(await try_request(
-            client, "GET /p/ ?img=<url>&token=<t>", "GET",
-            f"{args.base}/p/", params={"img": args.public_image_url, "token": args.token},
-        ))
+        results.append(
+            await try_request(
+                client,
+                "GET /p/ ?img=<url>&token=<t>",
+                "GET",
+                f"{args.base}/p/",
+                params={"img": args.public_image_url, "token": args.token},
+            )
+        )
 
         # 2. URL-fetch mode with bearer header.
-        results.append(await try_request(
-            client, "GET /p/ ?img=<url>  (bearer header)", "GET",
-            f"{args.base}/p/", params={"img": args.public_image_url},
-            headers={"Authorization": f"Bearer {args.token}"},
-        ))
+        results.append(
+            await try_request(
+                client,
+                "GET /p/ ?img=<url>  (bearer header)",
+                "GET",
+                f"{args.base}/p/",
+                params={"img": args.public_image_url},
+                headers={"Authorization": f"Bearer {args.token}"},
+            )
+        )
 
         # 3. POST multipart upload with bearer header.
-        results.append(await try_request(
-            client, "POST /p/  (multipart, bearer)", "POST",
-            f"{args.base}/p/",
-            files={"img": ("frame.jpg", image_bytes, "image/jpeg")},
-            headers={"Authorization": f"Bearer {args.token}"},
-        ))
+        results.append(
+            await try_request(
+                client,
+                "POST /p/  (multipart, bearer)",
+                "POST",
+                f"{args.base}/p/",
+                files={"img": ("frame.jpg", image_bytes, "image/jpeg")},
+                headers={"Authorization": f"Bearer {args.token}"},
+            )
+        )
 
         # 4. POST multipart with token as query param.
-        results.append(await try_request(
-            client, "POST /p/  (multipart, ?token=)", "POST",
-            f"{args.base}/p/",
-            files={"img": ("frame.jpg", image_bytes, "image/jpeg")},
-            params={"token": args.token},
-        ))
+        results.append(
+            await try_request(
+                client,
+                "POST /p/  (multipart, ?token=)",
+                "POST",
+                f"{args.base}/p/",
+                files={"img": ("frame.jpg", image_bytes, "image/jpeg")},
+                params={"token": args.token},
+            )
+        )
 
         # 5. No-auth control (expect 401/403).
-        results.append(await try_request(
-            client, "GET /p/  (no auth, control)", "GET",
-            f"{args.base}/p/", params={"img": args.public_image_url},
-        ))
+        results.append(
+            await try_request(
+                client,
+                "GET /p/  (no auth, control)",
+                "GET",
+                f"{args.base}/p/",
+                params={"img": args.public_image_url},
+            )
+        )
 
     print("\n=== VERIFIED ASSUMPTION: obico-ml API ===")
     print("Fill in for docs/verified-assumptions.md, based on which probes returned 2xx:")

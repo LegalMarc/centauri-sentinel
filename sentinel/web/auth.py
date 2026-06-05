@@ -75,9 +75,9 @@ class AuthMiddleware:
         # Store auth attempts by IP: [timestamps...] (max 10 per minute)
         # Bounded by OrderedDict to prevent memory leak (OOM) from many IPs
         import collections
+
         self._auth_attempts: collections.OrderedDict[str, list[float]] = collections.OrderedDict()
         self._auth_cookie_secure = settings.auth_cookie_secure
-
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -167,15 +167,19 @@ class AuthMiddleware:
                     headers_dict = {k.lower(): v for k, v in headers.items()}
                     proto = headers_dict.get(b"x-forwarded-proto", b"").decode().lower()
                     scheme = scope.get("scheme", "http").lower()
-                    is_secure = (scheme == "https" or proto == "https")
+                    is_secure = scheme == "https" or proto == "https"
                 secure_flag = "; Secure" if is_secure else ""
 
                 query_string = scope.get("query_string", b"").decode()
-                
+
                 # Prevent open redirects: ensure path starts with a single slash,
                 # and doesn't use scheme-relative URLs (//) or backslashes (\).
                 safe_path = "/"
-                if path.startswith("/") and not path.startswith("//") and not path.startswith("/\\"):
+                if (
+                    path.startswith("/")
+                    and not path.startswith("//")
+                    and not path.startswith("/\\")
+                ):
                     safe_path = path
 
                 redirect_url = f"{safe_path}?{query_string}" if query_string else safe_path

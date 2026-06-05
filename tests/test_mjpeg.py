@@ -57,10 +57,12 @@ def _make_stream_response(chunks: list[bytes]) -> MagicMock:
     async def _aiter_bytes(_size: int) -> AsyncIterator[bytes]:
         for chunk in chunks:
             import asyncio
+
             await asyncio.sleep(0)
             yield chunk
         # Block forever so the stream doesn't end prematurely, like a real MJPEG stream
         import asyncio
+
         await asyncio.Event().wait()
 
     resp = MagicMock()
@@ -249,6 +251,7 @@ async def test_stream_proxy_backs_off_on_read_error() -> None:
     mock_client.stream = MagicMock(side_effect=[stream_cm1, stream_cm2, stream_cm2])
 
     import asyncio
+
     _real_sleep = asyncio.sleep
     sleep_calls: list[float] = []
 
@@ -344,6 +347,7 @@ async def test_stream_proxy_limit_exceeded() -> None:
 
 async def test_stream_proxy_duration_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     import time
+
     resp = _make_stream_response([_JPEG, _JPEG])
     mock_client = _make_httpx_client(resp)
 
@@ -365,6 +369,7 @@ async def test_camera_close_yields_camera_closed_error() -> None:
     import asyncio
 
     from sentinel.camera.errors import CameraClosedError
+
     grabber = MjpegGrabber(_SETTINGS)
     q: asyncio.Queue[object] = asyncio.Queue()
     grabber._listeners.add(q)
@@ -375,6 +380,7 @@ async def test_camera_close_yields_camera_closed_error() -> None:
 
 async def test_stream_proxy_cancellation_during_grab() -> None:
     import asyncio
+
     resp = _make_stream_response([])
     mock_client = _make_httpx_client(resp)
 
@@ -387,6 +393,3 @@ async def test_stream_proxy_cancellation_during_grab() -> None:
         with pytest.raises(CameraReadError) as exc_info:
             await grab_task
         assert "was cancelled" in str(exc_info.value)
-
-
-

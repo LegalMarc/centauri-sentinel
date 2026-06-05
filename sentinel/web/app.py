@@ -79,6 +79,7 @@ def create_app(
     @app.middleware("http")
     async def add_csp_header(request: Request, call_next: Any) -> Response:
         import secrets
+
         nonce = secrets.token_urlsafe(16)
         request.state.csp_nonce = nonce
         response = cast("Response", await call_next(request))

@@ -410,6 +410,7 @@ class BotCommandHandler:
             self._pending_stops[user.id] = time.monotonic()
 
             from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
             keyboard = InlineKeyboardMarkup(
                 [
                     [
@@ -424,6 +425,7 @@ class BotCommandHandler:
             user = cq.from_user
             self._pending_stops.pop(user.id, None)
             from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
             keyboard = InlineKeyboardMarkup(
                 [
                     [
@@ -456,10 +458,9 @@ class BotCommandHandler:
         elif data == "snooze":
             await self._watcher.snooze(self._snooze_seconds)
             from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
             keyboard = InlineKeyboardMarkup(
-                [
-                    [InlineKeyboardButton("Resume Monitoring", callback_data="enable")]
-                ]
+                [[InlineKeyboardButton("Resume Monitoring", callback_data="enable")]]
             )
             snooze_mins = int(self._snooze_seconds // 60)
             await self._edit_text_or_caption(

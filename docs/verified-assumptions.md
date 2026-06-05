@@ -1,7 +1,7 @@
 # Verified Assumptions — centauri-sentinel spike #0
 
-Conducted: 2026-05-23  
-Printer under test: Elegoo Centauri Carbon 2 @ 192.168.40.23  
+Conducted: 2026-05-23
+Printer under test: Elegoo Centauri Carbon 2 @ 192.168.40.23
 Spike scripts: `spike/01_obico_image_inspect.sh`, `spike/02_obico_api_probe.py`,
 `spike/03_pycentauri_probe.py` (adapted to async), `spike/04_mjpeg_soak.py` (adapted for Python 3.10)
 

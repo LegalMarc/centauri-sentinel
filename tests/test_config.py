@@ -216,15 +216,21 @@ def test_printer_ip_validation_invalid() -> None:
     with pytest.raises(ValueError, match="printer_ip must be a valid IP"):
         Settings(printer_ip="invalid_ip_or_hostname_!!")
 
-def test_printer_ip_validation_hostname_resolves_to_loopback(monkeypatch: pytest.MonkeyPatch) -> None:
+
+def test_printer_ip_validation_hostname_resolves_to_loopback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr("sentinel.network.socket.gethostbyname", lambda x: "127.0.0.1")
     with pytest.raises(ValueError, match="SSRF Protection"):
         Settings(printer_ip="malicious.com")
 
+
 def test_printer_ip_validation_hostname_resolution_fails(monkeypatch: pytest.MonkeyPatch) -> None:
     import socket
+
     def mock_gethostbyname(x: str) -> str:
         raise socket.gaierror("not found")
+
     monkeypatch.setattr("sentinel.network.socket.gethostbyname", mock_gethostbyname)
     with pytest.raises(ValueError, match="SSRF Protection: Cannot resolve hostname"):
         Settings(printer_ip="notfound.local")
@@ -294,5 +300,3 @@ def test_resume_cooldown_seconds_valid() -> None:
 def test_resume_cooldown_seconds_invalid() -> None:
     with pytest.raises(ValueError, match="RESUME_COOLDOWN_SECONDS must be at least 0"):
         Settings(resume_cooldown_seconds=-1)
-
-

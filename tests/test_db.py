@@ -418,6 +418,7 @@ async def test_db_concurrency_heartbeats(db: Database) -> None:
             await asyncio.sleep(0.001)
 
     import asyncio
+
     await asyncio.gather(
         run_heartbeats(),
         run_writes(),
@@ -451,8 +452,3 @@ async def test_explain_query_plan_indices(db: Database) -> None:
         rows = await cur.fetchall()
         details = [row["detail"] for row in rows]
         assert any("idx_pause_history_result" in detail for detail in details)
-
-
-
-
-

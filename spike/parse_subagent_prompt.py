@@ -2,6 +2,7 @@ import json
 
 subagent_transcript_path = "spike/subagent_transcript.jsonl"
 
+
 def main() -> None:
     with open(subagent_transcript_path) as f:
         first_line = f.readline()
@@ -15,6 +16,7 @@ def main() -> None:
         print("Wrote prompt to spike/full_subagent_prompt.txt")
     except Exception as e:
         print("Error parsing first line:", e)
+
 
 if __name__ == "__main__":
     main()

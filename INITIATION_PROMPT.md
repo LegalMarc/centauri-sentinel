@@ -31,7 +31,7 @@ Execute tickets **#0 through #13 in order**, autonomously, in a loop. **Stop bef
    - An acceptance criterion that cannot be met without a decision I have to make (scope change, security tradeoff, missing external info that the spike could not resolve).
    - A persistent CI failure you cannot diagnose after two honest attempts.
    - Anything that would cost money, send messages externally, or affect systems beyond this repo and the local Coolify instance.
-   
+
    Minor ambiguities: pick the most practical interpretation, document it in the PR description under "Assumptions", continue. Do **not** stop for these.
 
 5. **No scope creep.** v0.1 scope is locked: Telegram + ntfy + read-only status page. No Tailwind, no HTMX, no SSE. If you find yourself wanting to add something not in `PLAN.md` or `ISSUES.md`, that desire is wrong — note it as a v0.2 candidate in `PROGRESS.md` and move on.

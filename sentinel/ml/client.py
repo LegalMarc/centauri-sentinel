@@ -98,7 +98,9 @@ class MlClient:
             async for attempt in tenacity.AsyncRetrying(
                 stop=tenacity.stop_after_attempt(3),
                 wait=tenacity.wait_exponential(multiplier=0.5, min=0.5, max=2.0),
-                retry=tenacity.retry_if_exception_type((httpx.RequestError, httpx.HTTPStatusError, httpx.TimeoutException)),
+                retry=tenacity.retry_if_exception_type(
+                    (httpx.RequestError, httpx.HTTPStatusError, httpx.TimeoutException)
+                ),
                 reraise=True,
             ):
                 with attempt:
@@ -109,7 +111,7 @@ class MlClient:
                     )
                     resp.raise_for_status()
                     return self._parse(resp.json())
-            
+
             # This line should be unreachable due to reraise=True
             return _FAIL_OPEN
         finally:

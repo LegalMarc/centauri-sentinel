@@ -50,7 +50,9 @@ class Database:
                 logger.warning("Database WAL checkpoint failed: %s", exc)
 
     @asynccontextmanager
-    async def _write(self, clear_analytics_cache: bool = False) -> AsyncGenerator[aiosqlite.Connection, None]:
+    async def _write(
+        self, clear_analytics_cache: bool = False
+    ) -> AsyncGenerator[aiosqlite.Connection, None]:
         # Reads do NOT need this lock: aiosqlite serialises via its own
         # connection thread and SQLite WAL provides snapshot isolation.
         async with self._lock:
@@ -293,8 +295,7 @@ class Database:
                 (cutoff,),
             )
             pau = await db.execute(
-                "DELETE FROM pause_history WHERE ts_utc < "
-                "strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?)",
+                "DELETE FROM pause_history WHERE ts_utc < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?)",
                 (cutoff,),
             )
             job = await db.execute(
@@ -336,9 +337,7 @@ class Database:
         ) as cur_avg:
             row_avg = await cur_avg.fetchone()
             avg_duration = (
-                row_avg["avg_duration"]
-                if row_avg and row_avg["avg_duration"] is not None
-                else 0.0
+                row_avg["avg_duration"] if row_avg and row_avg["avg_duration"] is not None else 0.0
             )
 
         summary = {

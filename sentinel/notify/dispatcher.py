@@ -114,36 +114,46 @@ class NotificationDispatcher:
     ) -> None:
         for n in self._notifiers:
             channel_name = type(n).__name__.replace("Notifier", "")
+
             async def _call(n: Notifier = n) -> None:
                 await n.send_detection_alert(score, snapshot_id, jpeg)
+
             self._fire_and_forget(self._with_retry(_call, channel_name, snapshot_id))
 
     def dispatch_stall(self) -> None:
         for n in self._notifiers:
             channel_name = type(n).__name__.replace("Notifier", "")
+
             async def _call(n: Notifier = n) -> None:
                 await n.send_stall_alert()
+
             self._fire_and_forget(self._with_retry(_call, channel_name))
 
     def dispatch_camera_offline(self) -> None:
         for n in self._notifiers:
             channel_name = type(n).__name__.replace("Notifier", "")
+
             async def _call(n: Notifier = n) -> None:
                 await n.send_camera_offline_alert()
+
             self._fire_and_forget(self._with_retry(_call, channel_name))
 
     def dispatch_text(self, text: str) -> None:
         for n in self._notifiers:
             channel_name = type(n).__name__.replace("Notifier", "")
+
             async def _call(n: Notifier = n) -> None:
                 await n.send_text(text)
+
             self._fire_and_forget(self._with_retry(_call, channel_name))
 
     def dispatch_print_started(self, filename: str | None, jpeg: bytes | None = None) -> None:
         for n in self._notifiers:
             channel_name = type(n).__name__.replace("Notifier", "")
+
             async def _call(n: Notifier = n) -> None:
                 await n.send_print_started_alert(filename, jpeg)
+
             self._fire_and_forget(self._with_retry(_call, channel_name))
 
     def dispatch_print_completed(
@@ -151,13 +161,17 @@ class NotificationDispatcher:
     ) -> None:
         for n in self._notifiers:
             channel_name = type(n).__name__.replace("Notifier", "")
+
             async def _call(n: Notifier = n) -> None:
                 await n.send_print_completed_alert(filename, elapsed_seconds, jpeg)
+
             self._fire_and_forget(self._with_retry(_call, channel_name))
 
     def dispatch_external_pause(self, jpeg: bytes | None = None) -> None:
         for n in self._notifiers:
             channel_name = type(n).__name__.replace("Notifier", "")
+
             async def _call(n: Notifier = n) -> None:
                 await n.send_external_pause_alert(jpeg)
+
             self._fire_and_forget(self._with_retry(_call, channel_name))

@@ -33,16 +33,17 @@ async def test_main_cli_overrides() -> None:
 
     orig_env = dict(os.environ)
     try:
-        with patch("sentinel.db.repo.Database", return_value=mock_db), \
-             patch("sentinel.camera.mjpeg.MjpegGrabber", return_value=mock_camera), \
-             patch("sentinel.printer.client.PrinterClient", return_value=mock_printer), \
-             patch("sentinel.ml.client.MlClient", return_value=mock_ml), \
-             patch("sentinel.watcher.loop.WatcherLoop", return_value=mock_watcher), \
-             patch("sentinel.web.app.create_app"), \
-             patch("sentinel.safety.check_external_bind"), \
-             patch("uvicorn.Config") as mock_config, \
-             patch("uvicorn.Server") as mock_server_class:
-
+        with (
+            patch("sentinel.db.repo.Database", return_value=mock_db),
+            patch("sentinel.camera.mjpeg.MjpegGrabber", return_value=mock_camera),
+            patch("sentinel.printer.client.PrinterClient", return_value=mock_printer),
+            patch("sentinel.ml.client.MlClient", return_value=mock_ml),
+            patch("sentinel.watcher.loop.WatcherLoop", return_value=mock_watcher),
+            patch("sentinel.web.app.create_app"),
+            patch("sentinel.safety.check_external_bind"),
+            patch("uvicorn.Config") as mock_config,
+            patch("uvicorn.Server") as mock_server_class,
+        ):
             mock_server = MagicMock()
             mock_server.serve = AsyncMock()
             mock_server_class.return_value = mock_server
@@ -57,4 +58,5 @@ async def test_main_cli_overrides() -> None:
         os.environ.clear()
         os.environ.update(orig_env)
         from sentinel.config import get_settings
+
         get_settings.cache_clear()
