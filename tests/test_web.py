@@ -1152,9 +1152,8 @@ async def test_post_settings_success(
     mock_db.set_setting.assert_any_call("ml_poll_interval_seconds", "6")
     mock_db.set_setting.assert_any_call("detection_warmup_seconds", "30")
 
-    assert mock_watcher.printer._host == "10.0.0.42"
-    assert mock_camera._url.startswith("http://10.0.0.42:")
-    printer.close.assert_called_once()
+    printer.reconfigure.assert_called_once_with("10.0.0.42")
+    mock_camera.reconfigure.assert_called_once_with("10.0.0.42")
 
 
 @pytest.mark.parametrize(
