@@ -1153,7 +1153,7 @@ async def test_post_settings_success(
     mock_db.set_setting.assert_any_call("detection_warmup_seconds", "30")
 
     printer.reconfigure.assert_called_once_with("10.0.0.42")
-    mock_camera.reconfigure.assert_called_once_with("10.0.0.42")
+    mock_camera.reconfigure.assert_called_once_with("http://10.0.0.42:8080/mjpeg")
 
 
 @pytest.mark.parametrize(
