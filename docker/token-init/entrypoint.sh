@@ -11,4 +11,4 @@ else
     echo "token-init: generated new ML API token at $TOKEN_FILE."
 fi
 
-chmod 644 "$TOKEN_FILE"
+chmod 600 "$TOKEN_FILE"
