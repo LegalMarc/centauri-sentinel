@@ -122,7 +122,7 @@ class AuthMiddleware:
             await self._app(scope, receive, send)
             return
 
-        if path in ("/healthz", "/readyz"):
+        if path in ("/healthz", "/readyz", "/logout"):
             await self._app(scope, receive, send)
             return
 

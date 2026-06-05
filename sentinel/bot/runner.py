@@ -107,8 +107,9 @@ class BotRunner:
 
         while self._running:
             if not self.is_running():
-                # We are crashed or not started yet!
-                self.crash_count += 1
+                # Only count as a new crash when transitioning from running to not-running
+                if was_running:
+                    self.crash_count += 1
                 self._consecutive_failures += 1
                 healthy_seconds = 0
 

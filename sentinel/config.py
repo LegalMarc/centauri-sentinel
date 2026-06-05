@@ -45,6 +45,7 @@ class Settings(BaseSettings):
     auto_stop_timeout_seconds: int = 1800
     snapshot_cleanup_interval_seconds: int = 3600
     snapshot_retention_limit: int = 50
+    event_retention_days: int = 0  # 0 = unlimited; otherwise prune rows older than this
     resume_cooldown_seconds: int = 5
 
     # Notifications
@@ -200,6 +201,22 @@ class Settings(BaseSettings):
     def _validate_resume_cooldown_seconds(cls, v: int) -> int:
         if v < 0:
             msg = "RESUME_COOLDOWN_SECONDS must be at least 0"
+            raise ValueError(msg)
+        return v
+
+    @field_validator("auto_stop_timeout_seconds")
+    @classmethod
+    def _validate_auto_stop_timeout(cls, v: int) -> int:
+        if v != 0 and v < 60:
+            msg = "AUTO_STOP_TIMEOUT_SECONDS must be 0 (disabled) or at least 60 seconds"
+            raise ValueError(msg)
+        return v
+
+    @field_validator("event_retention_days")
+    @classmethod
+    def _validate_event_retention_days(cls, v: int) -> int:
+        if v < 0:
+            msg = "EVENT_RETENTION_DAYS must be 0 (unlimited) or a positive number of days"
             raise ValueError(msg)
         return v
 

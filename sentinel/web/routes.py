@@ -65,6 +65,20 @@ def make_router(
     router = APIRouter()
     stall_seconds = settings.watcher_stall_seconds
 
+    @router.post("/logout")
+    async def logout() -> Response:
+        """Clear the session cookie."""
+        response = Response(content=json.dumps({"status": "ok"}), media_type="application/json")
+        response.set_cookie(
+            key="session",
+            value="",
+            path="/",
+            httponly=True,
+            samesite="strict",
+            max_age=0,
+        )
+        return response
+
     @router.get("/", response_class=HTMLResponse)
     async def status_page(request: Request) -> Response:
         if db is None or templates is None or watcher is None:
@@ -278,7 +292,7 @@ def make_router(
         except Exception as exc:
             logger.exception("Pause failed via Web API")
             await db.record_pause(source="web", result="error", error_message=str(exc))
-            raise HTTPException(status_code=500, detail=f"Pause failed: {exc}") from exc
+            raise HTTPException(status_code=500, detail="Pause failed — check server logs") from exc
         if sent:
             await db.record_pause(source="web", result="ok")
             await watcher.get_fresh_status(force=True)
@@ -312,7 +326,7 @@ def make_router(
             )
         except Exception as exc:
             logger.exception("Resume failed via Web API")
-            raise HTTPException(status_code=500, detail=f"Resume failed: {exc}") from exc
+            raise HTTPException(status_code=500, detail="Resume failed — check server logs") from exc
 
     @router.post("/api/control/stop")
     async def control_stop() -> Response:
@@ -327,7 +341,7 @@ def make_router(
             )
         except Exception as exc:
             logger.exception("Stop failed via Web API")
-            raise HTTPException(status_code=500, detail=f"Stop failed: {exc}") from exc
+            raise HTTPException(status_code=500, detail="Stop failed — check server logs") from exc
 
     @router.post("/api/control/snooze")
     async def control_snooze(request: Request) -> Response:
@@ -342,6 +356,12 @@ def make_router(
                 if seconds < 0:
                     raise HTTPException(
                         status_code=400, detail="Snooze duration cannot be negative"
+                    )
+                if seconds > 3600:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Snooze duration cannot exceed 3600 seconds (1 hour). "
+                        "Use the disable endpoint for longer suppression.",
                     )
         except HTTPException:
             raise
@@ -380,12 +400,11 @@ def make_router(
                     ) from exc
 
                 await db.set_setting("printer_ip", printer_ip)
-                watcher.printer._host = printer_ip
-                if hasattr(camera, "close"):
-                    await camera.close()
-                camera._url = f"http://{printer_ip}:{settings.printer_mjpeg_port}{settings.printer_mjpeg_path}"
-                if hasattr(watcher.printer, "close"):
-                    await watcher.printer.close()
+                new_camera_url = f"http://{printer_ip}:{settings.printer_mjpeg_port}{settings.printer_mjpeg_path}"
+                if hasattr(camera, "reconfigure"):
+                    await camera.reconfigure(new_camera_url)
+                if hasattr(watcher.printer, "reconfigure"):
+                    await watcher.printer.reconfigure(printer_ip)
 
             if ml_confirm_count is not None:
                 ml_confirm_count_val = int(ml_confirm_count)
@@ -428,7 +447,38 @@ def make_router(
         except Exception as exc:
             logger.exception("Failed to update settings")
             raise HTTPException(
-                status_code=500, detail=f"Failed to update settings: {exc}"
+                status_code=500, detail="Failed to update settings — check server logs"
+            ) from exc
+
+    @router.delete("/api/data/clear")
+    async def clear_all_data() -> Response:
+        """Delete all detection events, pause history, print jobs, and snapshot files."""
+        if db is None:
+            raise HTTPException(status_code=503, detail="Service not initialised")
+        try:
+            counts = await db.clear_all_data()
+
+            # Also clean up snapshot files from disk
+            snapshots_dir = Path(db._path).parent / "snapshots"
+            files_removed = 0
+            if snapshots_dir.exists():
+                for f in snapshots_dir.iterdir():
+                    if f.suffix == ".jpg":
+                        try:
+                            f.unlink()
+                            files_removed += 1
+                        except OSError:
+                            logger.warning("Failed to remove snapshot file: %s", f)
+
+            counts["snapshot_files"] = files_removed
+            return Response(
+                content=json.dumps({"status": "ok", "cleared": counts}),
+                media_type="application/json",
+            )
+        except Exception as exc:
+            logger.exception("Failed to clear data")
+            raise HTTPException(
+                status_code=500, detail="Failed to clear data — check server logs"
             ) from exc
 
     @router.get("/snapshot")

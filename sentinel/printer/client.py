@@ -277,6 +277,11 @@ class PrinterClient:
             logger.exception("Stop command failed, flag remains pending")
             raise
 
+    async def reconfigure(self, host: str) -> None:
+        """Update the printer IP address and restart the connection."""
+        self._host = host
+        await self.close()
+
     async def close(self) -> None:
         """Clean up the persistent background listener and reset state."""
         if self._listener_task is not None:

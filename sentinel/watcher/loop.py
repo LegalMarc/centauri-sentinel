@@ -114,6 +114,11 @@ class WatcherLoop:
     async def run_forever(self) -> None:
         """Start the main loop and heartbeat watchdog; runs until cancelled."""
         self._running = True
+        # Run cleanup once on startup to handle orphans from previous crashes
+        try:
+            await self.cleanup_old_snapshots()
+        except Exception:
+            logger.exception("Startup snapshot cleanup failed (non-fatal)")
         try:
             async with asyncio.TaskGroup() as tg:
                 tg.create_task(self._loop())
@@ -673,9 +678,18 @@ class WatcherLoop:
         await asyncio.to_thread(_cleanup_disk)
 
     async def _periodic_cleanup(self) -> None:
-        """Periodic background task that runs snapshot cleanup on a configurable interval."""
+        """Periodic background task that runs snapshot cleanup and event retention pruning."""
         while self._running:
             await self.cleanup_old_snapshots()
+
+            # Prune old events if retention is configured
+            retention_days = self._settings.event_retention_days
+            if retention_days > 0:
+                try:
+                    await self._db.prune_old_events(retention_days)
+                except Exception:
+                    logger.exception("Failed to prune old events")
+
             try:
                 interval = int(self._settings.snapshot_cleanup_interval_seconds)
             except (ValueError, TypeError):

@@ -1086,6 +1086,17 @@ footer a {
     <p>No printer pauses have been recorded.</p>
     {% endif %}
   </div>
+
+  <div class="controls-panel" style="margin-top: 2rem; border-color: var(--danger-color);">
+    <div class="controls-header">
+      <h3>🗑️ Data Management</h3>
+    </div>
+    <p style="color: var(--text-secondary); font-size: 0.9rem; margin-bottom: 1rem;">
+      Clear all recorded detection events, pause history, print jobs, and snapshot images.
+      This action cannot be undone.
+    </p>
+    <button id="btn-clear-data" class="btn btn-danger" style="width: auto;">🗑️ Clear All History</button>
+  </div>
 </div>
 
 <!-- SYSTEM & ML SETTINGS TAB -->
@@ -1574,6 +1585,28 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("btn-stop")?.addEventListener("click", () => confirmStop());
   document.getElementById("btn-snooze")?.addEventListener("click", () => snoozeDetection());
   document.getElementById("settings-form")?.addEventListener("submit", (e) => saveSettings(e));
+  document.getElementById("btn-clear-data")?.addEventListener("click", () => {
+    if (!confirm("Are you sure you want to delete ALL detection events, pause history, print jobs, and snapshot images? This cannot be undone.")) return;
+    const btn = document.getElementById("btn-clear-data");
+    btn.disabled = true;
+    btn.textContent = "🗑️ Clearing...";
+    fetch('/api/data/clear', { method: 'DELETE' })
+      .then(res => {
+        if (res.ok) {
+          showToast("All history cleared successfully", "success");
+          setTimeout(() => location.reload(), 1000);
+        } else {
+          showToast("Failed to clear history", "danger");
+          btn.disabled = false;
+          btn.textContent = "🗑️ Clear All History";
+        }
+      })
+      .catch(err => {
+        showToast(`Error: ${err.message}`, "danger");
+        btn.disabled = false;
+        btn.textContent = "🗑️ Clear All History";
+      });
+  });
 });
 </script>
 </body>

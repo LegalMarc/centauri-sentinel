@@ -269,46 +269,85 @@ class Database:
             rows = await cur.fetchall()
             return [dict(r) for r in rows]
 
+    async def clear_all_data(self) -> dict[str, int]:
+        """Delete all events, pauses, and jobs. Returns counts per table."""
+        async with self._write(clear_analytics_cache=True) as db:
+            det = await db.execute("DELETE FROM detection_events")
+            pau = await db.execute("DELETE FROM pause_history")
+            job = await db.execute("DELETE FROM print_jobs")
+            return {
+                "detections": det.rowcount or 0,
+                "pauses": pau.rowcount or 0,
+                "jobs": job.rowcount or 0,
+            }
+
+    async def prune_old_events(self, retention_days: int) -> dict[str, int]:
+        """Delete rows older than retention_days. Returns counts per table."""
+        if retention_days <= 0:
+            return {"detections": 0, "pauses": 0, "jobs": 0}
+        cutoff = f"-{retention_days} days"
+        async with self._write(clear_analytics_cache=True) as db:
+            det = await db.execute(
+                "DELETE FROM detection_events WHERE ts_utc < "
+                "strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?)",
+                (cutoff,),
+            )
+            pau = await db.execute(
+                "DELETE FROM pause_history WHERE ts_utc < "
+                "strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?)",
+                (cutoff,),
+            )
+            job = await db.execute(
+                "DELETE FROM print_jobs WHERE started_at < "
+                "strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?)",
+                (cutoff,),
+            )
+            return {
+                "detections": det.rowcount or 0,
+                "pauses": pau.rowcount or 0,
+                "jobs": job.rowcount or 0,
+            }
+
     async def get_analytics_summary(self) -> dict[str, Any]:
         """Calculate and return key statistics for completed/failed prints."""
+        if self._analytics_cache is not None:
+            return self._analytics_cache
+
+        async with self._db.execute(
+            "SELECT COUNT(*) as total_jobs,"
+            " SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed_jobs,"
+            " SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed_jobs,"
+            " SUM(duration_seconds) as total_duration_seconds,"
+            " SUM(filament_used_g) as total_filament_g,"
+            " SUM(pauses_count) as total_pauses"
+            " FROM print_jobs WHERE status IN ('completed', 'failed')"
+        ) as cur:
+            row = await cur.fetchone()
+            res = dict(row) if row else {}
+
+        total = res.get("total_jobs") or 0
+        completed = res.get("completed_jobs") or 0
+        success_rate = (completed / total * 100) if total > 0 else 0.0
+
+        # Average duration of completed prints
+        async with self._db.execute(
+            "SELECT AVG(duration_seconds) as avg_duration FROM print_jobs"
+            " WHERE status = 'completed' AND duration_seconds IS NOT NULL"
+        ) as cur_avg:
+            row_avg = await cur_avg.fetchone()
+            avg_duration = (
+                row_avg["avg_duration"]
+                if row_avg and row_avg["avg_duration"] is not None
+                else 0.0
+            )
+
+        summary = {
+            "total_prints": total,
+            "success_rate_percent": success_rate,
+            "total_filament_g": res.get("total_filament_g") or 0.0,
+            "total_pauses": res.get("total_pauses") or 0,
+            "avg_duration_seconds": avg_duration,
+        }
         async with self._lock:
-            if self._analytics_cache is not None:
-                return self._analytics_cache
-
-            async with self._db.execute(
-                "SELECT COUNT(*) as total_jobs,"
-                " SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed_jobs,"
-                " SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed_jobs,"
-                " SUM(duration_seconds) as total_duration_seconds,"
-                " SUM(filament_used_g) as total_filament_g,"
-                " SUM(pauses_count) as total_pauses"
-                " FROM print_jobs WHERE status IN ('completed', 'failed')"
-            ) as cur:
-                row = await cur.fetchone()
-                res = dict(row) if row else {}
-
-            total = res.get("total_jobs") or 0
-            completed = res.get("completed_jobs") or 0
-            success_rate = (completed / total * 100) if total > 0 else 0.0
-
-            # Average duration of completed prints
-            async with self._db.execute(
-                "SELECT AVG(duration_seconds) as avg_duration FROM print_jobs"
-                " WHERE status = 'completed' AND duration_seconds IS NOT NULL"
-            ) as cur_avg:
-                row_avg = await cur_avg.fetchone()
-                avg_duration = (
-                    row_avg["avg_duration"]
-                    if row_avg and row_avg["avg_duration"] is not None
-                    else 0.0
-                )
-
-            summary = {
-                "total_prints": total,
-                "success_rate_percent": success_rate,
-                "total_filament_g": res.get("total_filament_g") or 0.0,
-                "total_pauses": res.get("total_pauses") or 0,
-                "avg_duration_seconds": avg_duration,
-            }
             self._analytics_cache = summary
-            return summary
+        return summary

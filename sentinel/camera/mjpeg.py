@@ -275,6 +275,11 @@ class MjpegGrabber:
         finally:
             self._listeners.discard(q)
 
+    async def reconfigure(self, url: str) -> None:
+        """Update the camera URL and restart the connection."""
+        self._url = url
+        await self.close()
+
     async def close(self) -> None:
         """Cancel the broadcaster task and clean up listeners."""
         if self._broadcaster_task and not self._broadcaster_task.done():
