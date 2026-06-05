@@ -12,7 +12,7 @@ jobs:
   # ---------------------------------------------------------------------------
   test:
     name: Test (Python 3.12)
-    runs-on: [self-hosted, coolify]
+    runs-on: [self-hosted, coolify, centauri-sentinel]
     steps:
       - uses: actions/checkout@v4
 
@@ -51,7 +51,7 @@ jobs:
   # ---------------------------------------------------------------------------
   docker:
     name: Docker build
-    runs-on: [self-hosted, coolify]
+    runs-on: [self-hosted, coolify, centauri-sentinel]
     steps:
       - uses: actions/checkout@v4
 
