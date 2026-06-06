@@ -52,3 +52,4 @@ CREATE INDEX IF NOT EXISTS idx_pause_history_result ON pause_history(result);
 CREATE INDEX IF NOT EXISTS idx_detection_events_snapshot_path ON detection_events(snapshot_path) WHERE snapshot_path IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_detection_events_ts_utc ON detection_events(ts_utc);
 CREATE INDEX IF NOT EXISTS idx_print_jobs_started_at ON print_jobs(started_at);
+CREATE INDEX IF NOT EXISTS idx_pause_history_ts_utc ON pause_history(ts_utc);

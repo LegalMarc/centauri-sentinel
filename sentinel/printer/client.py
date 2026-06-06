@@ -42,16 +42,22 @@ _RETRY_WAIT = tenacity.wait_exponential(multiplier=0.5, min=0.5, max=4)
 _PAUSE_DEBOUNCE_S = 30.0  # minimum seconds between successive pause() publishes
 
 
-def _deep_merge(target: dict[str, Any], source: dict[str, Any]) -> None:
+def _deep_merge(target: dict[str, Any], source: dict[str, Any], max_keys: int = 1000) -> None:
     """Recursively merge dictionary source into target."""
     for key, value in source.items():
         if isinstance(value, dict) and key in target and isinstance(target[key], dict):
-            _deep_merge(target[key], value)
+            if len(target[key]) > max_keys:
+                target[key].clear()
+            _deep_merge(target[key], value, max_keys)
         else:
+            if len(target) > max_keys and key not in target:
+                continue
             target[key] = value
 
 
-def _parse_status(payload: dict[str, Any], layers_cache: dict[str, int] | None = None) -> PrinterStatus:
+def _parse_status(
+    payload: dict[str, Any], layers_cache: dict[str, int] | None = None
+) -> PrinterStatus:
     """Extract PrinterStatus from a method-6000 payload.
 
     Supports both legacy Attributes and Carbon 2 formats.
@@ -472,7 +478,15 @@ class PrinterClient:
         retryer = tenacity.AsyncRetrying(
             stop=tenacity.stop_after_attempt(_RETRY_ATTEMPTS),
             wait=_RETRY_WAIT,
-            retry=tenacity.retry_if_exception_type(PrinterTimeoutError),
+            retry=tenacity.retry_if_exception_type(
+                (
+                    PrinterTimeoutError,
+                    PrinterProtocolError,
+                    aiomqtt.MqttError,
+                    OSError,
+                    ConnectionError,
+                )
+            ),
             reraise=True,
         )
         async for attempt in retryer:

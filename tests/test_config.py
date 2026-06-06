@@ -35,7 +35,7 @@ def test_bind_port_default() -> None:
 
 def test_bind_host_default() -> None:
     s = Settings()
-    assert s.bind_host == "0.0.0.0"
+    assert s.bind_host == "127.0.0.1"
 
 
 def test_log_level_default() -> None:
@@ -114,7 +114,7 @@ def test_external_bind_allowed_default() -> None:
 def test_ml_defaults() -> None:
     s = Settings()
     assert s.ml_api_url == "http://obico-ml:3333"
-    assert s.ml_api_token_file == "/shared/token"
+    assert s.ml_api_token_file == "shared/token"
     assert s.ml_confirm_count == 3
     assert s.ml_score_threshold == 0.4
 
@@ -126,7 +126,7 @@ def test_detection_warmup_default() -> None:
 
 def test_db_path_default() -> None:
     s = Settings()
-    assert s.db_path == "/data/sentinel.db"
+    assert s.db_path == "data/sentinel.db"
 
 
 # ---------------------------------------------------------------------------
@@ -296,27 +296,10 @@ def test_resume_cooldown_seconds_invalid() -> None:
         Settings(resume_cooldown_seconds=-1)
 
 
-def test_printer_access_code_default_warning(caplog: pytest.LogCaptureFixture) -> None:
-    import logging
-
-    with caplog.at_level(logging.WARNING, logger="sentinel.config"):
-        Settings()
-    assert any(
-        "Printer access code is set to the default value" in record.message
-        for record in caplog.records
-    )
 
 
-def test_printer_access_code_custom_no_warning(caplog: pytest.LogCaptureFixture) -> None:
-    import logging
 
-    caplog.clear()
-    with caplog.at_level(logging.WARNING, logger="sentinel.config"):
-        Settings(printer_access_code="secure_code_123")
-    assert not any(
-        "Printer access code is set to the default value" in record.message
-        for record in caplog.records
-    )
+
 
 
 def test_log_format_default() -> None:

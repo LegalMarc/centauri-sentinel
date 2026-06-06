@@ -46,7 +46,11 @@ class TelegramNotifier:
         if not self._enabled:
             return
 
-        self._bot = Bot(token=settings.telegram_bot_token.get_secret_value() if settings.telegram_bot_token else "")
+        self._bot = Bot(
+            token=settings.telegram_bot_token.get_secret_value()
+            if settings.telegram_bot_token
+            else ""
+        )
         self._chat_id = settings.telegram_chat_id or ""
         self._allowed_users = _parse_user_ids(settings.telegram_user_ids)
         self._snapshots_dir = Path(settings.db_path).parent / "snapshots"

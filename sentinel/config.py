@@ -32,8 +32,9 @@ class Settings(BaseSettings):
     # over cleartext HTTP exposes them to network interception. Always
     # use HTTPS for external ML endpoints.
     ml_api_url: str = "http://obico-ml:3333"
-    ml_api_token_file: str = "/shared/token"
+    ml_api_token_file: str = "shared/token"
     ml_confirm_count: int = 3
+    ml_consecutive_failure_threshold: int = 10
     ml_poll_interval_seconds: int = 10
     ml_score_threshold: float = 0.4
     ml_callback_host: str | None = None
@@ -85,7 +86,7 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     log_format: str = "text"
     camera_max_streams: int = 3
-    db_path: str = "/data/sentinel.db"
+    db_path: str = "data/sentinel.db"
 
     @property
     def telegram_enabled(self) -> bool:
@@ -102,7 +103,6 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _validate_settings(self) -> Settings:
         """Validate config variables and hash plain AUTH_PASSWORD if provided."""
-
 
         # 1. Telegram checks
         if self.telegram_bot_token:
@@ -176,6 +176,14 @@ class Settings(BaseSettings):
     def _validate_ml_confirm_count(cls, v: int) -> int:
         if v < 1:
             msg = "ML_CONFIRM_COUNT must be at least 1"
+            raise ValueError(msg)
+        return v
+
+    @field_validator("ml_consecutive_failure_threshold")
+    @classmethod
+    def _validate_ml_consecutive_failure_threshold(cls, v: int) -> int:
+        if v < 1:
+            msg = "ML_CONSECUTIVE_FAILURE_THRESHOLD must be at least 1"
             raise ValueError(msg)
         return v
 

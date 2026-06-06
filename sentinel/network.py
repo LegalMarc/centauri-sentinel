@@ -87,12 +87,17 @@ def validate_https(url: str) -> str:
                 or "." not in parsed.hostname
                 or parsed.hostname.endswith((".local", ".lan", ".home", ".internal"))
             ):
-                logger.warning("SECURITY WARNING: Transmitting data over cleartext HTTP to %s", parsed.hostname)
+                logger.warning(
+                    "SECURITY WARNING: Transmitting data over cleartext HTTP to %s", parsed.hostname
+                )
                 return url
             with contextlib.suppress(ValueError):
                 ip = ipaddress.ip_address(parsed.hostname)
                 if ip.is_private:
-                    logger.warning("SECURITY WARNING: Transmitting data over cleartext HTTP to %s", parsed.hostname)
+                    logger.warning(
+                        "SECURITY WARNING: Transmitting data over cleartext HTTP to %s",
+                        parsed.hostname,
+                    )
                     return url
         if not url.startswith("https://"):
             raise ValueError(f"URL must use HTTPS to protect credentials and privacy: {url}")

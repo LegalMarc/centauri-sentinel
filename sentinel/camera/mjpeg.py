@@ -188,7 +188,9 @@ class MjpegGrabber:
                     frame_start_time = time.monotonic()
                     while True:
                         try:
-                            remaining = max(1.0, _READ_TIMEOUT - (time.monotonic() - frame_start_time))
+                            remaining = _READ_TIMEOUT - (time.monotonic() - frame_start_time)
+                            if remaining <= 0:
+                                raise TimeoutError("Timeout waiting for complete frame")
                             async with asyncio.timeout(remaining):
                                 chunk = await aiter.__anext__()
                         except StopAsyncIteration:

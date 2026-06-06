@@ -12,7 +12,7 @@ import aiosqlite
 logger = logging.getLogger(__name__)
 
 _SCHEMA_SQL = (Path(__file__).parent / "schema.sql").read_text()
-CURRENT_VERSION = 6
+CURRENT_VERSION = 7
 
 
 async def migrate(db_path: str) -> None:
@@ -38,8 +38,16 @@ async def migrate(db_path: str) -> None:
         # Wrapped in an explicit transaction so a crash mid-migration
         # leaves the DB in the original state rather than partially destroyed.
         if current == 1:
-            logger.info("v1 database detected; renaming tables to _v1 to preserve data and recreate schema")
-            for table in ("schema_version", "detection_events", "pause_history", "runtime_settings", "watcher_heartbeat"):
+            logger.info(
+                "v1 database detected; renaming tables to _v1 to preserve data and recreate schema"
+            )
+            for table in (
+                "schema_version",
+                "detection_events",
+                "pause_history",
+                "runtime_settings",
+                "watcher_heartbeat",
+            ):
                 with contextlib.suppress(aiosqlite.OperationalError):
                     await db.execute(f"ALTER TABLE {table} RENAME TO {table}_v1")
             current = 0

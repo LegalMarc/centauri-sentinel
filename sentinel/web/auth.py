@@ -93,14 +93,19 @@ class AuthMiddleware:
         with contextlib.suppress(ValueError):
             is_private_ip = ipaddress.ip_address(host_header).is_private
 
-        if not self._settings.external_bind_allowed and host_header not in (
-            "localhost",
-            "127.0.0.1",
-            "::1",
-            "testserver",
-            "test",
-            self._settings.bind_host,
-        ) and not is_private_ip:
+        if (
+            not self._settings.external_bind_allowed
+            and host_header
+            not in (
+                "localhost",
+                "127.0.0.1",
+                "::1",
+                "testserver",
+                "test",
+                self._settings.bind_host,
+            )
+            and not is_private_ip
+        ):
             response = Response(
                 status_code=403, content="DNS Rebinding Protection: Host not allowed"
             )

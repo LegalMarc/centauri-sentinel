@@ -60,6 +60,7 @@ class MlClient:
                 self._token_file,
             )
         self._consecutive_failures = 0
+        self._failure_threshold = settings.ml_consecutive_failure_threshold
 
     # ------------------------------------------------------------------
     # Public API
@@ -73,14 +74,20 @@ class MlClient:
                 self._consecutive_failures += 1
             else:
                 self._consecutive_failures = 0
-            if self._consecutive_failures >= 10:
-                logger.critical("ML API has failed 10 consecutive times. The watcher is flying blind.")
+            if self._consecutive_failures >= self._failure_threshold:
+                logger.critical(
+                    "ML API has failed %d consecutive times. The watcher is flying blind.",
+                    self._consecutive_failures,
+                )
             return res
         except Exception:
             logger.exception("ML detect failed — returning score=0.0 (fail-open)")
             self._consecutive_failures += 1
-            if self._consecutive_failures >= 10:
-                logger.critical("ML API has failed 10 consecutive times. The watcher is flying blind.")
+            if self._consecutive_failures >= self._failure_threshold:
+                logger.critical(
+                    "ML API has failed %d consecutive times. The watcher is flying blind.",
+                    self._consecutive_failures,
+                )
             return _FAIL_OPEN
 
     # ------------------------------------------------------------------
@@ -110,7 +117,7 @@ class MlClient:
                 stop=tenacity.stop_after_attempt(3),
                 wait=tenacity.wait_exponential(multiplier=0.5, min=0.5, max=2.0),
                 retry=tenacity.retry_if_exception_type(
-                    (httpx.RequestError, httpx.HTTPStatusError, httpx.TimeoutException)
+                    (httpx.RequestError, httpx.HTTPStatusError, httpx.TimeoutException, ValueError)
                 ),
                 reraise=True,
             ):

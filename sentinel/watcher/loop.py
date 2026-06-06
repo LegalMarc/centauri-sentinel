@@ -95,7 +95,10 @@ class WatcherLoop:
 
     @state.setter
     def state(self, value: WatcherState) -> None:
-        if self._state == WatcherState.PAUSED and value in (WatcherState.ARMED, WatcherState.WARMUP):
+        if self._state == WatcherState.PAUSED and value in (
+            WatcherState.ARMED,
+            WatcherState.WARMUP,
+        ):
             self._last_resume_time = time.monotonic()
             logger.info("Printer resumed — setting resume cooldown anchor")
         self._state = value
@@ -122,12 +125,15 @@ class WatcherLoop:
                 snooze_until = float(snooze_until_str)
                 if snooze_until > 0:
                     import time
+
                     now = time.time()
                     if now > snooze_until:
                         await self._db.set_setting("detection_enabled", "true")
                         await self._db.set_setting("snooze_until_utc", "0")
                     else:
-                        self._snooze_task = asyncio.create_task(self._re_enable_after(snooze_until - now))
+                        self._snooze_task = asyncio.create_task(
+                            self._re_enable_after(snooze_until - now)
+                        )
         except (ValueError, TypeError):
             pass
 
@@ -154,6 +160,7 @@ class WatcherLoop:
         await self._db.set_setting("detection_enabled", "false")
 
         import time
+
         snooze_until = time.time() + seconds
         await self._db.set_setting("snooze_until_utc", str(snooze_until))
 
@@ -297,7 +304,11 @@ class WatcherLoop:
                             )
 
                         self._paused_since = None  # reset to prevent spamming
-            elif self.state not in (WatcherState.OFFLINE, WatcherState.CAMERA_OFFLINE, WatcherState.STALLED):
+            elif self.state not in (
+                WatcherState.OFFLINE,
+                WatcherState.CAMERA_OFFLINE,
+                WatcherState.STALLED,
+            ):
                 self._paused_since = None
 
             if self.state in (WatcherState.ARMED, WatcherState.CAMERA_OFFLINE):
@@ -460,7 +471,9 @@ class WatcherLoop:
                     cooldown_s = 5.0
 
                 if time.monotonic() - self._last_resume_time < cooldown_s:
-                    logger.debug("Printer status still says 'paused' during post-resume cooldown; ignoring")
+                    logger.debug(
+                        "Printer status still says 'paused' during post-resume cooldown; ignoring"
+                    )
                 else:
                     prev_s = self.state
                     logger.info("Printer paused externally — transitioning PAUSED")
@@ -532,7 +545,9 @@ class WatcherLoop:
             logger.warning("ML detection failed (%d consecutive times)", self._ml_error_count)
             if self._ml_error_count >= 5:
                 logger.error("Too many ML failures — failing CLOSED by pausing printer")
-                self._dispatcher.dispatch_text("🚨 Sentinel ML service is failing continuously. Pausing printer for safety.")
+                self._dispatcher.dispatch_text(
+                    "🚨 Sentinel ML service is failing continuously. Pausing printer for safety."
+                )
                 try:
                     if await self._printer.pause():
                         self.state = WatcherState.PAUSED

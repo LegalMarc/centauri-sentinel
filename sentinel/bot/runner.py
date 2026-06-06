@@ -32,7 +32,9 @@ class BotRunner:
         dispatcher: Any = None,
     ) -> None:
         self._enabled = settings.telegram_enabled
-        self._token = settings.telegram_bot_token.get_secret_value() if settings.telegram_bot_token else ""
+        self._token = (
+            settings.telegram_bot_token.get_secret_value() if settings.telegram_bot_token else ""
+        )
         self._handler = handler
         self._dispatcher = dispatcher
         self._app: Any = None  # telegram.ext.Application at runtime

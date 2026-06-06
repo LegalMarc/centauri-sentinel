@@ -174,12 +174,21 @@ async def _run(args: argparse.Namespace) -> None:
         await bot.start()
 
     watcher_task: asyncio.Task[None] = asyncio.create_task(watcher.run_forever(), name="watcher")
+    server_task: asyncio.Task[None] = asyncio.create_task(server.serve(), name="server")
 
     try:
-        await server.serve()
+        done, pending = await asyncio.wait(
+            [watcher_task, server_task],
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in pending:
+            task.cancel()
+        for task in done:
+            task.result()
     finally:
         watcher_task.cancel()
-        await asyncio.gather(watcher_task, return_exceptions=True)
+        server_task.cancel()
+        await asyncio.gather(watcher_task, server_task, return_exceptions=True)
         if bot is not None:
             await bot.stop()
         # Clean up client resources concurrently to avoid slow shutdown
