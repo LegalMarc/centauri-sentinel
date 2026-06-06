@@ -45,8 +45,8 @@ RUN mkdir -p /data/snapshots && chown -R sentinel:sentinel /data /app
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
-# USER sentinel directive removed to allow entrypoint.sh to run as root and fix permissions.
-# entrypoint.sh will drop privileges to sentinel via gosu.
+# Use USER sentinel to ensure the container runs as non-root natively.
+USER sentinel
 
 EXPOSE 8000
 

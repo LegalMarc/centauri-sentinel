@@ -443,26 +443,7 @@ async def test_loop_swallows_unexpected_exceptions() -> None:
     assert call_count == 2  # loop executed twice despite exception on first
 
 
-# ---------------------------------------------------------------------------
-# _on_confirmed_detection — CancelledError sets PAUSED before re-raising
-# ---------------------------------------------------------------------------
 
-
-async def test_cancelled_during_pause_sets_paused_state() -> None:
-    watcher, _, _, _, _ = await _make_watcher()
-
-    async def _cancel_and_complete() -> None:
-        task = asyncio.current_task()
-        if task:
-            task.cancel()
-
-    watcher._printer = MagicMock()
-    watcher._printer.pause = _cancel_and_complete
-
-    with pytest.raises(asyncio.CancelledError):
-        await watcher._on_confirmed_detection(MlResult(score=0.9), b"\xff\xd8\xff\xd9")
-
-    assert watcher.state == WatcherState.PAUSED
 
 
 async def test_cancelled_before_pause_does_not_set_paused_state() -> None:

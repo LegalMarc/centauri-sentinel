@@ -59,6 +59,7 @@ class MlClient:
                 "Ensure token-init has run before the first detection.",
                 self._token_file,
             )
+        self._consecutive_failures = 0
 
     # ------------------------------------------------------------------
     # Public API
@@ -67,9 +68,19 @@ class MlClient:
     async def detect(self, jpeg: bytes) -> MlResult:
         """Run spaghetti detection on *jpeg*. Never raises; fails open."""
         try:
-            return await self._detect(jpeg)
+            res = await self._detect(jpeg)
+            if res.error:
+                self._consecutive_failures += 1
+            else:
+                self._consecutive_failures = 0
+            if self._consecutive_failures >= 10:
+                logger.critical("ML API has failed 10 consecutive times. The watcher is flying blind.")
+            return res
         except Exception:
             logger.exception("ML detect failed — returning score=0.0 (fail-open)")
+            self._consecutive_failures += 1
+            if self._consecutive_failures >= 10:
+                logger.critical("ML API has failed 10 consecutive times. The watcher is flying blind.")
             return _FAIL_OPEN
 
     # ------------------------------------------------------------------

@@ -36,7 +36,9 @@ jobs:
         with:
           context: ./docker/obico-ml
           push: true
-          tags: ghcr.io/legalmarc/centauri-sentinel/obico-ml:1.4
+          tags: |
+            ghcr.io/legalmarc/centauri-sentinel/obico-ml:${{ github.sha }}
+            ghcr.io/legalmarc/centauri-sentinel/obico-ml:latest
           platforms: linux/amd64,linux/arm64
           cache-from: type=gha
           cache-to: type=gha,mode=max

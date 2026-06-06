@@ -87,10 +87,9 @@ services:
       NTFY_URL: ${NTFY_URL:-}
       NTFY_TOKEN: ${NTFY_TOKEN:-}
       # --- Auth (optional) ---
-      # Set AUTH_USERNAME + either AUTH_PASSWORD (plain text, hashed at startup)
-      # or AUTH_PASSWORD_BCRYPT (pre-computed bcrypt hash starting with $2b$).
+      # Set AUTH_USERNAME and AUTH_PASSWORD_BCRYPT (pre-computed bcrypt hash starting with $2b$).
+      # Plain-text AUTH_PASSWORD is no longer supported.
       AUTH_USERNAME: ${AUTH_USERNAME:-}
-      AUTH_PASSWORD: ${AUTH_PASSWORD:-}
       AUTH_PASSWORD_BCRYPT: ${AUTH_PASSWORD_BCRYPT:-}
       # --- Web server ---
       BIND_HOST: ${BIND_HOST:-0.0.0.0}

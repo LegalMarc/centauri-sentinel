@@ -19,7 +19,7 @@ def test_printer_ip_custom() -> None:
 
 def test_printer_access_code_default() -> None:
     s = Settings()
-    assert s.printer_access_code == "123456"
+    assert s.printer_access_code.get_secret_value() == "123456"
 
 
 def test_printer_mqtt_port_default() -> None:
@@ -92,7 +92,7 @@ def test_auth_disabled_by_default() -> None:
 
 
 def test_auth_enabled() -> None:
-    s = Settings(auth_username="admin", auth_password="pw")
+    s = Settings(auth_username="admin", auth_password_bcrypt="$2b$12$dummyhash")
     assert s.auth_enabled
 
 
@@ -101,34 +101,9 @@ def test_auth_disabled_when_username_empty_string() -> None:
     assert not s.auth_enabled
 
 
-def test_auth_plain_password_is_hashed() -> None:
-    import bcrypt
-
-    s = Settings(auth_username="admin", auth_password="secret")
-    assert s.auth_password is None  # cleared after hashing
-    assert s.auth_password_bcrypt is not None
-    assert s.auth_password_bcrypt.startswith("$2b$")
-    assert bcrypt.checkpw(b"secret", s.auth_password_bcrypt.encode())
-
-
-def test_auth_password_cleared_from_environ(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("AUTH_PASSWORD", "should-be-cleared")
-    import os
-
-    Settings(auth_username="admin", auth_password="should-be-cleared")
-    assert os.environ.get("AUTH_PASSWORD") is None
-
-
-def test_auth_plain_password_does_not_override_existing_bcrypt() -> None:
-    import bcrypt
-
-    existing_hash = bcrypt.hashpw(b"original", bcrypt.gensalt()).decode()
-    s = Settings(
-        auth_username="admin",
-        auth_password="ignored",
-        auth_password_bcrypt=existing_hash,
-    )
-    assert s.auth_password_bcrypt == existing_hash
+def test_auth_plain_password_raises_error() -> None:
+    with pytest.raises(ValueError, match="Plain-text AUTH_PASSWORD is no longer supported"):
+        Settings(auth_username="admin", auth_password="secret")
 
 
 def test_external_bind_allowed_default() -> None:

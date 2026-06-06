@@ -84,11 +84,25 @@ class AuthMiddleware:
             await self._app(scope, receive, send)
             return
 
+        headers = dict(scope.get("headers", []))
+        host_header = headers.get(b"host", b"").decode().split(":")[0]
+        if not self._settings.external_bind_allowed and host_header not in (
+            "localhost",
+            "127.0.0.1",
+            "::1",
+            "testserver",
+            "test",
+            self._settings.bind_host,
+        ):
+            response = Response(
+                status_code=403, content="DNS Rebinding Protection: Host not allowed"
+            )
+            await response(scope, receive, send)
+            return
+
         if not self._enabled:
             await self._app(scope, receive, send)
             return
-
-        headers = dict(scope.get("headers", []))
 
         if scope.get("method") in ("POST", "PUT", "DELETE", "PATCH"):
             origin = headers.get(b"origin")
@@ -130,7 +144,7 @@ class AuthMiddleware:
             await self._app(scope, receive, send)
             return
 
-        if path in ("/healthz", "/readyz", "/logout"):
+        if path in ("/healthz", "/readyz"):
             await self._app(scope, receive, send)
             return
 

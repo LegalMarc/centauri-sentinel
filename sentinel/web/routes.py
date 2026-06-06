@@ -84,55 +84,44 @@ def make_router(
         heartbeat = await db.get_heartbeat()
         last_tick_utc = heartbeat.get("last_tick_utc") if heartbeat else None
         age = _age_seconds(last_tick_utc)
-        detections = await db.get_recent_detections(limit=10)
-        pauses = await db.get_recent_pauses(limit=10)
-        recent_jobs = await db.get_recent_jobs(limit=20)
-        analytics = await db.get_analytics_summary()
-        detection_enabled = await db.get_setting("detection_enabled", "true") == "true"
-
-        # Get settings from DB (with config defaults)
-        printer_ip = await db.get_setting("printer_ip", settings.printer_ip) or settings.printer_ip
-
-        ml_confirm_count_str = await db.get_setting(
-            "ml_confirm_count", str(settings.ml_confirm_count)
-        )
-        ml_confirm_count = int(
-            ml_confirm_count_str if ml_confirm_count_str is not None else settings.ml_confirm_count
-        )
-
-        ml_score_threshold_str = await db.get_setting(
-            "ml_score_threshold", str(settings.ml_score_threshold)
-        )
-        ml_score_threshold = float(
-            ml_score_threshold_str
-            if ml_score_threshold_str is not None
-            else settings.ml_score_threshold
-        )
-
-        ml_poll_interval_str = await db.get_setting(
-            "ml_poll_interval_seconds", str(settings.ml_poll_interval_seconds)
-        )
-        ml_poll_interval_seconds = int(
-            ml_poll_interval_str
-            if ml_poll_interval_str is not None
-            else settings.ml_poll_interval_seconds
+        (
+            detections,
+            pauses,
+            recent_jobs,
+            analytics,
+            detection_enabled_str,
+            printer_ip_val,
+            ml_confirm_count_str,
+            ml_score_threshold_str,
+            ml_poll_interval_str,
+            detection_warmup_str,
+        ) = await asyncio.gather(
+            db.get_recent_detections(limit=10),
+            db.get_recent_pauses(limit=10),
+            db.get_recent_jobs(limit=20),
+            db.get_analytics_summary(),
+            db.get_setting("detection_enabled", "true"),
+            db.get_setting("printer_ip", settings.printer_ip),
+            db.get_setting("ml_confirm_count", str(settings.ml_confirm_count)),
+            db.get_setting("ml_score_threshold", str(settings.ml_score_threshold)),
+            db.get_setting("ml_poll_interval_seconds", str(settings.ml_poll_interval_seconds)),
+            db.get_setting("detection_warmup_seconds", str(settings.detection_warmup_seconds)),
         )
 
-        detection_warmup_str = await db.get_setting(
-            "detection_warmup_seconds", str(settings.detection_warmup_seconds)
-        )
-        detection_warmup_seconds = int(
-            detection_warmup_str
-            if detection_warmup_str is not None
-            else settings.detection_warmup_seconds
-        )
+        detection_enabled = detection_enabled_str == "true"
+        printer_ip = printer_ip_val or settings.printer_ip
+        ml_confirm_count = int(ml_confirm_count_str if ml_confirm_count_str is not None else settings.ml_confirm_count)  # type: ignore
+        ml_score_threshold = float(ml_score_threshold_str if ml_score_threshold_str is not None else settings.ml_score_threshold)  # type: ignore
+        ml_poll_interval_seconds = int(ml_poll_interval_str if ml_poll_interval_str is not None else settings.ml_poll_interval_seconds)  # type: ignore
+        detection_warmup_seconds = int(detection_warmup_str if detection_warmup_str is not None else settings.detection_warmup_seconds)  # type: ignore
 
         from sentinel import __version__
 
         # Map snapshot_path to snapshot_id for the Jinja template
-        for d in detections:
-            path_str = d.get("snapshot_path")
-            d["snapshot_id"] = Path(str(path_str)).stem if path_str else None
+        for item in detections:  # type: ignore
+            if isinstance(item, dict):
+                path_str = item.get("snapshot_path")
+                item["snapshot_id"] = Path(str(path_str)).stem if path_str else None
 
         # Expose printer state and elapsed print time
         p_status = await watcher.get_fresh_status()
@@ -462,14 +451,20 @@ def make_router(
             # Also clean up snapshot files from disk
             snapshots_dir = Path(db._path).parent / "snapshots"
             files_removed = 0
-            if snapshots_dir.exists():
-                for f in snapshots_dir.iterdir():
-                    if f.suffix == ".jpg":
-                        try:
-                            f.unlink()
-                            files_removed += 1
-                        except OSError:
-                            logger.warning("Failed to remove snapshot file: %s", f)
+
+            def _delete_files() -> int:
+                removed = 0
+                if snapshots_dir.exists():
+                    for f in snapshots_dir.iterdir():
+                        if f.suffix == ".jpg":
+                            try:
+                                f.unlink()
+                                removed += 1
+                            except OSError:
+                                logger.warning("Failed to remove snapshot file: %s", f)
+                return removed
+
+            files_removed = await asyncio.to_thread(_delete_files)
 
             counts["snapshot_files"] = files_removed
             return Response(

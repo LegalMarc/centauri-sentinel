@@ -33,7 +33,7 @@ class NtfyNotifier:
             url = validate_https(url)
 
         self._url = url
-        self._token = settings.ntfy_token
+        self._token = settings.ntfy_token.get_secret_value() if settings.ntfy_token else None
         self._snapshots_dir = Path(settings.db_path).parent / "snapshots"
         self._client = httpx.AsyncClient(timeout=_TIMEOUT)
 
@@ -183,7 +183,7 @@ class NtfyNotifier:
         retryer = tenacity.AsyncRetrying(
             stop=tenacity.stop_after_attempt(_RETRIES),
             wait=tenacity.wait_exponential(multiplier=0.5, min=0.5, max=8),
-            retry=tenacity.retry_if_exception_type(httpx.RequestError),
+            retry=tenacity.retry_if_exception_type((httpx.RequestError, httpx.HTTPStatusError)),
             reraise=True,
         )
         async for attempt in retryer:

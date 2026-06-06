@@ -114,6 +114,22 @@ class WatcherLoop:
     async def run_forever(self) -> None:
         """Start the main loop and heartbeat watchdog; runs until cancelled."""
         self._running = True
+        # Check if we were snoozed and it expired
+        try:
+            snooze_until_str = await self._db.get_setting("snooze_until_utc", "0")
+            if snooze_until_str is not None:
+                snooze_until = float(snooze_until_str)
+                if snooze_until > 0:
+                    import time
+                    now = time.time()
+                    if now > snooze_until:
+                        await self._db.set_setting("detection_enabled", "true")
+                        await self._db.set_setting("snooze_until_utc", "0")
+                    else:
+                        self._snooze_task = asyncio.create_task(self._re_enable_after(snooze_until - now))
+        except (ValueError, TypeError):
+            pass
+
         # Run cleanup once on startup to handle orphans from previous crashes
         try:
             await self.cleanup_old_snapshots()
@@ -135,6 +151,11 @@ class WatcherLoop:
         """Snooze detection for the given number of seconds."""
         self.cancel_snooze()
         await self._db.set_setting("detection_enabled", "false")
+
+        import time
+        snooze_until = time.time() + seconds
+        await self._db.set_setting("snooze_until_utc", str(snooze_until))
+
         self._snooze_task = asyncio.create_task(self._re_enable_after(seconds))
 
     def cancel_snooze(self) -> None:
@@ -175,6 +196,7 @@ class WatcherLoop:
                 await asyncio.sleep(delay)
             if self._snooze_task is current_task:
                 await self._db.set_setting("detection_enabled", "true")
+                await self._db.set_setting("snooze_until_utc", "0")
                 self._dispatcher.dispatch_text("Detection re-enabled after snooze.")
                 logger.info("Detection re-enabled after %.0fs snooze", delay)
         except asyncio.CancelledError:
@@ -274,7 +296,7 @@ class WatcherLoop:
                             )
 
                         self._paused_since = None  # reset to prevent spamming
-            else:
+            elif self.state not in (WatcherState.OFFLINE, WatcherState.CAMERA_OFFLINE, WatcherState.STALLED):
                 self._paused_since = None
 
             if self.state == WatcherState.ARMED:
@@ -556,13 +578,16 @@ class WatcherLoop:
 
         async def _do_pause() -> None:
             nonlocal pause_sent
-            await self._printer.pause()
+            paused = await self._printer.pause()
+            if not paused:
+                raise RuntimeError("Pause command suppressed by debounce window")
             pause_sent = True
 
         try:
             await asyncio.shield(_do_pause())
             pause_ok = True
             self.state = WatcherState.PAUSED
+            self._paused_since = datetime.now(tz=UTC)
         except asyncio.CancelledError:
             if pause_sent:
                 self.state = WatcherState.PAUSED
@@ -571,10 +596,9 @@ class WatcherLoop:
             raise
         except Exception:
             logger.exception("Printer pause failed — notifying anyway")
-            # Do NOT restore _confirm_count. Reset it so we don't instantly loop on the next tick.
-            # We also ensure we don't transition to PAUSED if the command failed,
-            # letting normal armed frame checks continue (which may re-trigger detection).
-            self._confirm_count = 0
+            # Restore _confirm_count so the next tick immediately retries the pause
+            # if the failure is still detected, instead of waiting for N more frames.
+            self._confirm_count = consecutive_count
             self._dispatcher.dispatch_text(
                 "⚠️ Printer pause command failed during failure detection! G-code is still running. "
                 "The watcher remains armed and will retry if failure is still detected."

@@ -50,3 +50,5 @@ CREATE INDEX IF NOT EXISTS idx_print_jobs_status ON print_jobs(status);
 CREATE INDEX IF NOT EXISTS idx_detection_events_confirmed ON detection_events(confirmed);
 CREATE INDEX IF NOT EXISTS idx_pause_history_result ON pause_history(result);
 CREATE INDEX IF NOT EXISTS idx_detection_events_snapshot_path ON detection_events(snapshot_path) WHERE snapshot_path IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_detection_events_ts_utc ON detection_events(ts_utc);
+CREATE INDEX IF NOT EXISTS idx_print_jobs_started_at ON print_jobs(started_at);

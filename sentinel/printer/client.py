@@ -51,7 +51,7 @@ def _deep_merge(target: dict[str, Any], source: dict[str, Any]) -> None:
             target[key] = value
 
 
-def _parse_status(payload: dict[str, Any]) -> PrinterStatus:
+def _parse_status(payload: dict[str, Any], layers_cache: dict[str, int] | None = None) -> PrinterStatus:
     """Extract PrinterStatus from a method-6000 payload.
 
     Supports both legacy Attributes and Carbon 2 formats.
@@ -141,7 +141,10 @@ def _parse_status(payload: dict[str, Any]) -> PrinterStatus:
             logger.warning("Missing key fields in modern MQTT payload: %s", missing_fields)
 
         print_state = print_status.get("state", "idle")
-        printing = print_state in ("printing", "paused") or print_status.get("enable") is True
+        if print_state in ("completed", "idle"):
+            printing = False
+        else:
+            printing = print_state in ("printing", "paused") or print_status.get("enable") is True
 
         elapsed_seconds = float(print_status.get("print_duration", 0.0))
         current_layer = int(print_status.get("current_layer", 0))
@@ -150,10 +153,15 @@ def _parse_status(payload: dict[str, Any]) -> PrinterStatus:
         filename = print_status.get("filename") or None
         total_layers = 0
         if filename:
-            for file_info in result.get("file_list", []):
-                if file_info.get("filename") == filename:
-                    total_layers = int(file_info.get("layer", 0))
-                    break
+            if layers_cache is not None and filename in layers_cache:
+                total_layers = layers_cache[filename]
+            else:
+                for file_info in result.get("file_list", []):
+                    if file_info.get("filename") == filename:
+                        total_layers = int(file_info.get("layer", 0))
+                        if layers_cache is not None:
+                            layers_cache[filename] = total_layers
+                        break
 
         extruder_temp = (
             float(extruder["temperature"]) if extruder.get("temperature") is not None else None
@@ -196,7 +204,7 @@ class PrinterClient:
     def __init__(self, settings: Settings) -> None:
         self._host = settings.printer_ip
         self._port = settings.printer_mqtt_port
-        self._access_code = settings.printer_access_code
+        self._access_code = settings.printer_access_code.get_secret_value()
         self._client_id = f"sentinel-{uuid.uuid4().hex[:8]}"
         self._last_pause_at: float = 0.0
         self._serial_number: str | None = None
@@ -206,6 +214,9 @@ class PrinterClient:
         self._last_update_time: float = 0.0
         self.malformed_messages_count: int = 0
         self._stop_pending: bool = False
+        self._file_layers_cache: dict[str, int] = {}
+        self._status_client_id = f"{self._client_id}-status"
+        self._cmd_client_id = f"{self._client_id}-cmd"
 
     @property
     def is_connected(self) -> bool:
@@ -329,7 +340,7 @@ class PrinterClient:
             raise PrinterTimeoutError("Status request timed out")
 
         async with self._state_lock:
-            return _parse_status(self._accumulated_data)
+            return _parse_status(self._accumulated_data, self._file_layers_cache)
 
     async def _listen_loop(self) -> None:
         """Background loop that maintains a persistent connection to MQTT."""
@@ -338,7 +349,7 @@ class PrinterClient:
             has_received = False
             try:
                 resolved_ip = resolve_and_validate_printer_ip(self._host)
-                client_id = f"{self._client_id}-status-{uuid.uuid4().hex[:8]}"
+                client_id = self._status_client_id
                 async with aiomqtt.Client(
                     hostname=resolved_ip,
                     port=self._port,
@@ -419,6 +430,7 @@ class PrinterClient:
                 ConnectionError,
                 PrinterProtocolError,
                 PrinterTimeoutError,
+                ValueError,
             ) as exc:
                 code = getattr(exc, "code", None)
                 if isinstance(exc, aiomqtt.MqttCodeError) and code in (4, 5):
@@ -434,7 +446,7 @@ class PrinterClient:
         """Publish a command and return; does not wait for an ack."""
         try:
             resolved_ip = resolve_and_validate_printer_ip(self._host)
-            client_id = f"{self._client_id}-cmd-{uuid.uuid4().hex[:8]}"
+            client_id = self._cmd_client_id
             async with asyncio.timeout(_TIMEOUT_S):
                 async with aiomqtt.Client(
                     hostname=resolved_ip,

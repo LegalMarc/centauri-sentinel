@@ -46,7 +46,7 @@ def test_settings_ntfy_enabled() -> None:
 
 
 def test_settings_auth_enabled() -> None:
-    s = Settings(printer_ip="10.0.0.1", auth_username="admin", auth_password="pw")
+    s = Settings(printer_ip="10.0.0.1", auth_username="admin", auth_password_bcrypt="$2b$12$dummyhash")
     assert s.auth_enabled
 
 

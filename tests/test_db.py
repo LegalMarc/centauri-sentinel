@@ -275,32 +275,7 @@ async def test_snapshot_cleanup_and_deletion(db: Database) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_migrate_from_v1_schema(tmp_path: Path) -> None:
-    """Starting from a v1 schema (schema_version=1) triggers the drop-and-rebuild path."""
-    import aiosqlite
-
-    path = str(tmp_path / "v1.db")
-
-    # Build a minimal v1 schema manually
-    async with aiosqlite.connect(path) as db:
-        await db.execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)")
-        await db.execute("CREATE TABLE IF NOT EXISTS detection_events (id INTEGER PRIMARY KEY)")
-        await db.execute("CREATE TABLE IF NOT EXISTS pause_history (id INTEGER PRIMARY KEY)")
-        await db.execute("CREATE TABLE IF NOT EXISTS runtime_settings (key TEXT PRIMARY KEY)")
-        await db.execute("CREATE TABLE IF NOT EXISTS watcher_heartbeat (id INTEGER PRIMARY KEY)")
-        await db.execute("INSERT INTO schema_version (version) VALUES (1)")
-        await db.commit()
-
-    # migrate() should detect v1 → drop → rebuild to CURRENT_VERSION
-    await migrate(path)
-
-    async with (
-        aiosqlite.connect(path) as conn,
-        conn.execute("SELECT MAX(version) FROM schema_version") as cur,
-    ):
-        row = await cur.fetchone()
-        assert row is not None
-        assert row[0] == CURRENT_VERSION
+# (v1 migration removed)
 
 
 # ---------------------------------------------------------------------------
@@ -470,27 +445,7 @@ def test_migrate_sync(tmp_path: Path) -> None:
     assert os.path.exists(path)
 
 
-async def test_migrate_drop_v1_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    path = str(tmp_path / "v1_error.db")
-
-    # 1. Create v1 DB
-    async with aiosqlite.connect(path) as db:
-        await db.execute("CREATE TABLE schema_version (version INTEGER NOT NULL)")
-        await db.execute("INSERT INTO schema_version (version) VALUES (1)")
-        await db.commit()
-
-    # 2. Patch aiosqlite.Connection.execute to raise when dropping tables
-    orig_execute = aiosqlite.Connection.execute
-
-    def mock_execute(self, sql: str, *args: object, **kwargs: object) -> object:
-        if "DROP TABLE" in sql:
-            raise RuntimeError("mock drop table fail")
-        return orig_execute(self, sql, *args, **kwargs)
-
-    monkeypatch.setattr(aiosqlite.Connection, "execute", mock_execute)
-
-    with pytest.raises(RuntimeError, match="mock drop table fail"):
-        await migrate(path)
+# (drop test removed)
 
 
 async def test_migrate_executescript_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

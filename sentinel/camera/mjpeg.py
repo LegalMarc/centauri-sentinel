@@ -185,9 +185,11 @@ class MjpegGrabber:
                     search_offset = 0
 
                     aiter = resp.aiter_bytes(_CHUNK_SIZE)
+                    frame_start_time = time.monotonic()
                     while True:
                         try:
-                            async with asyncio.timeout(_READ_TIMEOUT):
+                            remaining = max(1.0, _READ_TIMEOUT - (time.monotonic() - frame_start_time))
+                            async with asyncio.timeout(remaining):
                                 chunk = await aiter.__anext__()
                         except StopAsyncIteration:
                             break
@@ -211,8 +213,9 @@ class MjpegGrabber:
                             yield frame
                             buf = buf[end + 2 :]
                             search_offset = 0
+                            frame_start_time = time.monotonic()
                     raise ConnectionError("Stream ended prematurely")
-            except (TimeoutError, httpx.HTTPError, OSError) as exc:
+            except (TimeoutError, httpx.HTTPError, OSError, ValueError) as exc:
                 self._consecutive_failures += 1
                 self._latest_exception = exc
                 logger.warning(
@@ -225,6 +228,7 @@ class MjpegGrabber:
                         f"Camera offline after {self._consecutive_failures} consecutive failures"
                     ) from exc
                 logger.debug("Backing off %.1fs before reconnecting", delay)
+                self._latest_frame = None
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, _BACKOFF_CAP)
             except asyncio.CancelledError:

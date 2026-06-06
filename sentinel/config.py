@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from pydantic import field_validator, model_validator
+from pydantic import SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -22,7 +22,7 @@ class Settings(BaseSettings):
 
     # Printer
     printer_ip: str = "192.168.1.10"
-    printer_access_code: str = "123456"
+    printer_access_code: SecretStr = SecretStr("123456")
     printer_mqtt_port: int = 1883
     printer_mjpeg_port: int = 8080
     printer_mjpeg_path: str = "/mjpeg"
@@ -54,14 +54,14 @@ class Settings(BaseSettings):
     notify_on_print_paused: bool = True
 
     # Telegram
-    telegram_bot_token: str | None = None
+    telegram_bot_token: SecretStr | None = None
     telegram_chat_id: str | None = None
     telegram_user_ids: str | None = None
     telegram_send_snapshots: bool = False
 
     # ntfy
     ntfy_url: str | None = None
-    ntfy_token: str | None = None
+    ntfy_token: SecretStr | None = None
     ntfy_send_snapshots: bool = False
 
     # Auth
@@ -72,7 +72,7 @@ class Settings(BaseSettings):
     # AUTH_PASSWORD_BCRYPT.
     auth_username: str | None = None
     auth_password_bcrypt: str | None = None
-    auth_password: str | None = None
+    auth_password: SecretStr | None = None
     auth_cookie_secure: str = "auto"
 
     # Web server
@@ -103,7 +103,7 @@ class Settings(BaseSettings):
     def _validate_settings(self) -> Settings:
         """Validate config variables and hash plain AUTH_PASSWORD if provided."""
         # Check if printer access code is default
-        if self.printer_access_code == "123456":
+        if self.printer_access_code.get_secret_value() == "123456":
             import logging
 
             logging.getLogger("sentinel.config").warning(
@@ -137,18 +137,10 @@ class Settings(BaseSettings):
 
         # 3. Hash plain password
         if self.auth_password and not self.auth_password_bcrypt:
-            import logging
-
-            logging.getLogger("sentinel.config").warning(
-                "Plain-text AUTH_PASSWORD is set. This is insecure as it remains visible "
-                "in process environment variables (e.g., via docker inspect). "
-                "Please use AUTH_PASSWORD_BCRYPT instead."
+            raise ValueError(
+                "Plain-text AUTH_PASSWORD is no longer supported for security reasons. "
+                "Please generate a bcrypt hash and use AUTH_PASSWORD_BCRYPT instead."
             )
-            import bcrypt  # lazy import
-
-            self.auth_password_bcrypt = bcrypt.hashpw(
-                self.auth_password.encode(), bcrypt.gensalt()
-            ).decode()
         self.auth_password = None
         # Clear the plain-text password from Python's os.environ wrapper.
         # Note: This does not hide the password from `docker inspect` or `/proc/<pid>/environ`

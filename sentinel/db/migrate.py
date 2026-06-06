@@ -11,7 +11,7 @@ import aiosqlite
 logger = logging.getLogger(__name__)
 
 _SCHEMA_SQL = (Path(__file__).parent / "schema.sql").read_text()
-CURRENT_VERSION = 5
+CURRENT_VERSION = 6
 
 
 async def migrate(db_path: str) -> None:
@@ -37,21 +37,7 @@ async def migrate(db_path: str) -> None:
         # Wrapped in an explicit transaction so a crash mid-migration
         # leaves the DB in the original state rather than partially destroyed.
         if current == 1:
-            logger.info("Dropping v1 database tables for schema migration")
-            try:
-                await db.execute("BEGIN")
-                for table in (
-                    "schema_version",
-                    "detection_events",
-                    "pause_history",
-                    "runtime_settings",
-                    "watcher_heartbeat",
-                ):
-                    await db.execute(f"DROP TABLE IF EXISTS {table}")
-                await db.commit()
-            except Exception:
-                await db.rollback()
-                raise
+            logger.info("v1 database detected; skipping destructive drop to preserve data")
             current = 0
 
         # Wrap schema creation and version tracking in a transaction

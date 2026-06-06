@@ -962,7 +962,7 @@ async def test_check_credentials_bcrypt_exception() -> None:
         Settings(
             printer_ip="192.168.1.10",
             auth_username="admin",
-            auth_password="password",
+            auth_password_bcrypt=_HASHED_PASS,
         ),
         secret=b"\x00" * 32,
     )
@@ -1441,7 +1441,11 @@ async def test_auth_middleware_edge_cases() -> None:
         "type": "http",
         "method": "GET",
         "path": "/",
-        "headers": [(b"authorization", b"Basic YWRtaW46d3JvbmdwYXNz"), (b"user-agent", b"ua")],
+        "headers": [
+            (b"host", b"test"),
+            (b"authorization", b"Basic YWRtaW46d3JvbmdwYXNz"),
+            (b"user-agent", b"ua"),
+        ],
     }
 
     # Mock bcrypt checkpw to make it instant
@@ -1471,7 +1475,7 @@ async def test_auth_middleware_edge_cases() -> None:
         "type": "http",
         "method": "GET",
         "path": "/",
-        "headers": [(b"authorization", b"Basic YWRtaW46d3JvbmdwYXNz"), (b"user-agent", b"ua")],
+        "headers": [(b"host", b"test"), (b"authorization", b"Basic YWRtaW46d3JvbmdwYXNz"), (b"user-agent", b"ua")],
     }
     with patch("sentinel.web.auth.bcrypt.checkpw", return_value=False):
         await mw_evict(scope_evict, AsyncMock(), AsyncMock())

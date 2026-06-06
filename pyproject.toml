@@ -21,7 +21,6 @@ dependencies = [
     "jinja2>=3.1",
     "tenacity>=9.0",
     "aiomqtt>=2.3",
-    "structlog>=25.5.0",
 ]
 
 [project.optional-dependencies]
@@ -65,6 +64,7 @@ select = [
 ]
 ignore = [
     "ANN401",            # Any in return type OK for some edge cases
+    "E501",              # Line too long
 ]
 
 [tool.ruff.lint.per-file-ignores]
@@ -83,6 +83,7 @@ strict = true
 warn_return_any = true
 warn_unused_configs = true
 ignore_missing_imports = false
+exclude = ["^spike/"]
 
 [[tool.mypy.overrides]]
 module = "tests.*"

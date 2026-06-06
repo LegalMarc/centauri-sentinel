@@ -44,12 +44,12 @@ class NotificationDispatcher:
 
     def __init__(self, notifiers: list[Notifier]) -> None:
         self._notifiers = notifiers
-        self._tasks: dict[asyncio.Task[None], None] = {}
+        self._tasks: dict[asyncio.Task[None], bool] = {}
         # Keep track of active failures per channel
         # Format: {channel_name: last_failed_snapshot_id}
         self.failed_channels: dict[str, str] = {}
 
-    def _fire_and_forget(self, coro: Coroutine[Any, Any, None]) -> None:
+    def _fire_and_forget(self, coro: Coroutine[Any, Any, None], critical: bool = False) -> None:
         """Schedule a coroutine in the background, keeping a strong reference."""
         # Enforce a limit on concurrent tasks to avoid OOM when notification services are down
         MAX_CONCURRENT_TASKS = 20
@@ -64,12 +64,20 @@ class NotificationDispatcher:
                 "Too many concurrent notifications — dropping oldest alert "
                 "to prevent task/memory leak."
             )
-            oldest_task = next(iter(self._tasks))
-            oldest_task.cancel()
-            self._tasks.pop(oldest_task, None)
+            task_to_cancel = None
+            for t, is_crit in self._tasks.items():
+                if not is_crit:
+                    task_to_cancel = t
+                    break
+
+            if not task_to_cancel:
+                task_to_cancel = next(iter(self._tasks))
+
+            task_to_cancel.cancel()
+            self._tasks.pop(task_to_cancel, None)
 
         task: asyncio.Task[None] = asyncio.create_task(coro)
-        self._tasks[task] = None
+        self._tasks[task] = critical
         task.add_done_callback(lambda t: self._tasks.pop(t, None))
 
     async def _with_retry(
@@ -118,7 +126,7 @@ class NotificationDispatcher:
             async def _call(n: Notifier = n) -> None:
                 await n.send_detection_alert(score, snapshot_id, jpeg)
 
-            self._fire_and_forget(self._with_retry(_call, channel_name, snapshot_id))
+            self._fire_and_forget(self._with_retry(_call, channel_name, snapshot_id), critical=True)
 
     def dispatch_stall(self) -> None:
         for n in self._notifiers:
@@ -127,7 +135,7 @@ class NotificationDispatcher:
             async def _call(n: Notifier = n) -> None:
                 await n.send_stall_alert()
 
-            self._fire_and_forget(self._with_retry(_call, channel_name))
+            self._fire_and_forget(self._with_retry(_call, channel_name), critical=True)
 
     def dispatch_camera_offline(self) -> None:
         for n in self._notifiers:
@@ -136,7 +144,7 @@ class NotificationDispatcher:
             async def _call(n: Notifier = n) -> None:
                 await n.send_camera_offline_alert()
 
-            self._fire_and_forget(self._with_retry(_call, channel_name))
+            self._fire_and_forget(self._with_retry(_call, channel_name), critical=True)
 
     def dispatch_text(self, text: str) -> None:
         for n in self._notifiers:
