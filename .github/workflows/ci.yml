@@ -80,6 +80,7 @@ jobs:
             type=ref,event=pr
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=long
 
       - name: Build (and push on tags)
         uses: docker/build-push-action@v6

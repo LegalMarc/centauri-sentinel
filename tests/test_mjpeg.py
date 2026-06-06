@@ -15,7 +15,7 @@ from sentinel.camera.errors import CameraOfflineError, CameraReadError
 from sentinel.camera.mjpeg import MjpegGrabber, _extract_jpeg
 from sentinel.config import Settings
 
-_SETTINGS = Settings(printer_ip="10.0.0.1")
+_SETTINGS = Settings(printer_ip="10.0.0.1", printer_access_code="test")
 
 # Minimal valid JPEG (SOI + 1 byte + EOI)
 _JPEG = b"\xff\xd8\xff\xe0JFIF\xff\xd9"

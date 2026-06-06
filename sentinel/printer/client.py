@@ -147,10 +147,7 @@ def _parse_status(
             logger.warning("Missing key fields in modern MQTT payload: %s", missing_fields)
 
         print_state = print_status.get("state", "idle")
-        if print_state in ("completed", "idle"):
-            printing = False
-        else:
-            printing = print_state in ("printing", "paused") or print_status.get("enable") is True
+        printing = print_state in ("printing", "paused") or print_status.get("enable") is True
 
         elapsed_seconds = float(print_status.get("print_duration", 0.0))
         current_layer = int(print_status.get("current_layer", 0))

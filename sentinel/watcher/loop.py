@@ -525,9 +525,9 @@ class WatcherLoop:
         except CameraOfflineError:
             if self.state != WatcherState.CAMERA_OFFLINE:
                 self.state = WatcherState.CAMERA_OFFLINE
-                logger.warning("Camera offline — suspending detection")
                 self._confirm_count = 0
                 if prev_state != WatcherState.CAMERA_OFFLINE:
+                    logger.warning("Camera offline — suspending detection")
                     self._dispatcher.dispatch_camera_offline()
             return
         except Exception:
@@ -626,7 +626,7 @@ class WatcherLoop:
             nonlocal pause_sent
             paused = await self._printer.pause()
             if not paused:
-                raise RuntimeError("Pause command suppressed by debounce window")
+                logger.info("Pause suppressed by debounce; treating as success")
             pause_sent = True
 
         try:
@@ -637,20 +637,12 @@ class WatcherLoop:
         except asyncio.CancelledError:
             if pause_sent:
                 self.state = WatcherState.PAUSED
+                self._paused_since = datetime.now(tz=UTC)
             else:
                 logger.critical("Watcher cancelled before printer pause completed")
             raise
-        except RuntimeError as e:
-            if "debounce" in str(e):
-                logger.info("Pause suppressed by debounce; treating as success")
-                pause_ok = True
-                self.state = WatcherState.PAUSED
-                self._paused_since = datetime.now(tz=UTC)
-            else:
-                raise
-        except Exception:
+        except Exception as e:
             logger.exception("Printer pause failed — notifying anyway")
-            # Restore _confirm_count so the next tick immediately retries the pause
             # if the failure is still detected, instead of waiting for N more frames.
             self._confirm_count = consecutive_count
             self._dispatcher.dispatch_text(
@@ -813,13 +805,17 @@ class WatcherLoop:
             text = "⚠️ A new print has started, but failure detection is currently DISABLED."
             self._dispatcher.dispatch_text(text)
 
+        if self.state == WatcherState.CAMERA_OFFLINE:
+            text = "⚠️ A new print has started, but the camera is offline. Detection is suspended."
+            self._dispatcher.dispatch_text(text)
+            return
+
         try:
             async with asyncio.timeout(3.0):
                 await self._camera.grab()
         except CameraOfflineError:
             text = "⚠️ A new print has started, but the camera is offline. Detection is suspended."
             self._dispatcher.dispatch_text(text)
-            self.state = WatcherState.CAMERA_OFFLINE
         except Exception:
             pass
 

@@ -15,9 +15,9 @@ from sentinel.config import Settings
 # Helpers
 # ---------------------------------------------------------------------------
 
-_SETTINGS_NO_TG = Settings(printer_ip="10.0.0.1")
+_SETTINGS_NO_TG = Settings(printer_ip="10.0.0.1", printer_access_code="test")
 _SETTINGS_TG = Settings(
-    printer_ip="10.0.0.1",
+    printer_ip="10.0.0.1", printer_access_code="test",
     telegram_bot_token="123:token",
     telegram_chat_id="-100",
     telegram_user_ids="42",

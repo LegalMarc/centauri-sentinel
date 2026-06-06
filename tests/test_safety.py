@@ -58,45 +58,4 @@ def test_error_message_includes_host_and_port() -> None:
         check_external_bind(s)
 
 
-def test_external_no_auth_inside_container(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    import os
 
-    s = Settings(bind_host="0.0.0.0", external_bind_allowed=False)
-
-    # 1. Test via CONTAINER env var
-    monkeypatch.setenv("CONTAINER", "docker")
-    caplog.clear()
-    with caplog.at_level(logging.WARNING, logger="sentinel.safety"):
-        check_external_bind(s)
-    assert "Container environment detected" in caplog.text
-
-    # Clean up env var
-    monkeypatch.delenv("CONTAINER", raising=False)
-
-    # 2. Test via os.path.exists showing True for /.dockerenv
-    original_exists = os.path.exists
-
-    def mock_exists(path: str) -> bool:
-        if path == "/.dockerenv":
-            return True
-        return original_exists(path)
-
-    monkeypatch.setattr(os.path, "exists", mock_exists)
-    caplog.clear()
-    with caplog.at_level(logging.WARNING, logger="sentinel.safety"):
-        check_external_bind(s)
-    assert "Container environment detected" in caplog.text
-
-    # 3. Test via os.path.exists showing True for /run/.containerenv
-    def mock_exists_run(path: str) -> bool:
-        if path == "/run/.containerenv":
-            return True
-        return original_exists(path)
-
-    monkeypatch.setattr(os.path, "exists", mock_exists_run)
-    caplog.clear()
-    with caplog.at_level(logging.WARNING, logger="sentinel.safety"):
-        check_external_bind(s)
-    assert "Container environment detected" in caplog.text

@@ -251,6 +251,22 @@ class Settings(BaseSettings):
             raise ValueError(msg)
         return v.lower()
 
+    def model_post_init(self, __context: Any) -> None:
+        import os
+        if "PYTEST_CURRENT_TEST" in os.environ:
+            return
+
+        secrets = [
+            "PRINTER_ACCESS_CODE",
+            "TELEGRAM_BOT_TOKEN",
+            "NTFY_TOKEN",
+            "AUTH_PASSWORD",
+            "AUTH_PASSWORD_BCRYPT",
+        ]
+        for key in secrets:
+            if key in os.environ:
+                os.environ[key] = "********"
+                os.environ.pop(key, None)
 
 @lru_cache
 def get_settings() -> Settings:

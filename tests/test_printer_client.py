@@ -738,4 +738,10 @@ async def test_printer_client_stop_pending() -> None:
     # Mock _send_command to succeed
     with patch.object(client, "_send_command", return_value=None):
         await client.stop()
+    assert client.stop_pending is True
+
+    # It clears when status() confirms not printing
+    s = _parse_status(_status_payload(printing=False))
+    with patch.object(client, "_fetch_status", return_value=s):
+        await client.status()
     assert client.stop_pending is False

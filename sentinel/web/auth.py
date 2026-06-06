@@ -146,13 +146,21 @@ class AuthMiddleware:
                     )
                     await response(scope, receive, send)
                     return
-
-        if not self._enabled:
+        path: str = scope.get("path", "")
+        if path.startswith("/__internal_snapshot/"):
             await self._app(scope, receive, send)
             return
 
-        path: str = scope.get("path", "")
-        if path.startswith("/__internal_snapshot/"):
+        if not self._enabled:
+            # Ticket 1: strictly block any client IP that is not localhost when auth is disabled.
+            client_ip = _resolve_client_ip(scope, headers, self._settings.trust_proxies)
+            if client_ip not in ("127.0.0.1", "::1", "localhost", "testclient"):
+                response = Response(
+                    status_code=403,
+                    content="Auth is disabled. Access restricted to localhost.",
+                )
+                await response(scope, receive, send)
+                return
             await self._app(scope, receive, send)
             return
 

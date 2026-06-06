@@ -80,25 +80,14 @@ def validate_https(url: str) -> str:
     url = url.strip()
     if url:
         parsed = urllib.parse.urlparse(url)
-        # Allow localhost, 127.0.0.1, internal docker hostnames (no dots), and private IPs over HTTP
+        # Allow localhost, 127.0.0.1, and ::1 over HTTP
         if parsed.hostname and parsed.scheme == "http":
-            if (
-                parsed.hostname in ("localhost", "127.0.0.1")
-                or "." not in parsed.hostname
-                or parsed.hostname.endswith((".local", ".lan", ".home", ".internal"))
-            ):
+            if parsed.hostname in ("localhost", "127.0.0.1", "::1", "obico-ml"):
                 logger.warning(
-                    "SECURITY WARNING: Transmitting data over cleartext HTTP to %s", parsed.hostname
+                    "SECURITY WARNING: Transmitting data over cleartext HTTP to local/internal host %s",
+                    parsed.hostname,
                 )
                 return url
-            with contextlib.suppress(ValueError):
-                ip = ipaddress.ip_address(parsed.hostname)
-                if ip.is_private:
-                    logger.warning(
-                        "SECURITY WARNING: Transmitting data over cleartext HTTP to %s",
-                        parsed.hostname,
-                    )
-                    return url
         if not url.startswith("https://"):
             raise ValueError(f"URL must use HTTPS to protect credentials and privacy: {url}")
     return url

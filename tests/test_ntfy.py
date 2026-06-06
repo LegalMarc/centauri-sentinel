@@ -25,6 +25,7 @@ def _enabled_settings(*, token: str | None = None) -> Settings:
         printer_ip="10.0.0.1",
         ntfy_url="https://my-ntfy.local/test",
         ntfy_token=token,
+        ntfy_send_snapshots=True,
     )
 
 
@@ -201,6 +202,7 @@ async def test_detection_alert_loads_photo_from_disk(tmp_path: Any) -> None:
     settings = Settings(
         printer_ip="10.0.0.1",
         ntfy_url="https://my-ntfy.local/test",
+        ntfy_send_snapshots=True,
         db_path=db_path,
     )
     # Save a fake snapshot file
@@ -223,6 +225,7 @@ async def test_detection_alert_disk_read_failure(tmp_path: Any) -> None:
     settings = Settings(
         printer_ip="10.0.0.1",
         ntfy_url="https://my-ntfy.local/test",
+        ntfy_send_snapshots=True,
         db_path=db_path,
     )
     # Don't create the file, so it fails to find/read it.
@@ -240,7 +243,7 @@ async def test_detection_alert_disk_read_failure(tmp_path: Any) -> None:
 
 
 async def test_send_text_calls_post() -> None:
-    settings = Settings(printer_ip="10.0.0.1", ntfy_url="https://my-ntfy.local/test")
+    settings = Settings(printer_ip="10.0.0.1", ntfy_url="https://my-ntfy.local/test", ntfy_send_snapshots=True)
     mock_client = _make_http_client()
     with patch("sentinel.notify.ntfy.httpx.AsyncClient", return_value=mock_client):
         notifier = NtfyNotifier(settings)
@@ -250,7 +253,7 @@ async def test_send_text_calls_post() -> None:
 
 
 async def test_send_print_started_alert() -> None:
-    settings = Settings(printer_ip="10.0.0.1", ntfy_url="https://my-ntfy.local/test")
+    settings = Settings(printer_ip="10.0.0.1", ntfy_url="https://my-ntfy.local/test", ntfy_send_snapshots=True)
     mock_client = _make_http_client()
     with patch("sentinel.notify.ntfy.httpx.AsyncClient", return_value=mock_client):
         notifier = NtfyNotifier(settings)
@@ -259,7 +262,7 @@ async def test_send_print_started_alert() -> None:
 
 
 async def test_send_print_completed_alert() -> None:
-    settings = Settings(printer_ip="10.0.0.1", ntfy_url="https://my-ntfy.local/test")
+    settings = Settings(printer_ip="10.0.0.1", ntfy_url="https://my-ntfy.local/test", ntfy_send_snapshots=True)
     mock_client = _make_http_client()
     with patch("sentinel.notify.ntfy.httpx.AsyncClient", return_value=mock_client):
         notifier = NtfyNotifier(settings)
@@ -268,7 +271,7 @@ async def test_send_print_completed_alert() -> None:
 
 
 async def test_send_external_pause_alert() -> None:
-    settings = Settings(printer_ip="10.0.0.1", ntfy_url="https://my-ntfy.local/test")
+    settings = Settings(printer_ip="10.0.0.1", ntfy_url="https://my-ntfy.local/test", ntfy_send_snapshots=True)
     mock_client = _make_http_client()
     with patch("sentinel.notify.ntfy.httpx.AsyncClient", return_value=mock_client):
         notifier = NtfyNotifier(settings)
@@ -279,7 +282,7 @@ async def test_send_external_pause_alert() -> None:
 async def test_ntfy_rfc2047_header_encoding() -> None:
     import base64
 
-    settings = Settings(printer_ip="10.0.0.1", ntfy_url="https://my-ntfy.local/test")
+    settings = Settings(printer_ip="10.0.0.1", ntfy_url="https://my-ntfy.local/test", ntfy_send_snapshots=True)
     mock_client = _make_http_client()
 
     with patch("sentinel.notify.ntfy.httpx.AsyncClient", return_value=mock_client):
@@ -304,7 +307,7 @@ async def test_ntfy_rfc2047_header_encoding() -> None:
 
 
 async def test_ntfy_no_encoding_for_pure_ascii() -> None:
-    settings = Settings(printer_ip="10.0.0.1", ntfy_url="https://my-ntfy.local/test")
+    settings = Settings(printer_ip="10.0.0.1", ntfy_url="https://my-ntfy.local/test", ntfy_send_snapshots=True)
     mock_client = _make_http_client()
 
     with patch("sentinel.notify.ntfy.httpx.AsyncClient", return_value=mock_client):
@@ -335,6 +338,7 @@ async def test_ntfy_edge_cases(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -
     settings = Settings(
         printer_ip="10.0.0.1",
         ntfy_url="https://my-ntfy.local/test",
+        ntfy_send_snapshots=True,
         db_path=db_path,
     )
     # Save a fake snapshot file

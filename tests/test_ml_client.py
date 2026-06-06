@@ -17,7 +17,7 @@ from sentinel.ml.types import MlResult
 if TYPE_CHECKING:
     from pathlib import Path
 
-_SETTINGS = Settings(printer_ip="10.0.0.1")
+_SETTINGS = Settings(printer_ip="10.0.0.1", printer_access_code="test")
 _JPEG = b"\xff\xd8\xff\xd9"  # minimal JPEG
 
 
@@ -232,7 +232,7 @@ async def test_token_loaded_from_file(tmp_path: Path) -> None:
     token_file = tmp_path / "token"
     token_file.write_text("my-secret-token")
 
-    settings = Settings(printer_ip="10.0.0.1", ml_api_token_file=str(token_file))
+    settings = Settings(printer_ip="10.0.0.1", printer_access_code="test", ml_api_token_file=str(token_file))
     ml = MlClient(settings)
     token = ml._load_token()
     assert token == "my-secret-token"
@@ -242,7 +242,7 @@ async def test_token_reloads_on_mtime_change(tmp_path: Path) -> None:
     token_file = tmp_path / "token"
     token_file.write_text("token-v1")
 
-    settings = Settings(printer_ip="10.0.0.1", ml_api_token_file=str(token_file))
+    settings = Settings(printer_ip="10.0.0.1", printer_access_code="test", ml_api_token_file=str(token_file))
     ml = MlClient(settings)
     ml._load_token()
     assert ml._token == "token-v1"
@@ -259,7 +259,7 @@ async def test_token_reloads_on_mtime_change(tmp_path: Path) -> None:
 
 
 def test_token_missing_file_returns_none() -> None:
-    settings = Settings(printer_ip="10.0.0.1", ml_api_token_file="/nonexistent/token")
+    settings = Settings(printer_ip="10.0.0.1", printer_access_code="test", ml_api_token_file="/nonexistent/token")
     ml = MlClient(settings)
     assert ml._load_token() is None
 
@@ -267,7 +267,7 @@ def test_token_missing_file_returns_none() -> None:
 def test_token_os_error_returns_none(tmp_path: Path) -> None:
     token_file = tmp_path / "token"
     token_file.write_text("tok")
-    settings = Settings(printer_ip="10.0.0.1", ml_api_token_file=str(token_file))
+    settings = Settings(printer_ip="10.0.0.1", printer_access_code="test", ml_api_token_file=str(token_file))
     ml = MlClient(settings)
     with patch("sentinel.ml.client.os.path.getmtime", side_effect=OSError("perm")):
         result = ml._load_token()
@@ -280,7 +280,7 @@ async def test_detect_with_token_sends_auth_header(
     token_file = tmp_path / "token"
     token_file.write_text("my-token")
     settings = Settings(
-        printer_ip="10.0.0.1",
+        printer_ip="10.0.0.1", printer_access_code="test",
         ml_api_token_file=str(token_file),
     )
 
@@ -346,7 +346,7 @@ async def test_ml_client_connection_reuse() -> None:
 
 async def test_ml_callback_host_parameter() -> None:
     # 1. Test when ml_callback_host is set to a hostname
-    settings = Settings(printer_ip="10.0.0.1", ml_callback_host="custom-sentinel-host")
+    settings = Settings(printer_ip="10.0.0.1", printer_access_code="test", ml_callback_host="custom-sentinel-host")
     client_mock = _make_http_client({"score": 0.1})
     store = NonceStore()
     with patch("sentinel.ml.client.httpx.AsyncClient", return_value=client_mock):
@@ -360,7 +360,7 @@ async def test_ml_callback_host_parameter() -> None:
 
     # 2. Test when ml_callback_host is set to a full URL
     settings_url = Settings(
-        printer_ip="10.0.0.1", ml_callback_host="https://sentinel.example.com/subdir"
+        printer_ip="10.0.0.1", printer_access_code="test", ml_callback_host="https://sentinel.example.com/subdir"
     )
     client_mock_url = _make_http_client({"score": 0.1})
     with patch("sentinel.ml.client.httpx.AsyncClient", return_value=client_mock_url):

@@ -216,10 +216,12 @@ class MjpegGrabber:
                             buf = buf[end + 2 :]
                             search_offset = 0
                             frame_start_time = time.monotonic()
+                    self._latest_frame = None
                     raise ConnectionError("Stream ended prematurely")
             except (TimeoutError, httpx.HTTPError, OSError, ValueError) as exc:
                 self._consecutive_failures += 1
                 self._latest_exception = exc
+                self._latest_frame = None
                 logger.warning(
                     "Stream proxy connection failed: %s (consecutive=%d)",
                     exc,
@@ -230,7 +232,6 @@ class MjpegGrabber:
                         f"Camera offline after {self._consecutive_failures} consecutive failures"
                     ) from exc
                 logger.debug("Backing off %.1fs before reconnecting", delay)
-                self._latest_frame = None
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, _BACKOFF_CAP)
             except asyncio.CancelledError:

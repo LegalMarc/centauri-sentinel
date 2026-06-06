@@ -63,6 +63,7 @@ def create_app(
     watcher: Any = None,
     camera: Any = None,
     auth_secret: bytes | None = None,
+    internal_token: str | None = None,
 ) -> FastAPI:
     """Create and configure the FastAPI application."""
     from sentinel import __version__
@@ -106,7 +107,12 @@ def create_app(
     @app.get("/__internal_snapshot/{nonce}")
     async def internal_snapshot(nonce: str, request: Request) -> Response:
         """Single-use JPEG endpoint for the Obico ML API URL-fetch flow."""
-        jpeg = get_nonce_store().pop(nonce)
+        if internal_token is not None:
+            t = request.query_params.get("t")
+            if not t or t != internal_token:
+                raise HTTPException(status_code=403, detail="Forbidden: Invalid internal token")
+
+        jpeg = get_nonce_store().get(nonce)
 
         if jpeg is None:
             client = request.client.host if request.client else "unknown"

@@ -59,6 +59,7 @@ class BotRunner:
             logger.exception("Failed to start Telegram bot on initial attempt: %s", exc)
             self._consecutive_failures = 1
             self.crash_count = 1
+            await self._real_stop()
 
         import asyncio
 

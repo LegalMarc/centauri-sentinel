@@ -131,7 +131,7 @@ def auth_app(mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: AsyncMock
 
 def _client(application: object) -> httpx.AsyncClient:
     return httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=application),  # type: ignore[arg-type]
+        transport=httpx.ASGITransport(app=application, client=("127.0.0.1", 12345)),  # type: ignore[arg-type]
         base_url="http://test",
         headers={"Host": "test", "Origin": "http://test"},
     )
@@ -518,13 +518,25 @@ async def test_csrf_enforcement_when_auth_enabled(app: object, auth_app: object)
         assert r.status_code == 403
         assert "CSRF Protection: Referer mismatch" in r.text
 
-    # 4. CSRF checks bypassed when auth is disabled -> 200
+    # 4. CSRF checks are STILL enforced when auth is disabled -> 403
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://test"
+        transport=httpx.ASGITransport(app=app, client=("127.0.0.1", 12345)), base_url="http://test"
     ) as c:
         r = await c.post(
             "/api/settings",
             json={"ml_confirm_count": 5},
+        )
+        assert r.status_code == 403
+        assert "CSRF Protection: Missing Origin and Referer" in r.text
+
+    # 5. When auth is disabled and CSRF passes, access is allowed -> 200
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app, client=("127.0.0.1", 12345)), base_url="http://test"
+    ) as c:
+        r = await c.post(
+            "/api/settings",
+            json={"ml_confirm_count": 5},
+            headers={"Host": "test", "Origin": "http://test"},
         )
         assert r.status_code == 200
 

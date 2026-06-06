@@ -51,6 +51,7 @@ class MlClient:
         self._store = nonce_store if nonce_store is not None else get_nonce_store()
         self._token: str | None = None
         self._token_mtime: float = 0.0
+        self.internal_token: str | None = None
         self._client = httpx.AsyncClient(timeout=_TIMEOUT)
         if not self._token_file.exists():
             logger.warning(
@@ -108,6 +109,8 @@ class MlClient:
                 if host == "0.0.0.0":
                     host = "sentinel" if Path("/.dockerenv").exists() else "127.0.0.1"
                 snapshot_url = f"http://{host}:{self._bind_port}/__internal_snapshot/{nonce}"
+            if self.internal_token:
+                snapshot_url += f"?t={self.internal_token}"
             token = await asyncio.to_thread(self._load_token)
             headers: dict[str, str] = {}
             if token:

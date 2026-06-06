@@ -144,6 +144,11 @@ async def _run(args: argparse.Namespace) -> None:
     printer = PrinterClient(settings)
     ml = MlClient(settings)
 
+    import secrets
+
+    internal_token = secrets.token_urlsafe(32)
+    ml.internal_token = internal_token
+
     notifiers: list[Notifier] = []
     telegram: TelegramNotifier | None = None
     if settings.telegram_enabled:
@@ -161,7 +166,14 @@ async def _run(args: argparse.Namespace) -> None:
 
     watcher = WatcherLoop(settings, printer, camera, ml, db, dispatcher)
 
-    app = create_app(settings, db=db, watcher=watcher, camera=camera, auth_secret=auth_secret)
+    app = create_app(
+        settings,
+        db=db,
+        watcher=watcher,
+        camera=camera,
+        auth_secret=auth_secret,
+        internal_token=internal_token,
+    )
 
     config = uvicorn.Config(app, host=host, port=port, log_level=settings.log_level.lower())
     server = uvicorn.Server(config)
