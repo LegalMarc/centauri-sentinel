@@ -288,7 +288,6 @@ class PrinterClient:
         self._stop_pending = True
         try:
             await self._with_retry(lambda: self._send_command({"method": 1003}))
-            self._stop_pending = False
         except Exception:
             logger.exception("Stop command failed, flag remains pending")
             raise
@@ -341,6 +340,9 @@ class PrinterClient:
 
         now = time.monotonic()
         if now - self._last_update_time > 15.0:
+            if self._listener_task is not None:
+                self._listener_task.cancel()
+                self._listener_task = None
             raise PrinterTimeoutError("Status request timed out")
 
         async with self._state_lock:

@@ -95,7 +95,7 @@ class WatcherLoop:
 
     @state.setter
     def state(self, value: WatcherState) -> None:
-        if self._state == WatcherState.PAUSED and value == WatcherState.ARMED:
+        if self._state == WatcherState.PAUSED and value in (WatcherState.ARMED, WatcherState.WARMUP):
             self._last_resume_time = time.monotonic()
             logger.info("Printer resumed — setting resume cooldown anchor")
         self._state = value
@@ -416,6 +416,7 @@ class WatcherLoop:
                 )
             self._current_job_id = None
             self._print_start = datetime.now(tz=UTC)
+            self._alerted_new_print = False
 
         # Start job tracking if not already active
         if self._current_job_id is None:
@@ -461,12 +462,14 @@ class WatcherLoop:
                 if time.monotonic() - self._last_resume_time < cooldown_s:
                     logger.debug("Printer status still says 'paused' during post-resume cooldown; ignoring")
                 else:
+                    prev_s = self.state
                     logger.info("Printer paused externally — transitioning PAUSED")
                     self.state = WatcherState.PAUSED
                     self._confirm_count = 0
-                    if getattr(self._settings, "notify_on_print_paused", True):
-                        jpeg = await self._safe_grab_jpeg()
-                        self._dispatcher.dispatch_external_pause(jpeg)
+                    if prev_s not in (WatcherState.OFFLINE, WatcherState.STALLED):
+                        if getattr(self._settings, "notify_on_print_paused", True):
+                            jpeg = await self._safe_grab_jpeg()
+                            self._dispatcher.dispatch_external_pause(jpeg)
             if status.printing and not getattr(status, "stale", False):
                 self.last_printed_status = copy.copy(status)
             return
@@ -533,6 +536,7 @@ class WatcherLoop:
                     if await self._printer.pause():
                         self.state = WatcherState.PAUSED
                         self._paused_since = datetime.now(tz=UTC)
+                        self._confirm_count = 0
                 except Exception as e:
                     logger.error("Failed to pause printer on ML failure: %s", e)
                 self._ml_error_count = 0
@@ -620,6 +624,14 @@ class WatcherLoop:
             else:
                 logger.critical("Watcher cancelled before printer pause completed")
             raise
+        except RuntimeError as e:
+            if "debounce" in str(e):
+                logger.info("Pause suppressed by debounce; treating as success")
+                pause_ok = True
+                self.state = WatcherState.PAUSED
+                self._paused_since = datetime.now(tz=UTC)
+            else:
+                raise
         except Exception:
             logger.exception("Printer pause failed — notifying anyway")
             # Restore _confirm_count so the next tick immediately retries the pause
@@ -671,6 +683,8 @@ class WatcherLoop:
                     # We return all paths to clear them from the DB even if disk deletion
                     # fails. Orphaned files are retried by fallback_directory_cleanup().
                     for path_str in paths:
+                        if not path_str:
+                            continue
                         p = Path(path_str)
                         try:
                             p.unlink(missing_ok=True)
@@ -782,9 +796,16 @@ class WatcherLoop:
         if detection_enabled == "false":
             text = "⚠️ A new print has started, but failure detection is currently DISABLED."
             self._dispatcher.dispatch_text(text)
-        if self.state == WatcherState.CAMERA_OFFLINE:
+        
+        try:
+            async with asyncio.timeout(3.0):
+                await self._camera.grab()
+        except CameraOfflineError:
             text = "⚠️ A new print has started, but the camera is offline. Detection is suspended."
             self._dispatcher.dispatch_text(text)
+            self.state = WatcherState.CAMERA_OFFLINE
+        except Exception:
+            pass
 
     async def _safe_grab_jpeg(self) -> bytes | None:
         try:
