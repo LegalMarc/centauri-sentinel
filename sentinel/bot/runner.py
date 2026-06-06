@@ -93,10 +93,10 @@ class BotRunner:
         app.add_handler(MessageHandler(filters.Text(["▶️ Resume"]), h.cmd_resume))
         app.add_handler(MessageHandler(filters.Text(["⏹️ Stop"]), h.cmd_stop))
 
+        self._app = app
         await app.initialize()
         await app.start()
         await app.updater.start_polling()
-        self._app = app
         logger.info("Telegram bot polling started")
 
     async def _supervisor_loop(self) -> None:
@@ -170,9 +170,18 @@ class BotRunner:
         try:
             async with asyncio.timeout(5.0):
                 if app.updater is not None and app.updater.running:
-                    await app.updater.stop()
-                await app.stop()
-                await app.shutdown()
+                    try:
+                        await app.updater.stop()
+                    except Exception as e:
+                        logger.warning("Error stopping updater: %s", e)
+                try:
+                    await app.stop()
+                except Exception as e:
+                    logger.warning("Error stopping app: %s", e)
+                try:
+                    await app.shutdown()
+                except Exception as e:
+                    logger.warning("Error shutting down app: %s", e)
         except TimeoutError:
             logger.warning("Telegram bot shutdown timed out after 5.0s")
         except Exception as exc:

@@ -53,14 +53,16 @@ class NtfyNotifier:
         if not self._enabled:
             return
 
-        photo_bytes = jpeg
-        if not photo_bytes and snapshot_id:
-            p = self._snapshots_dir / f"{snapshot_id}.jpg"
-            if p.exists():
-                try:
-                    photo_bytes = await asyncio.to_thread(p.read_bytes)
-                except OSError:
-                    logger.exception("Failed to read snapshot file for ntfy: %s", p)
+        photo_bytes = None
+        if self._settings.ntfy_send_snapshots:
+            photo_bytes = jpeg
+            if not photo_bytes and snapshot_id:
+                p = self._snapshots_dir / f"{snapshot_id}.jpg"
+                if p.exists():
+                    try:
+                        photo_bytes = await asyncio.to_thread(p.read_bytes)
+                    except OSError:
+                        logger.exception("Failed to read snapshot file for ntfy: %s", p)
 
         await self._post(
             title="Failure detected",
@@ -114,7 +116,7 @@ class NtfyNotifier:
             message=f"Started printing: {name}",
             priority="default",
             tags=["rocket"],
-            jpeg=jpeg,
+            jpeg=jpeg if self._settings.ntfy_send_snapshots else None,
         )
 
     async def send_print_completed_alert(
@@ -131,7 +133,7 @@ class NtfyNotifier:
             message=f"Completed {name} in {time_str}.",
             priority="default",
             tags=["white_check_mark"],
-            jpeg=jpeg,
+            jpeg=jpeg if self._settings.ntfy_send_snapshots else None,
         )
 
     async def send_external_pause_alert(self, jpeg: bytes | None = None) -> None:
@@ -142,7 +144,7 @@ class NtfyNotifier:
             message="Printer paused externally (possible filament runout or manual pause).",
             priority="high",
             tags=["pause_button"],
-            jpeg=jpeg,
+            jpeg=jpeg if self._settings.ntfy_send_snapshots else None,
         )
 
     async def _post(

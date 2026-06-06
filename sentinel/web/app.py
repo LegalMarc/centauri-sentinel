@@ -50,17 +50,10 @@ class LimitUploadSizeMiddleware:
             if msg["type"] == "http.request":
                 body_size += len(msg.get("body", b""))
                 if body_size > 1024 * 1024:
-                    raise RuntimeError("Payload Too Large")
+                    raise HTTPException(status_code=413, detail="Payload Too Large")
             return msg
 
-        try:
-            await self.app(scope, bounded_receive, send)
-        except RuntimeError as exc:
-            if str(exc) == "Payload Too Large":
-                response = Response(status_code=413, content="Payload Too Large")
-                await response(scope, receive, send)
-                return
-            raise
+        await self.app(scope, bounded_receive, send)
 
 
 def create_app(
@@ -113,7 +106,7 @@ def create_app(
     @app.get("/__internal_snapshot/{nonce}")
     async def internal_snapshot(nonce: str, request: Request) -> Response:
         """Single-use JPEG endpoint for the Obico ML API URL-fetch flow."""
-        jpeg = get_nonce_store().get(nonce)
+        jpeg = get_nonce_store().pop(nonce)
 
         if jpeg is None:
             client = request.client.host if request.client else "unknown"

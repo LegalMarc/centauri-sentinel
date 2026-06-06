@@ -100,10 +100,6 @@ class AuthMiddleware:
             await response(scope, receive, send)
             return
 
-        if not self._enabled:
-            await self._app(scope, receive, send)
-            return
-
         if scope.get("method") in ("POST", "PUT", "DELETE", "PATCH"):
             origin = headers.get(b"origin")
             host = headers.get(b"host", b"")
@@ -138,6 +134,10 @@ class AuthMiddleware:
                     )
                     await response(scope, receive, send)
                     return
+
+        if not self._enabled:
+            await self._app(scope, receive, send)
+            return
 
         path: str = scope.get("path", "")
         if path.startswith("/__internal_snapshot/"):

@@ -588,11 +588,11 @@ async def test_limit_upload_size_middleware_edge_cases() -> None:
 
     mw.app.side_effect = mock_app
 
-    await mw(scope, mock_receive, mock_send)
-
-    # Check that we returned a 413
-    assert len(sent_messages) > 0
-    assert sent_messages[0]["status"] == 413
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as excinfo:
+        await mw(scope, mock_receive, mock_send)
+    assert excinfo.value.status_code == 413
+    assert excinfo.value.detail == "Payload Too Large"
 
     # 4. Standard runtime exception propagation
     mw = LimitUploadSizeMiddleware(AsyncMock())
@@ -603,10 +603,10 @@ async def test_limit_upload_size_middleware_edge_cases() -> None:
     }
 
     async def bad_app(scope: object, receive: object, send: object) -> None:
-        raise RuntimeError("some other error")
+        raise ValueError("some other error")
 
     mw.app.side_effect = bad_app
-    with pytest.raises(RuntimeError, match="some other error"):
+    with pytest.raises(ValueError, match="some other error"):
         await mw(scope, AsyncMock(), AsyncMock())
 
 

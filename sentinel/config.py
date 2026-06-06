@@ -22,7 +22,7 @@ class Settings(BaseSettings):
 
     # Printer
     printer_ip: str = "192.168.1.10"
-    printer_access_code: SecretStr = SecretStr("123456")
+    printer_access_code: SecretStr
     printer_mqtt_port: int = 1883
     printer_mjpeg_port: int = 8080
     printer_mjpeg_path: str = "/mjpeg"
@@ -102,14 +102,7 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _validate_settings(self) -> Settings:
         """Validate config variables and hash plain AUTH_PASSWORD if provided."""
-        # Check if printer access code is default
-        if self.printer_access_code.get_secret_value() == "123456":
-            import logging
 
-            logging.getLogger("sentinel.config").warning(
-                "Printer access code is set to the default value ('123456'). "
-                "For security reasons, please change this to a secure, unique access code."
-            )
 
         # 1. Telegram checks
         if self.telegram_bot_token:
@@ -142,12 +135,6 @@ class Settings(BaseSettings):
                 "Please generate a bcrypt hash and use AUTH_PASSWORD_BCRYPT instead."
             )
         self.auth_password = None
-        # Clear the plain-text password from Python's os.environ wrapper.
-        # Note: This does not hide the password from `docker inspect` or `/proc/<pid>/environ`
-        # if it was passed as a container environment variable at process launch.
-        import os
-
-        os.environ.pop("AUTH_PASSWORD", None)
         return self
 
     @field_validator("log_level")

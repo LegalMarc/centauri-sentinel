@@ -1,7 +1,11 @@
+import asyncio
 import contextlib
 import ipaddress
+import logging
 import re
 import socket
+
+logger = logging.getLogger(__name__)
 
 
 def validate_printer_ip(v: str) -> str:
@@ -32,7 +36,7 @@ def validate_printer_ip(v: str) -> str:
     return v_str
 
 
-def resolve_and_validate_printer_ip(v: str) -> str:
+async def resolve_and_validate_printer_ip(v: str) -> str:
     """
     Resolves a printer hostname or IP to a literal IP address, then validates
     it against SSRF risks.
@@ -49,7 +53,7 @@ def resolve_and_validate_printer_ip(v: str) -> str:
             raise ValueError(f"SSRF Protection: Loopback hostnames are not allowed: {v_str}")
 
         try:
-            resolved_ip_str = socket.gethostbyname(v_str)
+            resolved_ip_str = await asyncio.to_thread(socket.gethostbyname, v_str)
             ip = ipaddress.ip_address(resolved_ip_str)
         except OSError as e:
             raise ValueError(f"SSRF Protection: Cannot resolve hostname {v_str}") from e
@@ -83,10 +87,12 @@ def validate_https(url: str) -> str:
                 or "." not in parsed.hostname
                 or parsed.hostname.endswith((".local", ".lan", ".home", ".internal"))
             ):
+                logger.warning("SECURITY WARNING: Transmitting data over cleartext HTTP to %s", parsed.hostname)
                 return url
             with contextlib.suppress(ValueError):
                 ip = ipaddress.ip_address(parsed.hostname)
                 if ip.is_private:
+                    logger.warning("SECURITY WARNING: Transmitting data over cleartext HTTP to %s", parsed.hostname)
                     return url
         if not url.startswith("https://"):
             raise ValueError(f"URL must use HTTPS to protect credentials and privacy: {url}")

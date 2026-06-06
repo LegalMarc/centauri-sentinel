@@ -154,13 +154,17 @@ def _parse_status(payload: dict[str, Any], layers_cache: dict[str, int] | None =
         total_layers = 0
         if filename:
             if layers_cache is not None and filename in layers_cache:
-                total_layers = layers_cache[filename]
+                total_layers = layers_cache.pop(filename)
+                layers_cache[filename] = total_layers  # move to end (LRU)
             else:
                 for file_info in result.get("file_list", []):
                     if file_info.get("filename") == filename:
                         total_layers = int(file_info.get("layer", 0))
                         if layers_cache is not None:
                             layers_cache[filename] = total_layers
+                            if len(layers_cache) > 100:
+                                oldest = next(iter(layers_cache))
+                                del layers_cache[oldest]
                         break
 
         extruder_temp = (
@@ -348,7 +352,7 @@ class PrinterClient:
         while True:
             has_received = False
             try:
-                resolved_ip = resolve_and_validate_printer_ip(self._host)
+                resolved_ip = await resolve_and_validate_printer_ip(self._host)
                 client_id = self._status_client_id
                 async with aiomqtt.Client(
                     hostname=resolved_ip,
@@ -445,7 +449,7 @@ class PrinterClient:
     async def _send_command(self, msg: dict[str, Any]) -> None:
         """Publish a command and return; does not wait for an ack."""
         try:
-            resolved_ip = resolve_and_validate_printer_ip(self._host)
+            resolved_ip = await resolve_and_validate_printer_ip(self._host)
             client_id = self._cmd_client_id
             async with asyncio.timeout(_TIMEOUT_S):
                 async with aiomqtt.Client(

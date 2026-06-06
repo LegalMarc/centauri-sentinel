@@ -162,7 +162,7 @@ class MjpegGrabber:
             try:
                 parsed = urllib.parse.urlparse(self._url)
                 if parsed.hostname:
-                    resolved_ip = resolve_and_validate_printer_ip(parsed.hostname)
+                    resolved_ip = await resolve_and_validate_printer_ip(parsed.hostname)
                     netloc = resolved_ip
                     if parsed.port is not None:
                         netloc = f"{resolved_ip}:{parsed.port}"

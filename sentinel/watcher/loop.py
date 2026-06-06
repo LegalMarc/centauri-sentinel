@@ -87,6 +87,7 @@ class WatcherLoop:
         self._snooze_task: asyncio.Task[None] | None = None
         self._tick_lock = asyncio.Lock()
         self._last_resume_time = 0.0
+        self._ml_error_count = 0
 
     @property
     def state(self) -> WatcherState:
@@ -299,7 +300,7 @@ class WatcherLoop:
             elif self.state not in (WatcherState.OFFLINE, WatcherState.CAMERA_OFFLINE, WatcherState.STALLED):
                 self._paused_since = None
 
-            if self.state == WatcherState.ARMED:
+            if self.state in (WatcherState.ARMED, WatcherState.CAMERA_OFFLINE):
                 detection_enabled = await self._db.get_setting("detection_enabled", "true")
                 if detection_enabled == "true":
                     await self._check_frame(prev_state)
@@ -452,12 +453,20 @@ class WatcherLoop:
 
         if status.print_state == "paused":
             if self.state != WatcherState.PAUSED:
-                logger.info("Printer paused externally — transitioning PAUSED")
-                self.state = WatcherState.PAUSED
-                self._confirm_count = 0
-                if getattr(self._settings, "notify_on_print_paused", True):
-                    jpeg = await self._safe_grab_jpeg()
-                    self._dispatcher.dispatch_external_pause(jpeg)
+                try:
+                    cooldown_s = float(self._settings.resume_cooldown_seconds)
+                except (ValueError, TypeError, AttributeError):
+                    cooldown_s = 5.0
+                
+                if time.monotonic() - self._last_resume_time < cooldown_s:
+                    logger.debug("Printer status still says 'paused' during post-resume cooldown; ignoring")
+                else:
+                    logger.info("Printer paused externally — transitioning PAUSED")
+                    self.state = WatcherState.PAUSED
+                    self._confirm_count = 0
+                    if getattr(self._settings, "notify_on_print_paused", True):
+                        jpeg = await self._safe_grab_jpeg()
+                        self._dispatcher.dispatch_external_pause(jpeg)
             if status.printing and not getattr(status, "stale", False):
                 self.last_printed_status = copy.copy(status)
             return
@@ -468,10 +477,9 @@ class WatcherLoop:
             if self.state in (WatcherState.IDLE, WatcherState.WARMUP):
                 logger.info("Printer armed for detection (elapsed=%.0fs)", elapsed)
             # Recover from CAMERA_OFFLINE once printer is still printing —
-            # the next _check_frame call will attempt a fresh grab.
+            # the next _check_frame call will attempt a fresh grab and recover if successful.
             if self.state == WatcherState.CAMERA_OFFLINE:
-                logger.info("Camera offline — retrying grab on next tick")
-                self.state = WatcherState.ARMED
+                pass
             elif self.state == WatcherState.PAUSED and status.print_state == "printing":
                 if (
                     self._paused_since is not None
@@ -498,21 +506,39 @@ class WatcherLoop:
         try:
             jpeg = await self._camera.grab()
         except CameraOfflineError:
-            self.state = WatcherState.CAMERA_OFFLINE
-            logger.warning("Camera offline — suspending detection")
-            self._confirm_count = 0
-            if prev_state != WatcherState.CAMERA_OFFLINE:
-                self._dispatcher.dispatch_camera_offline()
+            if self.state != WatcherState.CAMERA_OFFLINE:
+                self.state = WatcherState.CAMERA_OFFLINE
+                logger.warning("Camera offline — suspending detection")
+                self._confirm_count = 0
+                if prev_state != WatcherState.CAMERA_OFFLINE:
+                    self._dispatcher.dispatch_camera_offline()
             return
         except Exception:
             logger.warning("Camera grab failed; skipping this tick")
             self._confirm_count = 0
             return
 
+        if self.state == WatcherState.CAMERA_OFFLINE:
+            logger.info("Camera recovered — transitioning ARMED")
+            self.state = WatcherState.ARMED
+
         result: MlResult = await self._ml.detect(jpeg)
         if result.error:
-            logger.warning("ML detection failed; preserving confirm counter and skipping this tick")
+            self._ml_error_count += 1
+            logger.warning("ML detection failed (%d consecutive times)", self._ml_error_count)
+            if self._ml_error_count >= 5:
+                logger.error("Too many ML failures — failing CLOSED by pausing printer")
+                self._dispatcher.dispatch_text("🚨 Sentinel ML service is failing continuously. Pausing printer for safety.")
+                try:
+                    if await self._printer.pause():
+                        self.state = WatcherState.PAUSED
+                        self._paused_since = datetime.now(tz=UTC)
+                except Exception as e:
+                    logger.error("Failed to pause printer on ML failure: %s", e)
+                self._ml_error_count = 0
             return
+        
+        self._ml_error_count = 0
 
         score_threshold_str = await self._db.get_setting(
             "ml_score_threshold",

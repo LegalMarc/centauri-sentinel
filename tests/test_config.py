@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import pytest
 
 from sentinel.config import Settings
@@ -164,7 +165,7 @@ def test_printer_ip_validation_valid_hostname(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr("sentinel.network.socket.gethostbyname", lambda x: "192.168.1.50")
     s = Settings(printer_ip="printer.local")
     assert s.printer_ip == "printer.local"
-    assert resolve_and_validate_printer_ip(s.printer_ip) == "192.168.1.50"
+    assert asyncio.run(resolve_and_validate_printer_ip(s.printer_ip)) == "192.168.1.50"
 
 
 def test_printer_ip_validation_ssrf_disallowed() -> None:
@@ -176,25 +177,25 @@ def test_printer_ip_validation_ssrf_disallowed() -> None:
 
     # Resolver should block SSRF
     with pytest.raises(ValueError, match="SSRF Protection"):
-        resolve_and_validate_printer_ip("127.0.0.1")
+        asyncio.run(resolve_and_validate_printer_ip("127.0.0.1"))
     with pytest.raises(ValueError, match="SSRF Protection"):
-        resolve_and_validate_printer_ip("::1")
+        asyncio.run(resolve_and_validate_printer_ip("::1"))
     with pytest.raises(ValueError, match="SSRF Protection"):
-        resolve_and_validate_printer_ip("localhost")
+        asyncio.run(resolve_and_validate_printer_ip("localhost"))
     with pytest.raises(ValueError, match="SSRF Protection"):
-        resolve_and_validate_printer_ip("localhost.localdomain")
+        asyncio.run(resolve_and_validate_printer_ip("localhost.localdomain"))
     with pytest.raises(ValueError, match="SSRF Protection"):
-        resolve_and_validate_printer_ip("8.8.8.8")
+        asyncio.run(resolve_and_validate_printer_ip("8.8.8.8"))
     with pytest.raises(ValueError, match="SSRF Protection"):
-        resolve_and_validate_printer_ip("169.254.169.254")
+        asyncio.run(resolve_and_validate_printer_ip("169.254.169.254"))
     with pytest.raises(ValueError, match="SSRF Protection"):
-        resolve_and_validate_printer_ip("0.0.0.0")
+        asyncio.run(resolve_and_validate_printer_ip("0.0.0.0"))
     with pytest.raises(ValueError, match="SSRF Protection"):
-        resolve_and_validate_printer_ip("::")
+        asyncio.run(resolve_and_validate_printer_ip("::"))
     with pytest.raises(ValueError, match="SSRF Protection"):
-        resolve_and_validate_printer_ip("::ffff:127.0.0.1")
+        asyncio.run(resolve_and_validate_printer_ip("::ffff:127.0.0.1"))
     with pytest.raises(ValueError, match="SSRF Protection"):
-        resolve_and_validate_printer_ip("::ffff:8.8.8.8")
+        asyncio.run(resolve_and_validate_printer_ip("::ffff:8.8.8.8"))
 
 
 def test_printer_ip_validation_invalid() -> None:
@@ -211,7 +212,7 @@ def test_printer_ip_validation_hostname_resolves_to_loopback(
     s = Settings(printer_ip="malicious.com")
     assert s.printer_ip == "malicious.com"
     with pytest.raises(ValueError, match="SSRF Protection"):
-        resolve_and_validate_printer_ip("malicious.com")
+        asyncio.run(resolve_and_validate_printer_ip("malicious.com"))
 
 
 def test_printer_ip_validation_hostname_resolution_fails(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -226,7 +227,7 @@ def test_printer_ip_validation_hostname_resolution_fails(monkeypatch: pytest.Mon
     s = Settings(printer_ip="notfound.local")
     assert s.printer_ip == "notfound.local"
     with pytest.raises(ValueError, match="SSRF Protection: Cannot resolve hostname"):
-        resolve_and_validate_printer_ip("notfound.local")
+        asyncio.run(resolve_and_validate_printer_ip("notfound.local"))
 
 
 # ---------------------------------------------------------------------------
