@@ -91,3 +91,60 @@ async def test_concurrent_tasks_limit():
     for task in list(dispatcher._tasks):
         task.cancel()
     await asyncio.sleep(0.01)
+
+
+async def test_dispatcher_errors_and_cleanup() -> None:
+    from unittest.mock import patch
+
+    import tenacity
+
+    notifier = MagicMock()
+    # Always raise OSError
+    notifier.send_detection_alert = AsyncMock(side_effect=OSError("network error"))
+
+    dispatcher = NotificationDispatcher([notifier])
+
+    # 1. Test persistent failure logging & storing failed snapshot ID
+    orig_retry = tenacity.AsyncRetrying
+
+    def mock_retry(*args: object, **kwargs: object) -> object:
+        # Override stop to 1 attempt and wait to 0
+        kwargs["stop"] = tenacity.stop_after_attempt(1)
+        kwargs["wait"] = tenacity.wait_fixed(0)
+        return orig_retry(*args, **kwargs)
+
+    with patch("tenacity.AsyncRetrying", mock_retry):
+        dispatcher.dispatch_detection(0.9, "snap-failed", b"jpeg")
+        # Yield to let the tasks execute
+        await asyncio.sleep(0.05)
+
+    assert dispatcher.failed_channels.get("MagicMock") == "snap-failed"
+
+    # 2. Test timeout error handling
+    async def slow_call(*args: object, **kwargs: object) -> object:
+        await asyncio.sleep(10.0)
+
+    notifier.send_detection_alert = AsyncMock(side_effect=slow_call)
+
+    dispatcher = NotificationDispatcher([notifier])
+    orig_timeout = asyncio.timeout
+
+    def mock_timeout(delay: float) -> object:
+        return orig_timeout(0.01)
+
+    with patch("asyncio.timeout", mock_timeout):
+        dispatcher.dispatch_detection(0.9, "snap-timeout", b"jpeg")
+        await asyncio.sleep(0.05)
+
+    assert dispatcher.failed_channels.get("MagicMock") == "snap-timeout"
+
+    # 3. Test the clean up done tasks path in _fire_and_forget
+    dispatcher = NotificationDispatcher([notifier])
+    task = asyncio.create_task(asyncio.sleep(0.0))
+    await task
+    dispatcher._tasks[task] = None
+
+    # Fire any notification, which calls _fire_and_forget
+    dispatcher.dispatch_text("hello")
+    # This should have cleaned up the done task from _tasks
+    assert task not in dispatcher._tasks

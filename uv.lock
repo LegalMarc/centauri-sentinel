@@ -192,6 +192,7 @@ dev = [
     { name = "pytest-asyncio" },
     { name = "pytest-cov" },
     { name = "pytest-httpx" },
+    { name = "pyyaml" },
     { name = "respx" },
     { name = "ruff" },
 ]
@@ -218,6 +219,7 @@ requires-dist = [
     { name = "pytest-httpx", marker = "extra == 'dev'", specifier = ">=0.35" },
     { name = "python-json-logger", specifier = ">=3.2" },
     { name = "python-telegram-bot", specifier = ">=21.0" },
+    { name = "pyyaml", marker = "extra == 'dev'" },
     { name = "respx", marker = "extra == 'dev'", specifier = ">=0.22" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8" },
     { name = "structlog", specifier = ">=25.5.0" },

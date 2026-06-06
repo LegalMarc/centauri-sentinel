@@ -54,6 +54,7 @@ class MjpegGrabber:
             f"http://{settings.printer_ip}:{settings.printer_mjpeg_port}"
             f"{settings.printer_mjpeg_path}"
         )
+        self._settings = settings
         self._url = url
         self._consecutive_failures = 0
         self._last_success: datetime | None = None
@@ -152,10 +153,33 @@ class MjpegGrabber:
 
         Attempts to reconnect with exponential backoff if the stream disconnects.
         """
+        import urllib.parse
+
+        from sentinel.network import resolve_and_validate_printer_ip
+
         delay = _BACKOFF_BASE
         while True:
             try:
-                async with self._client.stream("GET", self._url) as resp:
+                parsed = urllib.parse.urlparse(self._url)
+                if parsed.hostname:
+                    resolved_ip = resolve_and_validate_printer_ip(parsed.hostname)
+                    netloc = resolved_ip
+                    if parsed.port is not None:
+                        netloc = f"{resolved_ip}:{parsed.port}"
+                    url_to_fetch = urllib.parse.urlunparse(
+                        (
+                            parsed.scheme,
+                            netloc,
+                            parsed.path,
+                            parsed.params,
+                            parsed.query,
+                            parsed.fragment,
+                        )
+                    )
+                else:
+                    url_to_fetch = self._url
+
+                async with self._client.stream("GET", url_to_fetch) as resp:
                     resp.raise_for_status()
                     buf = b""
                     search_offset = 0
@@ -243,7 +267,7 @@ class MjpegGrabber:
                 await asyncio.sleep(1)
 
     async def stream_proxy(self) -> AsyncIterator[bytes]:
-        if len(self._listeners) >= 3:
+        if len(self._listeners) >= self._settings.camera_max_streams:
             raise CameraReadError("Max concurrent stream proxies reached")
 
         q: asyncio.Queue[bytes | Exception] = asyncio.Queue(maxsize=2)
@@ -251,18 +275,8 @@ class MjpegGrabber:
         if self._broadcaster_task is None or self._broadcaster_task.done():
             self._broadcaster_task = asyncio.create_task(self._broadcast_loop())
 
-        start_time = time.monotonic()
-        max_duration = 300.0  # 5 minutes
-
         try:
             while True:
-                if time.monotonic() - start_time > max_duration:
-                    logger.info(
-                        "Stream proxy reached maximum connection duration "
-                        "of 5 minutes — closing stream"
-                    )
-                    break
-
                 try:
                     item = await asyncio.wait_for(q.get(), timeout=1.0)
                 except TimeoutError:

@@ -473,10 +473,10 @@ async def test_auth_failed_login_delay(auth_app: object) -> None:
     assert elapsed >= 0.4
 
 
-async def test_csrf_enforcement_regardless_of_auth(app: object) -> None:
+async def test_csrf_enforcement_when_auth_enabled(app: object, auth_app: object) -> None:
     # 1. Missing Origin and Referer -> 403
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://test"
+        transport=httpx.ASGITransport(app=auth_app), base_url="http://test"
     ) as c:
         r = await c.post("/api/settings", json={"ml_confirm_count": 5})
         assert r.status_code == 403
@@ -484,7 +484,7 @@ async def test_csrf_enforcement_regardless_of_auth(app: object) -> None:
 
     # 2. Origin Mismatch -> 403
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://test"
+        transport=httpx.ASGITransport(app=auth_app), base_url="http://test"
     ) as c:
         r = await c.post(
             "/api/settings",
@@ -494,9 +494,21 @@ async def test_csrf_enforcement_regardless_of_auth(app: object) -> None:
         assert r.status_code == 403
         assert "CSRF Protection: Origin mismatch" in r.text
 
+    # 2b. Subdomain Origin Mismatch -> 403
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=auth_app), base_url="http://test"
+    ) as c:
+        r = await c.post(
+            "/api/settings",
+            json={"ml_confirm_count": 5},
+            headers={"Host": "test", "Origin": "http://sub.test"},
+        )
+        assert r.status_code == 403
+        assert "CSRF Protection: Origin mismatch" in r.text
+
     # 3. Referer Mismatch -> 403
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://test"
+        transport=httpx.ASGITransport(app=auth_app), base_url="http://test"
     ) as c:
         r = await c.post(
             "/api/settings",
@@ -506,14 +518,13 @@ async def test_csrf_enforcement_regardless_of_auth(app: object) -> None:
         assert r.status_code == 403
         assert "CSRF Protection: Referer mismatch" in r.text
 
-    # 4. Valid Referer without Origin -> 200 (auth disabled)
+    # 4. CSRF checks bypassed when auth is disabled -> 200
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test"
     ) as c:
         r = await c.post(
             "/api/settings",
             json={"ml_confirm_count": 5},
-            headers={"Host": "test", "Referer": "http://test/dashboard"},
         )
         assert r.status_code == 200
 
@@ -525,6 +536,78 @@ async def test_limit_upload_size_middleware(app: object) -> None:
         r = await c.post("/api/settings", json=large_payload)
     assert r.status_code == 413
     assert r.text == "Payload Too Large"
+
+
+async def test_limit_upload_size_middleware_edge_cases() -> None:
+    from unittest.mock import ANY
+
+    from sentinel.web.app import LimitUploadSizeMiddleware
+
+    # 1. Non-HTTP scope
+    mw = LimitUploadSizeMiddleware(AsyncMock())
+    scope = {"type": "websocket"}
+    await mw(scope, AsyncMock(), AsyncMock())
+    mw.app.assert_called_once_with(scope, ANY, ANY)
+
+    # 2. HTTP GET request (non-POST/PUT/PATCH method)
+    mw = LimitUploadSizeMiddleware(AsyncMock())
+    scope = {"type": "http", "method": "GET"}
+    await mw(scope, AsyncMock(), AsyncMock())
+    mw.app.assert_called_once_with(scope, ANY, ANY)
+
+    # 3. HTTP POST request streaming body exceeding 1MB (without Content-Length header)
+    mw = LimitUploadSizeMiddleware(AsyncMock())
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "headers": [],
+    }
+
+    # Simulate receiving chunks that sum up to > 1MB
+    chunks = [
+        {"type": "http.request", "body": b"x" * 600000},
+        {"type": "http.request", "body": b"x" * 600000},
+    ]
+    chunk_iter = iter(chunks)
+
+    async def mock_receive() -> dict[str, object]:
+        return next(chunk_iter)
+
+    # We mock send to capture the response
+    sent_messages = []
+
+    async def mock_send(msg: dict[str, object]) -> None:
+        sent_messages.append(msg)
+
+    # We mock mw.app to simulate reading the body
+    async def mock_app(scope: object, receive: object, send: object) -> None:
+        # Read the first chunk
+        await receive()
+        # Read the second chunk, which will trigger the exception
+        await receive()
+
+    mw.app.side_effect = mock_app
+
+    await mw(scope, mock_receive, mock_send)
+
+    # Check that we returned a 413
+    assert len(sent_messages) > 0
+    assert sent_messages[0]["status"] == 413
+
+    # 4. Standard runtime exception propagation
+    mw = LimitUploadSizeMiddleware(AsyncMock())
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "headers": [],
+    }
+
+    async def bad_app(scope: object, receive: object, send: object) -> None:
+        raise RuntimeError("some other error")
+
+    mw.app.side_effect = bad_app
+    with pytest.raises(RuntimeError, match="some other error"):
+        await mw(scope, AsyncMock(), AsyncMock())
 
 
 async def test_auth_timing_oracle_checkpw_always_called(
@@ -567,6 +650,22 @@ async def test_auth_cookie_grants_access(auth_app: object) -> None:
     assert r2.status_code == 200
 
 
+async def test_logout_clears_cookie(auth_app: object) -> None:
+    async with _client(auth_app) as c:
+        # First log in to get a cookie
+        r1 = await c.get("/", auth=("admin", "testpass"), follow_redirects=False)
+        cookie = r1.cookies.get("sentinel_session")
+        assert cookie is not None
+
+        # Call logout
+        r2 = await c.post("/logout")
+        assert r2.status_code == 200
+        # Check that the cookie is cleared
+        set_cookie = r2.headers.get("set-cookie", "")
+        assert "sentinel_session=" in set_cookie
+        assert "max-age=0" in set_cookie.lower() or "max_age=0" in set_cookie.lower()
+
+
 async def test_auth_healthz_always_open(auth_app: object) -> None:
     """Health endpoint must bypass auth."""
     async with _client(auth_app) as c:
@@ -579,7 +678,7 @@ async def test_auth_healthz_always_open(auth_app: object) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_internal_snapshot_single_use(app: object) -> None:
+async def test_internal_snapshot_allow_multiple_retries(app: object) -> None:
     from sentinel.ml.nonce import get_nonce_store
 
     nonce = get_nonce_store().put(_FAKE_JPEG)
@@ -588,7 +687,8 @@ async def test_internal_snapshot_single_use(app: object) -> None:
         r2 = await c.get(f"/__internal_snapshot/{nonce}")
     assert r1.status_code == 200
     assert r1.content == _FAKE_JPEG
-    assert r2.status_code == 404
+    assert r2.status_code == 200
+    assert r2.content == _FAKE_JPEG
 
 
 async def test_internal_snapshot_unknown_nonce(app: object) -> None:
@@ -1294,3 +1394,86 @@ async def test_status_page_renders_notification_failures_banner(
     assert "Telegram" in body
     assert "View Snapshot" in body
     assert "/snapshot/12345678901234567890123456789012" in body
+
+
+async def test_auth_middleware_edge_cases() -> None:
+    import time
+    from unittest.mock import ANY, patch
+
+    from sentinel.config import Settings
+    from sentinel.web.auth import AuthMiddleware, _resolve_client_ip
+
+    # 1. _resolve_client_ip with multiple IPs
+    headers = {b"x-forwarded-for": b"192.168.1.1, 10.0.0.5"}
+    ip = _resolve_client_ip({}, headers, trust_proxies=True)
+    assert ip == "10.0.0.5"
+
+    # 2. Non-HTTP scope
+    mw = AuthMiddleware(AsyncMock(), Settings(auth_username="a", auth_password_bcrypt=_HASHED_PASS))
+    scope = {"type": "websocket"}
+    await mw(scope, AsyncMock(), AsyncMock())
+    mw._app.assert_called_once_with(scope, ANY, ANY)
+
+    # 3. Exception in urlparse of origin
+    scope_csrf = {
+        "type": "http",
+        "method": "POST",
+        "headers": [(b"origin", b"http://[::1]abc"), (b"host", b"test")],
+    }
+    mw_csrf = AuthMiddleware(
+        AsyncMock(), Settings(auth_username="a", auth_password_bcrypt=_HASHED_PASS)
+    )
+
+    sent = []
+
+    async def mock_send(msg: dict[str, object]) -> None:
+        sent.append(msg)
+
+    await mw_csrf(scope_csrf, AsyncMock(), mock_send)
+    assert len(sent) > 0
+    assert sent[0]["status"] == 403
+
+    # 4. Rate limiting check (10 attempts per minute limit)
+    mw_rate = AuthMiddleware(
+        AsyncMock(), Settings(auth_username="admin", auth_password_bcrypt=_HASHED_PASS)
+    )
+    scope_rate = {
+        "type": "http",
+        "method": "GET",
+        "path": "/",
+        "headers": [(b"authorization", b"Basic YWRtaW46d3JvbmdwYXNz"), (b"user-agent", b"ua")],
+    }
+
+    # Mock bcrypt checkpw to make it instant
+    with patch("sentinel.web.auth.bcrypt.checkpw", return_value=False):
+        for _ in range(10):
+            await mw_rate(scope_rate, AsyncMock(), AsyncMock())
+
+        # 11th request should be rate limited with 429
+        sent_rate = []
+
+        async def mock_send_rate(msg: dict[str, object]) -> None:
+            sent_rate.append(msg)
+
+        await mw_rate(scope_rate, AsyncMock(), mock_send_rate)
+        assert len(sent_rate) > 0
+        assert sent_rate[0]["status"] == 429
+
+    # 5. OrderedDict eviction (>1000 items)
+    mw_evict = AuthMiddleware(
+        AsyncMock(), Settings(auth_username="admin", auth_password_bcrypt=_HASHED_PASS)
+    )
+    # Fill _auth_attempts with 1005 items
+    for i in range(1005):
+        mw_evict._auth_attempts[f"10.0.0.{i}"] = [time.time()]
+
+    scope_evict = {
+        "type": "http",
+        "method": "GET",
+        "path": "/",
+        "headers": [(b"authorization", b"Basic YWRtaW46d3JvbmdwYXNz"), (b"user-agent", b"ua")],
+    }
+    with patch("sentinel.web.auth.bcrypt.checkpw", return_value=False):
+        await mw_evict(scope_evict, AsyncMock(), AsyncMock())
+
+    assert len(mw_evict._auth_attempts) <= 1000

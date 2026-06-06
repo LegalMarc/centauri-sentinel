@@ -647,13 +647,8 @@ class WatcherLoop:
             return
 
         try:
-            async with self._db._db.execute(
-                "SELECT snapshot_path FROM detection_events WHERE snapshot_path IS NOT NULL"
-            ) as cur:
-                rows = await cur.fetchall()
-                active_filenames = {
-                    Path(row["snapshot_path"]).name for row in rows if row["snapshot_path"]
-                }
+            active_paths = await self._db.get_all_active_snapshot_paths()
+            active_filenames = {Path(p).name for p in active_paths if p}
         except Exception:
             logger.exception("Failed to query active snapshot paths for fallback cleanup")
             return
@@ -722,7 +717,11 @@ class WatcherLoop:
         last = heartbeat.get("last_tick_utc")
         if not last:
             return
-        age = (datetime.now(tz=UTC) - datetime.fromisoformat(last)).total_seconds()
+        dt = datetime.fromisoformat(last)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+        age = (datetime.now(tz=UTC) - dt).total_seconds()
+
         if age > stall_s and self.state != WatcherState.STALLED:
             logger.error("Heartbeat stale (age=%.0fs) — watcher stalled", age)
             self.state = WatcherState.STALLED

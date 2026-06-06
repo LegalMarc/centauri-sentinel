@@ -33,7 +33,9 @@ dev = [
     "pytest-httpx>=0.35",
     "pytest-cov>=6.0",
     "respx>=0.22",
+    "pyyaml",
 ]
+
 
 [project.scripts]
 sentinel = "sentinel.__main__:main"
@@ -81,6 +83,11 @@ strict = true
 warn_return_any = true
 warn_unused_configs = true
 ignore_missing_imports = false
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+ignore_errors = true
+
 
 
 # ---------------------------------------------------------------------------

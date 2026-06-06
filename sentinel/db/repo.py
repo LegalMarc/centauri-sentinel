@@ -347,6 +347,13 @@ class Database:
             "total_pauses": res.get("total_pauses") or 0,
             "avg_duration_seconds": avg_duration,
         }
-        async with self._lock:
-            self._analytics_cache = summary
+        self._analytics_cache = summary
         return summary
+
+    async def get_all_active_snapshot_paths(self) -> list[str]:
+        """Return all active snapshot paths stored in the database."""
+        async with self._db.execute(
+            "SELECT snapshot_path FROM detection_events WHERE snapshot_path IS NOT NULL"
+        ) as cur:
+            rows = await cur.fetchall()
+            return [row["snapshot_path"] for row in rows if row["snapshot_path"]]

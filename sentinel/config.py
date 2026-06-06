@@ -83,6 +83,8 @@ class Settings(BaseSettings):
 
     # Misc
     log_level: str = "INFO"
+    log_format: str = "text"
+    camera_max_streams: int = 3
     db_path: str = "/data/sentinel.db"
 
     @property
@@ -100,6 +102,15 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _validate_settings(self) -> Settings:
         """Validate config variables and hash plain AUTH_PASSWORD if provided."""
+        # Check if printer access code is default
+        if self.printer_access_code == "123456":
+            import logging
+
+            logging.getLogger("sentinel.config").warning(
+                "Printer access code is set to the default value ('123456'). "
+                "For security reasons, please change this to a secure, unique access code."
+            )
+
         # 1. Telegram checks
         if self.telegram_bot_token:
             if not self.telegram_chat_id or not self.telegram_chat_id.strip():
@@ -155,6 +166,23 @@ class Settings(BaseSettings):
             msg = f"LOG_LEVEL must be one of {valid}"
             raise ValueError(msg)
         return v.upper()
+
+    @field_validator("log_format")
+    @classmethod
+    def _validate_log_format(cls, v: str) -> str:
+        valid = {"text", "json"}
+        if v.lower() not in valid:
+            msg = f"LOG_FORMAT must be one of {valid}"
+            raise ValueError(msg)
+        return v.lower()
+
+    @field_validator("camera_max_streams")
+    @classmethod
+    def _validate_camera_max_streams(cls, v: int) -> int:
+        if v < 1:
+            msg = "CAMERA_MAX_STREAMS must be at least 1"
+            raise ValueError(msg)
+        return v
 
     @field_validator("ml_score_threshold")
     @classmethod

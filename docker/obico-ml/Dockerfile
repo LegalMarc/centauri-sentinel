@@ -58,6 +58,13 @@ RUN mkdir -p /model_cache/ml_api/onnx \
     && wget -q -O /model_cache/ml_api/onnx/model-weights.onnx \
        "$(cat model/model-weights.onnx.url | tr -d '\r\n')"
 
+# Create group/user 'obico' with UID 1000 and chown directories
+RUN groupadd -g 1000 obico \
+    && useradd -u 1000 -g obico -m -s /bin/bash obico \
+    && chown -R obico:obico /app /model_cache
+
+USER obico
+
 EXPOSE 3333
 
 CMD ["python3", "server.py"]

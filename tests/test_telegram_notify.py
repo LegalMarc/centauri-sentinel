@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -280,8 +281,47 @@ async def test_send_external_pause_alert_with_photo_fallback() -> None:
     mock_bot.send_message.assert_called_once()
 
 
-async def test_send_detection_alert_disk_read_failure(tmp_path) -> None:
+async def test_send_detection_alert_disk_read_failure(tmp_path: Any) -> None:
     notifier, mock_bot = _make_notifier_enabled()
     notifier._snapshots_dir = tmp_path
     await notifier.send_detection_alert(0.9, snapshot_id="missing")
     mock_bot.send_message.assert_called_once()
+
+
+async def test_telegram_edge_cases(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    # 1. OSError handling during snapshot disk read
+    notifier, mock_bot = _make_notifier_enabled()
+    notifier._snapshots_dir = tmp_path
+    p = tmp_path / "failed_snap.jpg"
+    p.write_bytes(b"disk_data")
+
+    from pathlib import Path
+
+    orig_read_bytes = Path.read_bytes
+
+    def mock_read_bytes(self: Path) -> bytes:
+        if "failed_snap" in str(self):
+            raise OSError("read error")
+        return orig_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", mock_read_bytes)
+
+    await notifier.send_detection_alert(0.9, snapshot_id="failed_snap")
+    mock_bot.send_message.assert_called_once()
+
+    # 2. Disabled mode noops
+    with patch("sentinel.notify.telegram.Bot"):
+        notifier_disabled = TelegramNotifier(_disabled_settings())
+
+    await notifier_disabled.send_print_started_alert("file.gcode")
+    await notifier_disabled.send_print_completed_alert("file.gcode", 10.0)
+    await notifier_disabled.send_external_pause_alert()
+
+    # 3. close() method on disabled
+    await notifier_disabled.close()
+
+    # 4. close() method on enabled
+    notifier_enabled, mock_bot_enabled = _make_notifier_enabled()
+    mock_bot_enabled.shutdown = AsyncMock()
+    await notifier_enabled.close()
+    mock_bot_enabled.shutdown.assert_called_once()

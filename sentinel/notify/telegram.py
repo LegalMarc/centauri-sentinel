@@ -309,3 +309,8 @@ class TelegramNotifier:
                 )
 
         await self._send_with_retry_fn(_send)
+
+    async def close(self) -> None:
+        """Close the underlying bot session."""
+        if self._enabled and hasattr(self, "_bot"):
+            await self._bot.shutdown()

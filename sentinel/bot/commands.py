@@ -13,11 +13,6 @@ from typing import TYPE_CHECKING, Any
 
 from telegram import KeyboardButton, ReplyKeyboardMarkup
 
-if TYPE_CHECKING:
-    import asyncio
-
-_background_tasks: set[asyncio.Task[None]] = set()
-
 _TUI_KEYBOARD = ReplyKeyboardMarkup(
     [
         [KeyboardButton("📊 Status"), KeyboardButton("📸 Snapshot")],
@@ -183,7 +178,9 @@ class BotCommandHandler:
 
         if p_status:
             print_state = p_status.print_state or ("printing" if p_status.printing else "idle")
-            print_state = "offline (stale data)" if p_status.stale else print_state.capitalize()
+            if p_status.stale:
+                print_state = "offline (stale data)"
+            printer_state = print_state.capitalize()
             is_active = p_status.printing or print_state == "paused"
             print_elapsed = f"{p_status.elapsed_seconds:.0f}s" if is_active else "—"
             extruder_temp = p_status.extruder_temp
@@ -471,10 +468,3 @@ class BotCommandHandler:
             self._watcher.cancel_snooze()
             await self._db.set_setting("detection_enabled", "true")
             await self._edit_text_or_caption(cq, "Detection re-enabled.")
-
-    def cancel_background_tasks(self) -> None:
-        """Cancel all pending snooze / background tasks (M9)."""
-        if _background_tasks:
-            logger.info("Cancelling %d background bot tasks", len(_background_tasks))
-            for task in list(_background_tasks):
-                task.cancel()

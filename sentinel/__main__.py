@@ -76,7 +76,7 @@ async def _run(args: argparse.Namespace) -> None:
     get_settings.cache_clear()
     settings = get_settings()
 
-    # Configure python-json-logger
+    # Configure logging formatter
     logging.config.dictConfig(
         {
             "version": 1,
@@ -86,11 +86,14 @@ async def _run(args: argparse.Namespace) -> None:
                     "()": "pythonjsonlogger.jsonlogger.JsonFormatter",
                     "fmt": "%(asctime)s %(levelname)s %(name)s %(message)s",
                 },
+                "text": {
+                    "format": "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+                },
             },
             "handlers": {
                 "console": {
                     "class": "logging.StreamHandler",
-                    "formatter": "json",
+                    "formatter": settings.log_format,
                 },
             },
             "root": {

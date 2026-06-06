@@ -113,7 +113,8 @@ def create_app(
     @app.get("/__internal_snapshot/{nonce}")
     async def internal_snapshot(nonce: str, request: Request) -> Response:
         """Single-use JPEG endpoint for the Obico ML API URL-fetch flow."""
-        jpeg = get_nonce_store().pop(nonce)
+        jpeg = get_nonce_store().get(nonce)
+
         if jpeg is None:
             client = request.client.host if request.client else "unknown"
             logger.warning(

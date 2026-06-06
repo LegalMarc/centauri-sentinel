@@ -84,13 +84,25 @@ class AuthMiddleware:
             await self._app(scope, receive, send)
             return
 
+        if not self._enabled:
+            await self._app(scope, receive, send)
+            return
+
         headers = dict(scope.get("headers", []))
 
         if scope.get("method") in ("POST", "PUT", "DELETE", "PATCH"):
             origin = headers.get(b"origin")
             host = headers.get(b"host", b"")
             if origin:
-                if not origin.decode().endswith(f"://{host.decode()}"):
+                from urllib.parse import urlparse
+
+                try:
+                    parsed_origin = urlparse(origin.decode())
+                    origin_netloc = parsed_origin.netloc
+                except Exception:
+                    origin_netloc = ""
+
+                if not origin_netloc or origin_netloc != host.decode():
                     response = Response(status_code=403, content="CSRF Protection: Origin mismatch")
                     await response(scope, receive, send)
                     return
@@ -115,10 +127,6 @@ class AuthMiddleware:
 
         path: str = scope.get("path", "")
         if path.startswith("/__internal_snapshot/"):
-            await self._app(scope, receive, send)
-            return
-
-        if not self._enabled:
             await self._app(scope, receive, send)
             return
 
@@ -235,8 +243,8 @@ class AuthMiddleware:
     def _valid_cookie(self, cookie_header: str, user_agent: str) -> bool:
         for part in cookie_header.split(";"):
             name, _, value = part.strip().partition("=")
-            if name.strip() == _COOKIE_NAME:
-                return self._verify_token(value.strip(), user_agent)
+            if name.strip() == _COOKIE_NAME and self._verify_token(value.strip(), user_agent):
+                return True
         return False
 
     def _verify_token(self, token: str, user_agent: str) -> bool:

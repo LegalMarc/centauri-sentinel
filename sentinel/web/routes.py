@@ -25,8 +25,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_web_background_tasks: set[asyncio.Task[None]] = set()
-
 
 def _age_seconds(heartbeat: str | None) -> float | None:
     """Return seconds since the last heartbeat, or None if no heartbeat recorded."""
@@ -70,7 +68,7 @@ def make_router(
         """Clear the session cookie."""
         response = Response(content=json.dumps({"status": "ok"}), media_type="application/json")
         response.set_cookie(
-            key="session",
+            key="sentinel_session",
             value="",
             path="/",
             httponly=True,

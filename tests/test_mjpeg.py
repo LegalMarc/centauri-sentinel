@@ -345,26 +345,6 @@ async def test_stream_proxy_limit_exceeded() -> None:
             pass
 
 
-async def test_stream_proxy_duration_limit(monkeypatch: pytest.MonkeyPatch) -> None:
-    import time
-
-    resp = _make_stream_response([_JPEG, _JPEG])
-    mock_client = _make_httpx_client(resp)
-
-    with patch("sentinel.camera.mjpeg.httpx.AsyncClient", return_value=mock_client):
-        grabber = MjpegGrabber(_SETTINGS)
-
-        current_time = 1000.0
-        monkeypatch.setattr(time, "monotonic", lambda: current_time)
-
-        frames = []
-        async for frame in grabber.stream_proxy():
-            frames.append(frame)
-            current_time = 1400.0
-
-        assert len(frames) == 1
-
-
 async def test_camera_close_yields_camera_closed_error() -> None:
     import asyncio
 

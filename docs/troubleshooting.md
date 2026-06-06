@@ -155,3 +155,17 @@ To recover a backup:
 docker volume create <stack_prefix>_sentinel-data
 # Copy your backup into the volume mountpoint on the host
 ```
+
+---
+
+## ntfy notifications fail to display snapshots due to NAT / firewall
+
+**Symptom:** Notifications are received on the ntfy client, but they do not contain the camera snapshot images.
+
+**Details:** When `NTFY_SEND_SNAPSHOTS` is enabled, the notifier does not send an image URL to the ntfy server (which would require the ntfy server to make an inbound request back to the printer/sentinel, failing due to NAT, firewall, or lack of external traversal). Instead, `centauri-sentinel` performs a direct POST body upload where the raw JPEG snapshot bytes are sent directly in the HTTP request body, and the textual message is sent in the `X-Message` header.
+
+**Resolution / Verification:**
+- Ensure that `NTFY_SEND_SNAPSHOTS` is set to `true` (or `true` equivalent).
+- Ensure your ntfy server version supports attachments and HTTP headers (standard in all recent versions).
+- Check that the client has a working internet connection to the ntfy server to upload the image directly.
+

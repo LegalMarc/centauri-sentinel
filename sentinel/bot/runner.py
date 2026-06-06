@@ -166,9 +166,6 @@ class BotRunner:
             return
         import asyncio
 
-        # Cancel any pending background tasks (e.g. snooze tasks)
-        self._handler.cancel_background_tasks()
-
         app: Any = self._app
         try:
             async with asyncio.timeout(5.0):

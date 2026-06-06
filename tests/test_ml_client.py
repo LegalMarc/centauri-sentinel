@@ -58,6 +58,35 @@ def test_nonce_store_unique_nonces() -> None:
     assert n1 != n2
 
 
+def test_nonce_store_edge_cases() -> None:
+    # 1. Oldest eviction when max size (20) is reached
+    store = NonceStore()
+    nonces = []
+    for i in range(21):
+        nonces.append(store.put(f"jpeg-{i}".encode()))
+
+    # The first one should have been evicted (nonces[0])
+    assert store.get(nonces[0]) is None
+    # The rest should be present
+    assert store.get(nonces[1]) == b"jpeg-1"
+    assert store.get(nonces[20]) == b"jpeg-20"
+
+    # 2. TTL expiration for get and pop
+    short_store = NonceStore(ttl=-1.0)  # expired immediately
+    n_expired = short_store.put(b"expired")
+
+    assert short_store.get(n_expired) is None
+    assert short_store.pop(n_expired) is None
+
+    # 3. Sweep deletes expired entries on next put
+    sweep_store = NonceStore(ttl=-1.0)
+    n1 = sweep_store.put(b"e1")
+    assert n1 in sweep_store._store
+    sweep_store.put(b"e2")
+    # n1 should be swept away now
+    assert n1 not in sweep_store._store
+
+
 # ---------------------------------------------------------------------------
 # MlClient — URL-fetch success (results list)
 # ---------------------------------------------------------------------------
@@ -342,3 +371,22 @@ async def test_ml_callback_host_parameter() -> None:
     params_sent_url = call_kwargs_url.kwargs.get("params", {})
     img_url_url = params_sent_url.get("img", "")
     assert img_url_url.startswith("https://sentinel.example.com/subdir/__internal_snapshot/")
+
+
+def test_parse_obico_detections_format() -> None:
+    from sentinel.ml.client import MlClient
+
+    # 1. Empty detections list
+    assert MlClient._parse({"detections": []}).score == 0.0
+
+    # 2. Valid and invalid detections mixed
+    data = {
+        "detections": [
+            ["spaghetti", "0.85", [10, 20, 30, 40]],
+            ["other", 0.42, [5, 5, 5, 5]],
+            ["malformed", "not-a-float"],
+            ["short"],
+            "not-a-list",
+        ]
+    }
+    assert MlClient._parse(data).score == pytest.approx(0.85)

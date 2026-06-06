@@ -34,7 +34,8 @@ jobs:
         run: uv run ruff format --check sentinel/ tests/
 
       - name: Mypy
-        run: uv run mypy sentinel/
+        run: uv run mypy sentinel/ tests/
+
 
       - name: Pytest
         run: uv run pytest --cov=sentinel --cov-report=xml --cov-fail-under=85

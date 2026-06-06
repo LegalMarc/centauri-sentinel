@@ -14,7 +14,7 @@ import threading
 import time
 
 _TTL_S = 60.0  # 2x the default poll interval; long enough for any ML round-trip
-_MAX_SIZE = 3  # hard cap; oldest entry evicted when reached
+_MAX_SIZE = 20  # hard cap; oldest entry evicted when reached
 
 
 class NonceStore:
@@ -35,6 +35,17 @@ class NonceStore:
                 del self._store[oldest]
             self._store[nonce] = (jpeg, time.monotonic() + self._ttl)
         return nonce
+
+    def get(self, nonce: str) -> bytes | None:
+        """Return the JPEG for *nonce* without removing it, or None if absent/expired."""
+        with self._lock:
+            entry = self._store.get(nonce)
+            if entry is None:
+                return None
+            jpeg, expires_at = entry
+            if time.monotonic() > expires_at:
+                return None
+            return jpeg
 
     def pop(self, nonce: str) -> bytes | None:
         """Return and remove the JPEG for *nonce*, or None if absent/expired."""

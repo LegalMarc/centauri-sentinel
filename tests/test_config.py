@@ -184,32 +184,42 @@ def test_printer_ip_validation_valid_ip() -> None:
 
 
 def test_printer_ip_validation_valid_hostname(monkeypatch: pytest.MonkeyPatch) -> None:
+    from sentinel.network import resolve_and_validate_printer_ip
+
     monkeypatch.setattr("sentinel.network.socket.gethostbyname", lambda x: "192.168.1.50")
     s = Settings(printer_ip="printer.local")
-    assert s.printer_ip == "192.168.1.50"
+    assert s.printer_ip == "printer.local"
+    assert resolve_and_validate_printer_ip(s.printer_ip) == "192.168.1.50"
 
 
 def test_printer_ip_validation_ssrf_disallowed() -> None:
+    from sentinel.network import resolve_and_validate_printer_ip
+
+    # Pure syntax is allowed by config
+    s1 = Settings(printer_ip="127.0.0.1")
+    assert s1.printer_ip == "127.0.0.1"
+
+    # Resolver should block SSRF
     with pytest.raises(ValueError, match="SSRF Protection"):
-        Settings(printer_ip="127.0.0.1")
+        resolve_and_validate_printer_ip("127.0.0.1")
     with pytest.raises(ValueError, match="SSRF Protection"):
-        Settings(printer_ip="::1")
+        resolve_and_validate_printer_ip("::1")
     with pytest.raises(ValueError, match="SSRF Protection"):
-        Settings(printer_ip="localhost")
+        resolve_and_validate_printer_ip("localhost")
     with pytest.raises(ValueError, match="SSRF Protection"):
-        Settings(printer_ip="localhost.localdomain")
+        resolve_and_validate_printer_ip("localhost.localdomain")
     with pytest.raises(ValueError, match="SSRF Protection"):
-        Settings(printer_ip="8.8.8.8")
+        resolve_and_validate_printer_ip("8.8.8.8")
     with pytest.raises(ValueError, match="SSRF Protection"):
-        Settings(printer_ip="169.254.169.254")
+        resolve_and_validate_printer_ip("169.254.169.254")
     with pytest.raises(ValueError, match="SSRF Protection"):
-        Settings(printer_ip="0.0.0.0")
+        resolve_and_validate_printer_ip("0.0.0.0")
     with pytest.raises(ValueError, match="SSRF Protection"):
-        Settings(printer_ip="::")
+        resolve_and_validate_printer_ip("::")
     with pytest.raises(ValueError, match="SSRF Protection"):
-        Settings(printer_ip="::ffff:127.0.0.1")
+        resolve_and_validate_printer_ip("::ffff:127.0.0.1")
     with pytest.raises(ValueError, match="SSRF Protection"):
-        Settings(printer_ip="::ffff:8.8.8.8")
+        resolve_and_validate_printer_ip("::ffff:8.8.8.8")
 
 
 def test_printer_ip_validation_invalid() -> None:
@@ -220,20 +230,28 @@ def test_printer_ip_validation_invalid() -> None:
 def test_printer_ip_validation_hostname_resolves_to_loopback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from sentinel.network import resolve_and_validate_printer_ip
+
     monkeypatch.setattr("sentinel.network.socket.gethostbyname", lambda x: "127.0.0.1")
+    s = Settings(printer_ip="malicious.com")
+    assert s.printer_ip == "malicious.com"
     with pytest.raises(ValueError, match="SSRF Protection"):
-        Settings(printer_ip="malicious.com")
+        resolve_and_validate_printer_ip("malicious.com")
 
 
 def test_printer_ip_validation_hostname_resolution_fails(monkeypatch: pytest.MonkeyPatch) -> None:
     import socket
 
+    from sentinel.network import resolve_and_validate_printer_ip
+
     def mock_gethostbyname(x: str) -> str:
         raise socket.gaierror("not found")
 
     monkeypatch.setattr("sentinel.network.socket.gethostbyname", mock_gethostbyname)
+    s = Settings(printer_ip="notfound.local")
+    assert s.printer_ip == "notfound.local"
     with pytest.raises(ValueError, match="SSRF Protection: Cannot resolve hostname"):
-        Settings(printer_ip="notfound.local")
+        resolve_and_validate_printer_ip("notfound.local")
 
 
 # ---------------------------------------------------------------------------
@@ -300,3 +318,60 @@ def test_resume_cooldown_seconds_valid() -> None:
 def test_resume_cooldown_seconds_invalid() -> None:
     with pytest.raises(ValueError, match="RESUME_COOLDOWN_SECONDS must be at least 0"):
         Settings(resume_cooldown_seconds=-1)
+
+
+def test_printer_access_code_default_warning(caplog: pytest.LogCaptureFixture) -> None:
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="sentinel.config"):
+        Settings()
+    assert any(
+        "Printer access code is set to the default value" in record.message
+        for record in caplog.records
+    )
+
+
+def test_printer_access_code_custom_no_warning(caplog: pytest.LogCaptureFixture) -> None:
+    import logging
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="sentinel.config"):
+        Settings(printer_access_code="secure_code_123")
+    assert not any(
+        "Printer access code is set to the default value" in record.message
+        for record in caplog.records
+    )
+
+
+def test_log_format_default() -> None:
+    s = Settings()
+    assert s.log_format == "text"
+
+
+def test_log_format_valid() -> None:
+    s = Settings(log_format="json")
+    assert s.log_format == "json"
+    s = Settings(log_format="TEXT")
+    assert s.log_format == "text"
+
+
+def test_log_format_invalid() -> None:
+    with pytest.raises(ValueError, match="LOG_FORMAT must be one of"):
+        Settings(log_format="yaml")
+
+
+def test_camera_max_streams_default() -> None:
+    s = Settings()
+    assert s.camera_max_streams == 3
+
+
+def test_camera_max_streams_valid() -> None:
+    s = Settings(camera_max_streams=1)
+    assert s.camera_max_streams == 1
+    s = Settings(camera_max_streams=10)
+    assert s.camera_max_streams == 10
+
+
+def test_camera_max_streams_invalid() -> None:
+    with pytest.raises(ValueError, match="CAMERA_MAX_STREAMS must be at least 1"):
+        Settings(camera_max_streams=0)

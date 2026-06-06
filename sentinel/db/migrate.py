@@ -38,7 +38,8 @@ async def migrate(db_path: str) -> None:
         # leaves the DB in the original state rather than partially destroyed.
         if current == 1:
             logger.info("Dropping v1 database tables for schema migration")
-            async with db.execute("BEGIN"):
+            try:
+                await db.execute("BEGIN")
                 for table in (
                     "schema_version",
                     "detection_events",
@@ -47,20 +48,29 @@ async def migrate(db_path: str) -> None:
                     "watcher_heartbeat",
                 ):
                     await db.execute(f"DROP TABLE IF EXISTS {table}")
-            await db.commit()
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
             current = 0
 
-        await db.executescript(_SCHEMA_SQL)
-
-        if current < CURRENT_VERSION:
-            await db.execute(
-                "INSERT INTO schema_version (version) VALUES (?)",
-                (CURRENT_VERSION,),
-            )
+        # Wrap schema creation and version tracking in a transaction
+        try:
+            await db.execute("BEGIN")
+            await db.executescript(_SCHEMA_SQL)
+            if current < CURRENT_VERSION:
+                await db.execute(
+                    "INSERT INTO schema_version (version) VALUES (?)",
+                    (CURRENT_VERSION,),
+                )
             await db.commit()
-            logger.info("Database migrated to version %d", CURRENT_VERSION)
-        else:
-            logger.debug("Database already at version %d", current)
+            if current < CURRENT_VERSION:
+                logger.info("Database migrated to version %d", CURRENT_VERSION)
+            else:
+                logger.debug("Database already at version %d", current)
+        except Exception:
+            await db.rollback()
+            raise
 
 
 def migrate_sync(db_path: str) -> None:

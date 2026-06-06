@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 import aiomqtt
 import tenacity
 
+from sentinel.network import resolve_and_validate_printer_ip
 from sentinel.printer.errors import PrinterProtocolError, PrinterTimeoutError
 from sentinel.printer.types import METHOD_STATUS_PUSH, PrinterStatus
 
@@ -336,9 +337,10 @@ class PrinterClient:
         while True:
             has_received = False
             try:
+                resolved_ip = resolve_and_validate_printer_ip(self._host)
                 client_id = f"{self._client_id}-status-{uuid.uuid4().hex[:8]}"
                 async with aiomqtt.Client(
-                    hostname=self._host,
+                    hostname=resolved_ip,
                     port=self._port,
                     username="elegoo",
                     password=self._access_code,
@@ -410,9 +412,14 @@ class PrinterClient:
                     delay = min(delay * 2, 30.0)
             except asyncio.CancelledError:
                 raise
-            except (PrinterProtocolError, PrinterTimeoutError):
-                raise
-            except (aiomqtt.MqttError, OSError, TimeoutError, ConnectionError) as exc:
+            except (
+                aiomqtt.MqttError,
+                OSError,
+                TimeoutError,
+                ConnectionError,
+                PrinterProtocolError,
+                PrinterTimeoutError,
+            ) as exc:
                 code = getattr(exc, "code", None)
                 if isinstance(exc, aiomqtt.MqttCodeError) and code in (4, 5):
                     logger.critical("MQTT permanent authentication failure: %s", exc)
@@ -426,10 +433,11 @@ class PrinterClient:
     async def _send_command(self, msg: dict[str, Any]) -> None:
         """Publish a command and return; does not wait for an ack."""
         try:
+            resolved_ip = resolve_and_validate_printer_ip(self._host)
             client_id = f"{self._client_id}-cmd-{uuid.uuid4().hex[:8]}"
             async with asyncio.timeout(_TIMEOUT_S):
                 async with aiomqtt.Client(
-                    hostname=self._host,
+                    hostname=resolved_ip,
                     port=self._port,
                     username="elegoo",
                     password=self._access_code,

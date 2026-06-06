@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import time
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
@@ -410,32 +409,6 @@ async def test_pending_stops_leak_cleanup() -> None:
 
     assert 111 not in handler._pending_stops
     assert 222 in handler._pending_stops
-
-
-async def test_cancel_background_tasks() -> None:
-    import contextlib
-
-    from sentinel.bot.commands import _background_tasks
-
-    handler = _make_handler()
-
-    # Create a dummy running task
-    async def dummy() -> None:
-        with contextlib.suppress(asyncio.CancelledError):
-            await asyncio.sleep(10.0)
-
-    task = asyncio.create_task(dummy())
-    _background_tasks.add(task)
-    task.add_done_callback(_background_tasks.discard)
-
-    # Cancel all
-    handler.cancel_background_tasks()
-
-    # Yield control to let the cancellation propagate
-    await asyncio.sleep(0.01)
-
-    assert task.cancelled()
-    assert task not in _background_tasks
 
 
 async def test_cmd_status_with_printer_status() -> None:

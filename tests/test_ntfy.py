@@ -317,3 +317,63 @@ async def test_ntfy_no_encoding_for_pure_ascii() -> None:
     title = headers.get("Title", "")
     assert not title.startswith("=?utf-8?B?")
     assert title == "Camera offline"
+
+
+async def test_ntfy_edge_cases(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    # 1. Public ntfy.sh privacy check value error
+    settings_public = Settings(
+        printer_ip="10.0.0.1",
+        ntfy_url="https://ntfy.sh/my-topic",
+        ntfy_enabled=True,
+        ntfy_token=None,
+    )
+    with pytest.raises(ValueError, match="PRIVACY RISK"):
+        NtfyNotifier(settings_public)
+
+    # 2. OSError during reading snapshot
+    db_path = str(tmp_path / "sentinel.db")
+    settings = Settings(
+        printer_ip="10.0.0.1",
+        ntfy_url="https://my-ntfy.local/test",
+        db_path=db_path,
+    )
+    # Save a fake snapshot file
+    snapshots_dir = tmp_path / "snapshots"
+    snapshots_dir.mkdir()
+    p = snapshots_dir / "mysnap.jpg"
+    p.write_bytes(b"disk_jpeg_data")
+
+    # Mock read_bytes to raise OSError
+    from pathlib import Path
+
+    orig_read_bytes = Path.read_bytes
+
+    def mock_read_bytes(self: Path) -> bytes:
+        if "mysnap" in str(self):
+            raise OSError("read error")
+        return orig_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", mock_read_bytes)
+
+    mock_client = _make_http_client()
+    with patch("sentinel.notify.ntfy.httpx.AsyncClient", return_value=mock_client):
+        notifier = NtfyNotifier(settings)
+        await notifier.send_detection_alert(0.85, snapshot_id="mysnap")
+    # Verify post was called even though disk read raised OSError (which was swallowed)
+    mock_client.post.assert_called_once()
+
+    # 3. disabled alerts checks
+    notifier_disabled = NtfyNotifier(_disabled_settings())
+    # calling methods when disabled must return immediately (noop)
+    await notifier_disabled.send_text("hello")
+    await notifier_disabled.send_print_started_alert("file.gcode")
+    await notifier_disabled.send_print_completed_alert("file.gcode", 10.0)
+    await notifier_disabled.send_external_pause_alert()
+
+    # 4. close method
+    mock_client_close = _make_http_client()
+    mock_client_close.aclose = AsyncMock()
+    with patch("sentinel.notify.ntfy.httpx.AsyncClient", return_value=mock_client_close):
+        notifier = NtfyNotifier(settings)
+        await notifier.close()
+    mock_client_close.aclose.assert_called_once()

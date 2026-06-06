@@ -363,8 +363,9 @@ async def test_pause_concurrent_calls_debounced() -> None:
 async def test_status_stream_ends_without_status_message() -> None:
     cm, _ = _make_mqtt_cm([])
     with (
+        patch("sentinel.printer.client._TIMEOUT_S", 0.05),
         patch("sentinel.printer.client.aiomqtt.Client", return_value=cm),
-        pytest.raises(PrinterProtocolError, match="stream ended"),
+        pytest.raises(PrinterTimeoutError),
     ):
         await PrinterClient(_SETTINGS)._fetch_status()
 
@@ -407,8 +408,9 @@ async def test_bad_json_raises_protocol_error() -> None:
     cm.__aexit__ = AsyncMock(return_value=False)
 
     with (
+        patch("sentinel.printer.client._TIMEOUT_S", 0.05),
         patch("sentinel.printer.client.aiomqtt.Client", return_value=cm),
-        pytest.raises(PrinterProtocolError),
+        pytest.raises(PrinterTimeoutError),
     ):
         await PrinterClient(_SETTINGS)._fetch_status()
 

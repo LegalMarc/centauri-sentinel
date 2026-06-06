@@ -26,11 +26,23 @@ def check_external_bind(settings: Settings) -> None:
         return
 
     if not settings.auth_enabled and not settings.external_bind_allowed:
-        msg = (
-            f"Refusing to bind on {settings.bind_host}:{settings.bind_port} without auth. "
-            "Set AUTH_USERNAME or set EXTERNAL_BIND_ALLOWED=true to override."
+        import os
+
+        is_container = (
+            os.path.exists("/.dockerenv")
+            or os.path.exists("/run/.containerenv")
+            or "CONTAINER" in os.environ
         )
-        raise RuntimeError(msg)
+        if settings.bind_host == "0.0.0.0" and is_container:
+            logger.warning(
+                "Container environment detected: allowing bind on 0.0.0.0 without authentication."
+            )
+        else:
+            msg = (
+                f"Refusing to bind on {settings.bind_host}:{settings.bind_port} without auth. "
+                "Set AUTH_USERNAME or set EXTERNAL_BIND_ALLOWED=true to override."
+            )
+            raise RuntimeError(msg)
 
     logger.warning(
         "Binding on external interface %s:%s — ensure network access is restricted.",

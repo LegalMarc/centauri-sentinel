@@ -452,3 +452,121 @@ async def test_explain_query_plan_indices(db: Database) -> None:
         rows = await cur.fetchall()
         details = [row["detail"] for row in rows]
         assert any("idx_pause_history_result" in detail for detail in details)
+
+
+# ---------------------------------------------------------------------------
+# Migration error handling / sync tests
+# ---------------------------------------------------------------------------
+
+
+def test_migrate_sync(tmp_path: Path) -> None:
+    from sentinel.db.migrate import migrate_sync
+
+    path = str(tmp_path / "sync.db")
+    migrate_sync(path)
+
+    import os
+
+    assert os.path.exists(path)
+
+
+async def test_migrate_drop_v1_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = str(tmp_path / "v1_error.db")
+
+    # 1. Create v1 DB
+    async with aiosqlite.connect(path) as db:
+        await db.execute("CREATE TABLE schema_version (version INTEGER NOT NULL)")
+        await db.execute("INSERT INTO schema_version (version) VALUES (1)")
+        await db.commit()
+
+    # 2. Patch aiosqlite.Connection.execute to raise when dropping tables
+    orig_execute = aiosqlite.Connection.execute
+
+    def mock_execute(self, sql: str, *args: object, **kwargs: object) -> object:
+        if "DROP TABLE" in sql:
+            raise RuntimeError("mock drop table fail")
+        return orig_execute(self, sql, *args, **kwargs)
+
+    monkeypatch.setattr(aiosqlite.Connection, "execute", mock_execute)
+
+    with pytest.raises(RuntimeError, match="mock drop table fail"):
+        await migrate(path)
+
+
+async def test_migrate_executescript_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = str(tmp_path / "script_error.db")
+
+    # Patch aiosqlite.Connection.executescript to raise
+    async def mock_executescript(self, sql_script: str) -> object:
+        raise RuntimeError("mock executescript fail")
+
+    monkeypatch.setattr(aiosqlite.Connection, "executescript", mock_executescript)
+
+    with pytest.raises(RuntimeError, match="mock executescript fail"):
+        await migrate(path)
+
+
+async def test_repo_additional_coverage(db: Database, monkeypatch: pytest.MonkeyPatch) -> None:
+    # 1. checkpoint exception path
+    orig_execute = db._conn.execute
+
+    def mock_execute_pragma(sql: str, *args: object, **kwargs: object) -> object:
+        if "wal_checkpoint" in sql:
+            raise RuntimeError("checkpoint fail")
+        return orig_execute(sql, *args, **kwargs)
+
+    monkeypatch.setattr(db._conn, "execute", mock_execute_pragma)
+    # This should log warning but not raise
+    await db.checkpoint()
+
+    # Reset connection execute
+    monkeypatch.setattr(db._conn, "execute", orig_execute)
+
+    # 2. delete_old_snapshots with empty list
+    await db.delete_old_snapshots([])  # should return immediately
+
+    # 3. clear_all_data
+    # Let's populate some data first
+    await db.record_detection(score=0.9, consecutive=1, confirmed=0)
+    await db.record_pause(source="web", result="ok")
+    await db.record_print_start("benchy.gcode", "2026-05-26T23:00:00Z")
+
+    counts = await db.clear_all_data()
+    assert counts["detections"] == 1
+    assert counts["pauses"] == 1
+    assert counts["jobs"] == 1
+
+    # 4. prune_old_events with retention_days <= 0
+    p_zero = await db.prune_old_events(retention_days=0)
+    assert p_zero == {"detections": 0, "pauses": 0, "jobs": 0}
+
+    # prune_old_events with retention_days > 0
+    # Let's record a detection event manually with old timestamp
+    # Note: we need to use write block to set back ts_utc
+    async with db._write() as conn:
+        await conn.execute(
+            "INSERT INTO detection_events (ts_utc, score, consecutive, confirmed)"
+            " VALUES (strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-5 days'), 0.8, 1, 0)"
+        )
+        await conn.execute(
+            "INSERT INTO pause_history (ts_utc, source, result)"
+            " VALUES (strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-5 days'), 'auto', 'ok')"
+        )
+        await conn.execute(
+            "INSERT INTO print_jobs (started_at, filename, status)"
+            " VALUES (strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-5 days'), 'foo.gcode', 'completed')"
+        )
+
+    # Prune rows older than 2 days
+    pruned = await db.prune_old_events(retention_days=2)
+    assert pruned["detections"] == 1
+    assert pruned["pauses"] == 1
+    assert pruned["jobs"] == 1
+
+    # 5. get_analytics_summary cached hit
+    # Call it once to populate cache
+    await db.get_analytics_summary()
+    assert db._analytics_cache is not None
+    # Call it second time to hit cache
+    cached_summary = await db.get_analytics_summary()
+    assert cached_summary["total_prints"] == 0

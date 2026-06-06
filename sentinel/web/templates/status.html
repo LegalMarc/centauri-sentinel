@@ -279,18 +279,23 @@ h2 {
 }
 
 .state-paused,
-.state-warmup {
+.state-warmup,
+.state-snoozed {
   background: rgba(245, 158, 11, 0.15);
   color: #fbbf24;
   border-color: rgba(245, 158, 11, 0.3);
 }
 
-.state-armed {
+.state-armed,
+.state-completed,
+.state-complete {
   background: rgba(16, 185, 129, 0.15);
   color: #34d399;
   border-color: rgba(16, 185, 129, 0.3);
 }
 
+.state-offline,
+.state-offline-stale,
 .state-camera_offline,
 .state-stalled {
   background: rgba(239, 68, 68, 0.15);
@@ -815,7 +820,7 @@ footer a {
     <div class="controls-header">
       <h3>🎛️ Printer Controls</h3>
       <span class="detection-toggle-wrapper" style="font-size: 0.9rem; font-weight: 500; color: var(--text-secondary);">
-        Detection: <span id="det-status-badge" class="state-badge {% if detection_enabled %}state-armed{% else %}state-camera_offline{% endif %}">{% if detection_enabled %}Enabled{% else %}Snoozed{% endif %}</span>
+        Detection: <span id="det-status-badge" class="state-badge {% if detection_enabled %}state-armed{% else %}state-snoozed{% endif %}">{% if detection_enabled %}Enabled{% else %}Snoozed{% endif %}</span>
       </span>
     </div>
     <div class="controls-buttons">
@@ -846,7 +851,7 @@ footer a {
       <div class="card-icon">🖨️</div>
       <div class="card-content">
         <dt>Printer State</dt>
-        <dd><span id="card-printer-badge" class="state-badge state-{{ print_state | lower }}">{{ printer_state }}</span></dd>
+        <dd><span id="card-printer-badge" class="state-badge state-{{ print_state | lower | replace(' (stale data)', '-stale') | replace(' ', '-') | replace('(', '-') | replace(')', '-') }}">{{ printer_state }}</span></dd>
       </div>
     </div>
     <div class="card col-span-2">
@@ -1260,7 +1265,7 @@ function snoozeDetection() {
     if (res.ok) {
       showToast(`Detection snoozed for ${text}`, "warning");
       const badge = document.getElementById("det-status-badge");
-      badge.className = "state-badge state-camera_offline";
+      badge.className = "state-badge state-snoozed";
       badge.textContent = "Snoozed";
     } else { showToast("Failed to snooze detection", "danger"); }
   })
@@ -1416,7 +1421,11 @@ function updateLiveStats() {
       // Update Printer State
       const cardPrinterBadge = document.getElementById("card-printer-badge");
       if (cardPrinterBadge && data.print_state) {
-        cardPrinterBadge.className = `state-badge state-${data.print_state.toLowerCase()}`;
+        const cleanStateClass = data.print_state.toLowerCase()
+          .replace(/\s*\(stale data\)/g, '-stale')
+          .replace(/[^a-z0-9-_]+/g, '-')
+          .replace(/(^-|-$)/g, '');
+        cardPrinterBadge.className = `state-badge state-${cleanStateClass}`;
         cardPrinterBadge.textContent = data.print_state.charAt(0).toUpperCase() + data.print_state.slice(1);
       }
 
