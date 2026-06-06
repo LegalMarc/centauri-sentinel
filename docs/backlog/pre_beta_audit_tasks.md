@@ -14,16 +14,18 @@ This backlog documents the findings from the pre-public-beta audit and serves as
 - [x] Camera offline warning is unreachable during print start
 
 ## Security and Privacy Risks
-- [ ] Unauthenticated Web Dashboard Exposure via Misleading Startup Suggestion
-- [ ] DNS Rebinding Protection Misconfiguration Forces Insecure Workarounds
+- [x] Unauthenticated Web Dashboard Exposure via Misleading Startup Suggestion
+- [x] DNS Rebinding Protection Misconfiguration Forces Insecure Workarounds
 
 ## Performance and Scalability Risks
-- [ ] MJPEG Stream Drip-Feed Stalls Frame Updates Silently
-- [ ] Unbounded Memory Growth in MQTT Client Dictionary
-- [ ] Unindexed Database Query for Pause History Cleanup
+- [x] MJPEG Stream Drip-Feed Stalls Frame Updates Silently
+- [x] Unbounded Memory Growth in MQTT Client Dictionary
+- [x] Unindexed Database Query for Pause History Cleanup
 
 ## Stability, Reliability, and Operational-Readiness Risks
-- [ ] Watcher background task exceptions are swallowed, causing silent detection failure
-- [ ] MQTT transient connection errors cause critical commands to fail without retry
-- [ ] Obico ML client fails without retry if API returns malformed JSON
-- [ ] Hardcoded ML consecutive failure threshold prevents tuning for flaky networks
+- [x] Watcher background task exceptions are swallowed, causing silent detection failure
+- [x] MQTT transient connection errors cause critical commands to fail without retry
+- [x] Obico ML client fails without retry if API returns malformed JSON
+- [x] Hardcoded ML consecutive failure threshold prevents tuning for flaky networks
+- [x] Hardcoded config directory makes testing and systemd deployments fragile
+- [x] SQLite busy errors lock up the database on concurrent webhook requests
