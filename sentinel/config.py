@@ -76,7 +76,7 @@ class Settings(BaseSettings):
     auth_cookie_secure: str = "auto"
 
     # Web server
-    bind_host: str = "0.0.0.0"
+    bind_host: str = "127.0.0.1"
     bind_port: int = 8000
     external_bind_allowed: bool = False
     trust_proxies: bool = False
@@ -246,4 +246,4 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
-    return Settings()
+    return Settings()  # type: ignore[call-arg]

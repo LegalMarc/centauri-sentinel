@@ -28,7 +28,7 @@ def check_external_bind(settings: Settings) -> None:
     if not settings.auth_enabled and not settings.external_bind_allowed:
         msg = (
             f"Refusing to bind on {settings.bind_host}:{settings.bind_port} without auth. "
-            "Set AUTH_USERNAME or set EXTERNAL_BIND_ALLOWED=true to override."
+            "You MUST set AUTH_USERNAME and AUTH_PASSWORD_BCRYPT to expose the dashboard on a public interface."
         )
         raise RuntimeError(msg)
 

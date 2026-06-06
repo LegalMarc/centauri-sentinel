@@ -458,7 +458,7 @@ class WatcherLoop:
                     cooldown_s = float(self._settings.resume_cooldown_seconds)
                 except (ValueError, TypeError, AttributeError):
                     cooldown_s = 5.0
-                
+
                 if time.monotonic() - self._last_resume_time < cooldown_s:
                     logger.debug("Printer status still says 'paused' during post-resume cooldown; ignoring")
                 else:
@@ -466,10 +466,11 @@ class WatcherLoop:
                     logger.info("Printer paused externally — transitioning PAUSED")
                     self.state = WatcherState.PAUSED
                     self._confirm_count = 0
-                    if prev_s not in (WatcherState.OFFLINE, WatcherState.STALLED):
-                        if getattr(self._settings, "notify_on_print_paused", True):
-                            jpeg = await self._safe_grab_jpeg()
-                            self._dispatcher.dispatch_external_pause(jpeg)
+                    if prev_s not in (WatcherState.OFFLINE, WatcherState.STALLED) and getattr(
+                        self._settings, "notify_on_print_paused", True
+                    ):
+                        jpeg = await self._safe_grab_jpeg()
+                        self._dispatcher.dispatch_external_pause(jpeg)
             if status.printing and not getattr(status, "stale", False):
                 self.last_printed_status = copy.copy(status)
             return
@@ -541,7 +542,7 @@ class WatcherLoop:
                     logger.error("Failed to pause printer on ML failure: %s", e)
                 self._ml_error_count = 0
             return
-        
+
         self._ml_error_count = 0
 
         score_threshold_str = await self._db.get_setting(
@@ -796,7 +797,7 @@ class WatcherLoop:
         if detection_enabled == "false":
             text = "⚠️ A new print has started, but failure detection is currently DISABLED."
             self._dispatcher.dispatch_text(text)
-        
+
         try:
             async with asyncio.timeout(3.0):
                 await self._camera.grab()

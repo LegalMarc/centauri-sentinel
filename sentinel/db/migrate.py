@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from pathlib import Path
 
@@ -39,10 +40,8 @@ async def migrate(db_path: str) -> None:
         if current == 1:
             logger.info("v1 database detected; renaming tables to _v1 to preserve data and recreate schema")
             for table in ("schema_version", "detection_events", "pause_history", "runtime_settings", "watcher_heartbeat"):
-                try:
+                with contextlib.suppress(aiosqlite.OperationalError):
                     await db.execute(f"ALTER TABLE {table} RENAME TO {table}_v1")
-                except aiosqlite.OperationalError:
-                    pass
             current = 0
 
         # Wrap schema creation and version tracking in a transaction
