@@ -272,6 +272,7 @@ async def test_pause_publishes_command() -> None:
     cm, mock_client = await _make_publish_client()
     with patch("sentinel.printer.client.aiomqtt.Client", return_value=cm):
         client = PrinterClient(_SETTINGS)
+        client._serial_number = "TESTSERIAL"
         await client.pause()
     mock_client.publish.assert_called_once()
 
@@ -280,6 +281,7 @@ async def test_resume_publishes_command() -> None:
     cm, mock_client = await _make_publish_client()
     with patch("sentinel.printer.client.aiomqtt.Client", return_value=cm):
         client = PrinterClient(_SETTINGS)
+        client._serial_number = "TESTSERIAL"
         await client.resume()
     mock_client.publish.assert_called_once()
 
@@ -288,6 +290,7 @@ async def test_stop_publishes_command() -> None:
     cm, mock_client = await _make_publish_client()
     with patch("sentinel.printer.client.aiomqtt.Client", return_value=cm):
         client = PrinterClient(_SETTINGS)
+        client._serial_number = "TESTSERIAL"
         await client.stop()
     mock_client.publish.assert_called_once()
 
@@ -295,6 +298,56 @@ async def test_stop_publishes_command() -> None:
 # ---------------------------------------------------------------------------
 # Protocol error
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# _send_command — serial unknown guard (issue #49)
+# ---------------------------------------------------------------------------
+
+
+async def test_send_command_serial_unknown_raises_protocol_error() -> None:
+    """_send_command must raise PrinterProtocolError when serial is None."""
+    client = PrinterClient(_SETTINGS)
+    assert client._serial_number is None
+    with pytest.raises(PrinterProtocolError, match="serial unknown"):
+        await client._send_command({"method": 1001})
+
+
+async def test_pause_serial_unknown_raises_protocol_error() -> None:
+    """pause() must propagate PrinterProtocolError when serial is not yet known."""
+    client = PrinterClient(_SETTINGS)
+    assert client._serial_number is None
+    with pytest.raises(PrinterProtocolError, match="serial unknown"):
+        await client.pause()
+
+
+async def test_resume_serial_unknown_raises_protocol_error() -> None:
+    """resume() must propagate PrinterProtocolError when serial is not yet known."""
+    client = PrinterClient(_SETTINGS)
+    assert client._serial_number is None
+    with pytest.raises(PrinterProtocolError, match="serial unknown"):
+        await client.resume()
+
+
+async def test_stop_serial_unknown_raises_protocol_error() -> None:
+    """stop() must propagate PrinterProtocolError when serial is not yet known."""
+    client = PrinterClient(_SETTINGS)
+    assert client._serial_number is None
+    with pytest.raises(PrinterProtocolError, match="serial unknown"):
+        await client.stop()
+
+
+async def test_send_command_with_known_serial_uses_serial_topic() -> None:
+    """_send_command must use serial-keyed topic when serial is known."""
+    cm, mock_client = await _make_publish_client()
+    with patch("sentinel.printer.client.aiomqtt.Client", return_value=cm):
+        client = PrinterClient(_SETTINGS)
+        client._serial_number = "SN999"
+        await client._send_command({"method": 1001})
+    mock_client.publish.assert_called_once()
+    topic = mock_client.publish.call_args[0][0]
+    assert topic.startswith("elegoo/SN999/")
+    assert not topic.startswith(f"elegoo/{_SETTINGS.printer_ip}/")
 
 
 # ---------------------------------------------------------------------------
@@ -306,6 +359,7 @@ async def test_pause_returns_true_on_success() -> None:
     cm, _ = await _make_publish_client()
     with patch("sentinel.printer.client.aiomqtt.Client", return_value=cm):
         client = PrinterClient(_SETTINGS)
+        client._serial_number = "TESTSERIAL"
         result = await client.pause()
     assert result is True
 
@@ -314,6 +368,7 @@ async def test_pause_returns_false_within_debounce_window() -> None:
     cm, mock_client = await _make_publish_client()
     with patch("sentinel.printer.client.aiomqtt.Client", return_value=cm):
         client = PrinterClient(_SETTINGS)
+        client._serial_number = "TESTSERIAL"
         first = await client.pause()
         second = await client.pause()
     assert first is True
@@ -379,11 +434,13 @@ async def test_send_command_timeout_raises_printer_timeout_error() -> None:
     cm = AsyncMock()
     cm.__aenter__ = AsyncMock(side_effect=TimeoutError("publish timed out"))
     cm.__aexit__ = AsyncMock(return_value=False)
+    client = PrinterClient(_SETTINGS)
+    client._serial_number = "TESTSERIAL"
     with (
         patch("sentinel.printer.client.aiomqtt.Client", return_value=cm),
         pytest.raises(PrinterTimeoutError),
     ):
-        await PrinterClient(_SETTINGS)._send_command({"method": 1001})
+        await client._send_command({"method": 1001})
 
 
 # ---------------------------------------------------------------------------

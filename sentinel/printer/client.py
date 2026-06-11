@@ -452,7 +452,17 @@ class PrinterClient:
                 delay = min(delay * 2, 30.0)
 
     async def _send_command(self, msg: dict[str, Any]) -> None:
-        """Publish a command and return; does not wait for an ack."""
+        """Publish a command and return; does not wait for an ack.
+
+        Raises PrinterProtocolError if the printer serial number is not yet
+        known (i.e. no status message has been received since startup or last
+        close/reconfigure).  Publishing to a guessed topic would be a silent
+        no-op because the printer only subscribes to its own serial-keyed topic.
+        """
+        if self._serial_number is None:
+            raise PrinterProtocolError(
+                "serial unknown — no status received yet; cannot publish command"
+            )
         try:
             resolved_ip = await resolve_and_validate_printer_ip(self._host)
             client_id = self._cmd_client_id
@@ -465,8 +475,7 @@ class PrinterClient:
                     identifier=client_id,
                     keepalive=60,
                 ) as client:
-                    serial = self._serial_number or self._host
-                    topic = f"elegoo/{serial}/{self._client_id}/api_request"
+                    topic = f"elegoo/{self._serial_number}/{self._client_id}/api_request"
                     await client.publish(topic, json.dumps(msg))
         except TimeoutError as exc:
             raise PrinterTimeoutError("Command publish timed out") from exc
