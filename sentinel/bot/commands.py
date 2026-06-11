@@ -346,6 +346,7 @@ class BotCommandHandler:
             return
         assert update.message is not None
         self._watcher.cancel_snooze()
+        await self._db.set_setting("snooze_until_utc", "0")
         await self._db.set_setting("detection_enabled", "true")
         await update.message.reply_text("Failure detection enabled.", reply_markup=_TUI_KEYBOARD)
 
@@ -356,6 +357,7 @@ class BotCommandHandler:
             return
         assert update.message is not None
         self._watcher.cancel_snooze()
+        await self._db.set_setting("snooze_until_utc", "0")
         await self._db.set_setting("detection_enabled", "false")
         await update.message.reply_text("Failure detection disabled.", reply_markup=_TUI_KEYBOARD)
 
@@ -466,5 +468,6 @@ class BotCommandHandler:
 
         elif data == "enable":
             self._watcher.cancel_snooze()
+            await self._db.set_setting("snooze_until_utc", "0")
             await self._db.set_setting("detection_enabled", "true")
             await self._edit_text_or_caption(cq, "Detection re-enabled.")

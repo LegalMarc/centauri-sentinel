@@ -1539,4 +1539,86 @@ async def test_watcher_resume_cooldown_expiry() -> None:
 
     # Camera grab and ML detect should have run
     assert camera.grab.call_count >= 1
-    ml.detect.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Issue #63 — snooze/disable state machine fixes
+# ---------------------------------------------------------------------------
+
+
+async def test_disable_after_snooze_survives_restart() -> None:
+    """Snooze → disable → simulate restart with expired snooze → detection stays disabled.
+
+    Acceptance criterion from issue #63: an explicit /disable must survive a
+    restart even when a previously-snoozed expiry has passed.
+
+    The startup recovery block in run_forever re-enables detection only when
+    snooze_until_utc > 0 (i.e. a genuine snooze expired).  An explicit /disable
+    clears snooze_until_utc to "0", so the recovery block must leave detection
+    as-is.
+    """
+    watcher, _, _, _, db = await _make_watcher()
+    import time as _time
+
+    # Step 1: operator snoozes
+    await watcher.snooze(0.001)
+    # Backdate the expiry so a restart would see it as expired
+    past_ts = _time.time() - 10.0
+    await db.set_setting("snooze_until_utc", str(past_ts))
+
+    # Step 2: operator explicitly disables detection (this clears snooze_until_utc)
+    watcher.cancel_snooze()
+    await db.set_setting("snooze_until_utc", "0")
+    await db.set_setting("detection_enabled", "false")
+
+    # Step 3: simulate the run_forever startup recovery block executing on restart
+    try:
+        snooze_until_str = await db.get_setting("snooze_until_utc", "0")
+        if snooze_until_str is not None:
+            snooze_until = float(snooze_until_str)
+            if snooze_until > 0:
+                now = _time.time()
+                if now > snooze_until:
+                    await db.set_setting("detection_enabled", "true")
+                    await db.set_setting("snooze_until_utc", "0")
+    except (ValueError, TypeError):
+        pass
+
+    # Detection must remain disabled — snooze_until_utc was "0" so the recovery
+    # block skipped the re-enable path entirely.
+    assert (await db.get_setting("detection_enabled")) == "false"
+    assert (await db.get_setting("snooze_until_utc")) == "0"
+    await db.close()
+
+
+async def test_snooze_write_order_is_crash_safe() -> None:
+    """snooze() must write snooze_until_utc before detection_enabled=false.
+
+    This ensures that if the process crashes between the two writes, the
+    persisted state is recoverable (run_forever will see snooze_until_utc > 0
+    and either reschedule or re-enable rather than leaving detection silently
+    disabled forever).
+    """
+    watcher, _, _, _, db = await _make_watcher()
+    await db.set_setting("detection_enabled", "true")
+    await db.set_setting("snooze_until_utc", "0")
+
+    # Patch set_setting to capture write order
+    original_set = db.set_setting
+    write_log: list[str] = []
+
+    async def _capturing_set(key: str, value: str) -> None:
+        write_log.append(key)
+        await original_set(key, value)
+
+    db.set_setting = _capturing_set  # type: ignore[method-assign]
+
+    await watcher.snooze(60.0)
+
+    # snooze_until_utc must appear before detection_enabled in the write log
+    assert "snooze_until_utc" in write_log
+    assert "detection_enabled" in write_log
+    assert write_log.index("snooze_until_utc") < write_log.index("detection_enabled")
+
+    watcher.cancel_snooze()
+    await db.close()

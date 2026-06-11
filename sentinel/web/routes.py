@@ -368,6 +368,8 @@ def make_router(
                     )
         except HTTPException:
             raise
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid snooze duration: {exc}") from exc
         except Exception:
             pass
 

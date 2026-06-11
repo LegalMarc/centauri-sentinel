@@ -173,12 +173,16 @@ class WatcherLoop:
     async def snooze(self, seconds: float) -> None:
         """Snooze detection for the given number of seconds."""
         self.cancel_snooze()
-        await self._db.set_setting("detection_enabled", "false")
 
         import time
 
         snooze_until = time.time() + seconds
+        # Write the expiry timestamp FIRST so that a crash between the two writes
+        # leaves a recoverable state: run_forever will see snooze_until > 0 and
+        # either reschedule or re-enable, rather than leaving detection disabled
+        # with no snooze to undo it.
         await self._db.set_setting("snooze_until_utc", str(snooze_until))
+        await self._db.set_setting("detection_enabled", "false")
 
         self._snooze_task = asyncio.create_task(self._re_enable_after(seconds))
 

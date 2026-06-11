@@ -1174,6 +1174,25 @@ async def test_control_snooze_success(
     mock_watcher.snooze.assert_called_once_with(10.0)
 
 
+async def test_control_snooze_unparseable_seconds_returns_400(
+    mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: AsyncMock
+) -> None:
+    """POST /api/control/snooze with a non-numeric seconds value must return 400.
+
+    Acceptance criterion from issue #63: malformed input must not silently
+    snooze for the 600s default with a 200 response.
+    """
+    mock_watcher.snooze = AsyncMock()
+    app_state = create_app(
+        _base_settings(auth_enabled=False), db=mock_db, watcher=mock_watcher, camera=mock_camera
+    )
+    async with _client(app_state) as c:
+        r = await c.post("/api/control/snooze", json={"seconds": "abc"})
+
+    assert r.status_code == 400
+    mock_watcher.snooze.assert_not_called()
+
+
 async def test_status_page_renders_with_printer_status(
     mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: MagicMock
 ) -> None:

@@ -338,7 +338,9 @@ async def test_cmd_enable_sets_db_setting() -> None:
     handler = _make_handler(db=db)
     update = _make_update()
     await handler.cmd_enable(update, None)
-    db.set_setting.assert_called_once_with("detection_enabled", "true")
+    # Must clear snooze_until_utc AND set detection_enabled
+    db.set_setting.assert_any_call("snooze_until_utc", "0")
+    db.set_setting.assert_any_call("detection_enabled", "true")
 
 
 async def test_cmd_disable_sets_db_setting() -> None:
@@ -350,7 +352,9 @@ async def test_cmd_disable_sets_db_setting() -> None:
     handler = _make_handler(db=db)
     update = _make_update()
     await handler.cmd_disable(update, None)
-    db.set_setting.assert_called_once_with("detection_enabled", "false")
+    # Must clear snooze_until_utc AND set detection_enabled
+    db.set_setting.assert_any_call("snooze_until_utc", "0")
+    db.set_setting.assert_any_call("detection_enabled", "false")
 
 
 # ---------------------------------------------------------------------------
@@ -592,7 +596,9 @@ async def test_handle_callback_enable() -> None:
     handler = _make_handler()
     update = _make_update(callback_data="enable")
     await handler.handle_callback(update, None)
-    handler._db.set_setting.assert_called_once_with("detection_enabled", "true")
+    # Must clear snooze_until_utc AND set detection_enabled
+    handler._db.set_setting.assert_any_call("snooze_until_utc", "0")
+    handler._db.set_setting.assert_any_call("detection_enabled", "true")
     assert "re-enabled" in update.callback_query.edit_message_text.call_args[0][0].lower()
 
 
