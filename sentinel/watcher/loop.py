@@ -142,6 +142,22 @@ class WatcherLoop:
             await self.cleanup_old_snapshots()
         except Exception:
             logger.exception("Startup snapshot cleanup failed (non-fatal)")
+
+        # Reconcile stale print-job rows from a previous crash / restart.
+        # Any row still in status='printing' was never closed; mark it
+        # 'interrupted' so it does not show as a phantom in-progress job and
+        # so analytics totals are not silently understated.
+        try:
+            ended_at = datetime.now(tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+            closed = await self._db.close_stale_jobs(ended_at)
+            if closed:
+                logger.warning(
+                    "Startup reconciliation: closed %d stale printing job(s) as 'interrupted'",
+                    closed,
+                )
+        except Exception:
+            logger.exception("Startup job reconciliation failed (non-fatal)")
+
         try:
             async with asyncio.TaskGroup() as tg:
                 tg.create_task(self._loop())

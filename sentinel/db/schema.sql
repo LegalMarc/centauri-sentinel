@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS print_jobs (
     ended_at            TEXT,
     duration_seconds    INTEGER,
     filament_used_g     REAL,
-    status              TEXT    NOT NULL,  -- 'printing' | 'completed' | 'failed'
+    status              TEXT    NOT NULL,  -- 'printing' | 'completed' | 'failed' | 'interrupted'
     pauses_count        INTEGER NOT NULL DEFAULT 0
 );
 

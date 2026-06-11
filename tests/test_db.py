@@ -525,3 +525,55 @@ async def test_repo_additional_coverage(db: Database, monkeypatch: pytest.Monkey
     # Call it second time to hit cache
     cached_summary = await db.get_analytics_summary()
     assert cached_summary["total_prints"] == 0
+
+
+# ---------------------------------------------------------------------------
+# close_stale_jobs — startup reconciliation
+# ---------------------------------------------------------------------------
+
+
+async def test_close_stale_jobs_marks_interrupted(db: Database) -> None:
+    """All status='printing' rows must be closed as 'interrupted' with ended_at set."""
+    # Two in-progress rows, one already completed
+    id1 = await db.record_print_start("a.gcode", "2026-06-11T00:00:00Z")
+    id2 = await db.record_print_start("b.gcode", "2026-06-11T00:01:00Z")
+    await db.record_print_end(
+        await db.record_print_start("c.gcode", "2026-06-11T00:02:00Z"),
+        "2026-06-11T00:10:00Z",
+        600,
+        0.0,
+        "completed",
+    )
+
+    ended_at = "2026-06-11T01:00:00Z"
+    closed = await db.close_stale_jobs(ended_at)
+    assert closed == 2
+
+    rows = await db.get_recent_jobs()
+    by_id = {r["id"]: r for r in rows}
+
+    assert by_id[id1]["status"] == "interrupted"
+    assert by_id[id1]["ended_at"] == ended_at
+    assert by_id[id2]["status"] == "interrupted"
+    assert by_id[id2]["ended_at"] == ended_at
+    # The completed row must be untouched
+    completed = [r for r in rows if r["status"] == "completed"]
+    assert len(completed) == 1
+
+
+async def test_close_stale_jobs_returns_zero_when_none(db: Database) -> None:
+    """close_stale_jobs returns 0 when there are no stale rows."""
+    closed = await db.close_stale_jobs("2026-06-11T01:00:00Z")
+    assert closed == 0
+
+
+async def test_close_stale_jobs_does_not_affect_non_printing(db: Database) -> None:
+    """Only status='printing' rows are updated; failed/completed/interrupted are untouched."""
+    job_id = await db.record_print_start("x.gcode", "2026-06-11T00:00:00Z")
+    await db.record_print_end(job_id, "2026-06-11T00:10:00Z", 600, 0.0, "failed")
+
+    closed = await db.close_stale_jobs("2026-06-11T01:00:00Z")
+    assert closed == 0
+
+    rows = await db.get_recent_jobs()
+    assert rows[0]["status"] == "failed"

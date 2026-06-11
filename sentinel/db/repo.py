@@ -350,6 +350,21 @@ class Database:
         self._analytics_cache = summary
         return summary
 
+    async def close_stale_jobs(self, ended_at: str) -> int:
+        """Mark all status='printing' rows as 'interrupted' with ended_at=ended_at.
+
+        Called once on startup to close phantom rows left by a previous crash or
+        restart that happened while a job was in progress.  Returns the number of
+        rows closed.
+        """
+        async with self._write(clear_analytics_cache=True) as db:
+            cursor = await db.execute(
+                "UPDATE print_jobs SET status = 'interrupted', ended_at = ?"
+                " WHERE status = 'printing'",
+                (ended_at,),
+            )
+            return cursor.rowcount or 0
+
     async def get_all_active_snapshot_paths(self) -> list[str]:
         """Return all active snapshot paths stored in the database."""
         async with self._db.execute(

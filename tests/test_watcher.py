@@ -1435,6 +1435,77 @@ async def test_watcher_resume_cooldown_skips_processing() -> None:
     ml.detect.assert_not_called()
 
 
+# ---------------------------------------------------------------------------
+# Startup reconciliation — stale 'printing' rows closed before first tick
+# ---------------------------------------------------------------------------
+
+
+async def test_startup_reconciliation_closes_stale_jobs() -> None:
+    """run_forever must close status='printing' rows before any new job is created."""
+    watcher, _printer, _camera, _ml, db = await _make_watcher(printer_status=_printing_status())
+
+    # Plant a stale 'printing' row simulating a previous crash
+    stale_id = await db.record_print_start("orphan.gcode", "2026-06-11T00:00:00Z")
+
+    # Confirm it is in 'printing' status
+    rows_before = await db.get_recent_jobs()
+    assert any(r["id"] == stale_id and r["status"] == "printing" for r in rows_before)
+
+    # run_forever should close the stale row then exit immediately via cancellation
+    task = asyncio.create_task(watcher.run_forever())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    rows_after = await db.get_recent_jobs()
+    stale_row = next(r for r in rows_after if r["id"] == stale_id)
+    assert stale_row["status"] == "interrupted"
+    assert stale_row["ended_at"] is not None
+
+
+async def test_startup_reconciliation_no_phantom_jobs_in_recent() -> None:
+    """get_recent_jobs shows no perpetual 'printing' rows after reconciliation runs."""
+    watcher, _printer, _camera, _ml, db = await _make_watcher(printer_status=_idle_status())
+
+    # Plant two stale rows
+    await db.record_print_start("ghost1.gcode", "2026-06-11T00:00:00Z")
+    await db.record_print_start("ghost2.gcode", "2026-06-11T00:01:00Z")
+
+    task = asyncio.create_task(watcher.run_forever())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    jobs = await db.get_recent_jobs()
+    perpetual = [j for j in jobs if j["status"] == "printing"]
+    assert perpetual == [], "No job should remain in status='printing' after reconciliation"
+
+
+async def test_startup_reconciliation_new_job_created_after_stale_closed() -> None:
+    """A new print started after reconciliation creates exactly one new row."""
+    watcher, _printer, _camera, _ml, db = await _make_watcher(printer_status=_printing_status())
+
+    # Plant a stale row
+    stale_id = await db.record_print_start("old.gcode", "2026-06-11T00:00:00Z")
+
+    task = asyncio.create_task(watcher.run_forever())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    jobs = await db.get_recent_jobs()
+    # Stale row closed as interrupted
+    stale_row = next(r for r in jobs if r["id"] == stale_id)
+    assert stale_row["status"] == "interrupted"
+
+    # Exactly one new row for "test.gcode" (from _printing_status)
+    new_jobs = [r for r in jobs if r["filename"] == "test.gcode"]
+    assert len(new_jobs) == 1
+
+
 async def test_watcher_resume_cooldown_expiry() -> None:
     settings = Settings(
         printer_ip="10.0.0.1",
