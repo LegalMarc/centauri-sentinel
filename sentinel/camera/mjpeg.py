@@ -299,6 +299,11 @@ class MjpegGrabber:
         """Update the camera URL and restart the connection."""
         self._url = url
         await self.close()
+        # Recreate the HTTP client so subsequent grab()/stream_proxy() calls
+        # do not raise "Cannot send a request, as the client has been closed".
+        self._client = httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=5.0, read=_READ_TIMEOUT, write=5.0, pool=5.0)
+        )
 
     async def close(self) -> None:
         """Cancel the broadcaster task and clean up listeners."""
@@ -307,10 +312,14 @@ class MjpegGrabber:
         self._broadcaster_task = None
         from sentinel.camera.errors import CameraClosedError
 
+        sentinel = CameraClosedError("Camera closed/reconfigured")
         for q in list(self._listeners):
-            if not q.full():
-                with contextlib.suppress(asyncio.QueueFull):
-                    q.put_nowait(CameraClosedError("Camera closed/reconfigured"))
+            # Guarantee sentinel delivery: if queue is full, drop one frame to make room.
+            if q.full():
+                with contextlib.suppress(asyncio.QueueEmpty):
+                    q.get_nowait()
+            with contextlib.suppress(asyncio.QueueFull):
+                q.put_nowait(sentinel)
         self._listeners.clear()
 
         await self._client.aclose()

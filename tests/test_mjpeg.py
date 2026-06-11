@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -373,3 +374,93 @@ async def test_stream_proxy_cancellation_during_grab() -> None:
         with pytest.raises(CameraReadError) as exc_info:
             await grab_task
         assert "was cancelled" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# reconfigure() — new client is created, grab() works after reconfigure
+# ---------------------------------------------------------------------------
+
+
+def _make_httpx_client_with_aclose(resp: MagicMock) -> MagicMock:
+    """Like _make_httpx_client but also mocks aclose() as a coroutine."""
+    client = _make_httpx_client(resp)
+    client.aclose = AsyncMock()
+    return client
+
+
+async def test_reconfigure_grab_reconnects() -> None:
+    """After reconfigure(new_url), grab() must connect to the new URL
+    and return frames without raising RuntimeError from a closed client."""
+    import asyncio
+
+    resp1 = _make_stream_response([_JPEG])
+    mock_client1 = _make_httpx_client_with_aclose(resp1)
+
+    resp2 = _make_stream_response([_JPEG])
+    mock_client2 = _make_httpx_client_with_aclose(resp2)
+
+    new_url = "http://10.0.0.2:8080/webcam/?action=stream"
+
+    client_instances: list[object] = []
+
+    def _client_factory(**_kwargs: object) -> object:
+        if not client_instances:
+            client_instances.append(mock_client1)
+            return mock_client1
+        client_instances.append(mock_client2)
+        return mock_client2
+
+    with patch("sentinel.camera.mjpeg.httpx.AsyncClient", side_effect=_client_factory):
+        grabber = MjpegGrabber(_SETTINGS)
+
+        # First grab — uses original URL / client1
+        frame1 = await grabber.grab()
+        assert frame1 == _JPEG
+
+        # Cancel broadcaster so reconfigure can close cleanly
+        if grabber._broadcaster_task and not grabber._broadcaster_task.done():
+            grabber._broadcaster_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await grabber._broadcaster_task
+
+        # Reconfigure to a new URL — must create a fresh client
+        await grabber.reconfigure(new_url)
+        assert grabber._url == new_url
+
+        # Second grab — must not raise RuntimeError("client has been closed")
+        frame2 = await grabber.grab()
+        assert frame2 == _JPEG
+
+    # Two AsyncClient instances must have been created
+    assert len(client_instances) == 2
+
+
+# ---------------------------------------------------------------------------
+# close() — full queue: sentinel still delivered (CameraClosedError not dropped)
+# ---------------------------------------------------------------------------
+
+
+async def test_close_full_queue_delivers_sentinel() -> None:
+    """close() must guarantee CameraClosedError even when the listener queue is full."""
+    import asyncio
+
+    from sentinel.camera.errors import CameraClosedError
+
+    grabber = MjpegGrabber(_SETTINGS)
+    q: asyncio.Queue[object] = asyncio.Queue(maxsize=2)
+    # Fill the queue to capacity with dummy frames
+    q.put_nowait(b"frame1")
+    q.put_nowait(b"frame2")
+    assert q.full()
+
+    grabber._listeners.add(q)
+    await grabber.close()
+
+    # The sentinel must be present in the queue
+    items = []
+    while not q.empty():
+        items.append(q.get_nowait())
+
+    assert any(isinstance(item, CameraClosedError) for item in items), (
+        f"CameraClosedError not found in queue items: {items}"
+    )
