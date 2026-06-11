@@ -404,3 +404,53 @@ def test_readme_no_plaintext_auth_password_row() -> None:
         "README config table still has an AUTH_PASSWORD row — remove it, "
         "plaintext passwords are rejected at startup"
     )
+
+
+# ---------------------------------------------------------------------------
+# Double-construction / env-scrub safety tests
+# ---------------------------------------------------------------------------
+
+
+def test_double_construction_with_scrub_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Settings() must be constructable twice even after the first call scrubs env secrets.
+
+    The PYTEST_CURRENT_TEST guard is cleared so the scrub path executes.
+    _SECRET_STASH is reset before the test so state from other test runs does not
+    interfere, and restored afterward to keep the test suite idempotent.
+    """
+    import os
+
+    import sentinel.config as cfg
+
+    # Save and clear the stash so this test owns the stash lifecycle.
+    original_stash = dict(cfg._SECRET_STASH)
+    cfg._SECRET_STASH.clear()
+
+    try:
+        # Remove the pytest guard so model_post_init actually scrubs.
+        monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+
+        secret_value = "test-access-code-99"
+        monkeypatch.setenv("PRINTER_ACCESS_CODE", secret_value)
+
+        # First construction — should succeed and scrub the env var.
+        s1 = cfg.Settings()
+        assert s1.printer_access_code.get_secret_value() == secret_value
+
+        # After first construction the env var must be gone.
+        assert "PRINTER_ACCESS_CODE" not in os.environ, (
+            "PRINTER_ACCESS_CODE should have been scrubbed from os.environ"
+        )
+
+        # Second construction — must not raise, must return same secret value.
+        s2 = cfg.Settings()
+        assert s2.printer_access_code.get_secret_value() == secret_value, (
+            "Second Settings() construction returned a different printer_access_code"
+        )
+
+        # Env var must still be absent after the second construction.
+        assert "PRINTER_ACCESS_CODE" not in os.environ
+    finally:
+        # Restore stash so subsequent tests are unaffected.
+        cfg._SECRET_STASH.clear()
+        cfg._SECRET_STASH.update(original_stash)

@@ -7,10 +7,63 @@ import so `python -m sentinel --help` works from ticket #1 onward.
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import SecretStr, field_validator, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
+
+if TYPE_CHECKING:
+    from pydantic.fields import FieldInfo
+
+# ---------------------------------------------------------------------------
+# Secret stash — populated by model_post_init on the first Settings()
+# construction that exercises the env-scrub path (i.e. outside pytest).
+#
+# Why: model_post_init removes plaintext secrets from os.environ to keep
+# them out of /proc/<pid>/environ.  Without the stash, any second Settings()
+# construction (e.g. after get_settings.cache_clear()) would fail because
+# the required env vars are gone.
+#
+# The stash maps env-var name (upper-case) → raw string value so that
+# _StashSource can re-supply the values to pydantic-settings on subsequent
+# constructions.
+#
+# Note: secrets loaded from the .env file are NOT scrubbed today (pydantic-
+# settings reads .env independently of os.environ), so this asymmetry only
+# affects values that were originally in os.environ.
+# ---------------------------------------------------------------------------
+_SECRET_STASH: dict[str, str] = {}
+
+# Env-var names that are scrubbed and therefore need to be stashed.
+_SCRUBBED_ENV_KEYS: tuple[str, ...] = (
+    "PRINTER_ACCESS_CODE",
+    "TELEGRAM_BOT_TOKEN",
+    "NTFY_TOKEN",
+    "AUTH_PASSWORD",
+    "AUTH_PASSWORD_BCRYPT",
+)
+
+
+class _StashSource(PydanticBaseSettingsSource):
+    """Settings source that reads from the module-level ``_SECRET_STASH``.
+
+    This source is appended *after* all normal env / .env sources so that live
+    env values still take priority.  Its sole job is to re-supply secrets that
+    were previously scrubbed from os.environ by :meth:`Settings.model_post_init`.
+    """
+
+    def get_field_value(self, field: FieldInfo, field_name: str) -> tuple[Any, str, bool]:
+        env_key = field_name.upper()
+        value = _SECRET_STASH.get(env_key)
+        return value, field_name, False
+
+    def __call__(self) -> dict[str, Any]:
+        data: dict[str, Any] = {}
+        for field_name in self.settings_cls.model_fields:
+            env_key = field_name.upper()
+            if env_key in _SECRET_STASH:
+                data[field_name] = _SECRET_STASH[env_key]
+        return data
 
 
 class Settings(BaseSettings):
@@ -20,6 +73,24 @@ class Settings(BaseSettings):
         case_sensitive=False,
         extra="ignore",
     )
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        """Append _StashSource so previously-scrubbed secrets are still available."""
+        return (
+            init_settings,
+            env_settings,
+            dotenv_settings,
+            file_secret_settings,
+            _StashSource(settings_cls),
+        )
 
     # Printer
     printer_ip: str = "192.168.1.10"
@@ -258,15 +329,12 @@ class Settings(BaseSettings):
         if "PYTEST_CURRENT_TEST" in os.environ:
             return
 
-        secrets = [
-            "PRINTER_ACCESS_CODE",
-            "TELEGRAM_BOT_TOKEN",
-            "NTFY_TOKEN",
-            "AUTH_PASSWORD",
-            "AUTH_PASSWORD_BCRYPT",
-        ]
-        for key in secrets:
+        for key in _SCRUBBED_ENV_KEYS:
             if key in os.environ:
+                # Stash before scrubbing so that a second Settings() construction
+                # can recover the value via _StashSource even after env is cleared.
+                if key not in _SECRET_STASH:
+                    _SECRET_STASH[key] = os.environ[key]
                 os.environ[key] = "********"
                 os.environ.pop(key, None)
 
