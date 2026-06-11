@@ -44,7 +44,7 @@ class Settings(BaseSettings):
     detection_warmup_seconds: int = 300
     detection_enabled_default: bool = True
     watcher_stall_seconds: int = 60
-    auto_stop_timeout_seconds: int = 1800
+    auto_stop_timeout_seconds: int = 0
     snapshot_cleanup_interval_seconds: int = 3600
     snapshot_retention_limit: int = 50
     event_retention_days: int = 0  # 0 = unlimited; otherwise prune rows older than this

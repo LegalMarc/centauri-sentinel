@@ -126,6 +126,12 @@ def test_detection_warmup_default() -> None:
     assert s.detection_warmup_seconds == 300
 
 
+def test_auto_stop_timeout_default_is_zero() -> None:
+    """Auto-stop must default to 0 (disabled) — opt-in only."""
+    s = Settings(printer_access_code="x")
+    assert s.auto_stop_timeout_seconds == 0
+
+
 def test_db_path_default() -> None:
     s = Settings()
     assert s.db_path == "data/sentinel.db"

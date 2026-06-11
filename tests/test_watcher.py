@@ -1087,18 +1087,22 @@ async def test_print_completed_notification_2() -> None:
 
 
 async def test_watchdog_auto_stop(monkeypatch) -> None:
-    watcher, printer, _camera, _ml, db = await _make_watcher()
+    """Sentinel-paused print with auto-stop opted in: stop() called after timeout."""
+    settings = Settings(
+        printer_ip="10.0.0.1",
+        printer_access_code="test",
+        auto_stop_timeout_seconds=60,
+        resume_cooldown_seconds=0,
+    )
+    watcher, printer, _camera, _ml, db = await _make_watcher(settings=settings)
 
-    # Force auto-stop timeout parsing failure to test fallback
-    db.get_setting = AsyncMock(return_value="invalid")
+    db.get_setting = AsyncMock(return_value="true")
 
-    # Set to PAUSED state with an old pause time
+    # Simulate a pause initiated by Sentinel detection
     watcher.state = WatcherState.PAUSED
-    watcher._paused_since = datetime.now(tz=UTC) - timedelta(seconds=2000)
+    watcher._paused_since = datetime.now(tz=UTC) - timedelta(seconds=120)
+    watcher._paused_by_sentinel = True
 
-    # Use print_state="paused" — a printer paused by sentinel detection reports this
-    # state, and _update_state must keep the watcher in PAUSED for the auto-stop
-    # timeout check to fire.
     paused_status = PrinterStatus(
         printing=True,
         elapsed_seconds=400.0,
@@ -1113,6 +1117,64 @@ async def test_watchdog_auto_stop(monkeypatch) -> None:
     printer.stop.assert_called_once()
     watcher._dispatcher.dispatch_text.assert_called_once()
     assert watcher._paused_since is None
+    assert not watcher._paused_by_sentinel
+
+
+async def test_watchdog_auto_stop_external_pause_not_stopped(monkeypatch) -> None:
+    """Externally-paused print must NOT be stopped even after timeout expires."""
+    settings = Settings(
+        printer_ip="10.0.0.1",
+        printer_access_code="test",
+        auto_stop_timeout_seconds=60,
+        resume_cooldown_seconds=0,
+    )
+    watcher, printer, _camera, _ml, db = await _make_watcher(settings=settings)
+
+    db.get_setting = AsyncMock(return_value="true")
+
+    # External pause — _paused_by_sentinel remains False
+    watcher.state = WatcherState.PAUSED
+    watcher._paused_since = datetime.now(tz=UTC) - timedelta(seconds=120)
+    # _paused_by_sentinel is False by default
+
+    paused_status = PrinterStatus(
+        printing=True,
+        elapsed_seconds=400.0,
+        current_layer=10,
+        total_layers=100,
+        filename="test.gcode",
+        print_state="paused",
+    )
+    printer.status = AsyncMock(return_value=paused_status)
+
+    await watcher._tick()
+    printer.stop.assert_not_called()
+    watcher._dispatcher.dispatch_text.assert_not_called()
+
+
+async def test_watchdog_auto_stop_disabled_by_default(monkeypatch) -> None:
+    """With default settings (auto_stop=0), sentinel-paused print is never stopped."""
+    # _SETTINGS has auto_stop_timeout_seconds=0 (the new default)
+    watcher, printer, _camera, _ml, db = await _make_watcher()
+
+    db.get_setting = AsyncMock(return_value="true")
+
+    watcher.state = WatcherState.PAUSED
+    watcher._paused_since = datetime.now(tz=UTC) - timedelta(seconds=9999)
+    watcher._paused_by_sentinel = True
+
+    paused_status = PrinterStatus(
+        printing=True,
+        elapsed_seconds=400.0,
+        current_layer=10,
+        total_layers=100,
+        filename="test.gcode",
+        print_state="paused",
+    )
+    printer.status = AsyncMock(return_value=paused_status)
+
+    await watcher._tick()
+    printer.stop.assert_not_called()
 
 
 async def test_poll_interval_fallback(monkeypatch) -> None:

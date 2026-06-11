@@ -81,6 +81,7 @@ class WatcherLoop:
         self._prev_print_state: str | None = None
         self._current_filename: str | None = None
         self._paused_since: datetime | None = None
+        self._paused_by_sentinel: bool = False
         self._alerted_new_print: bool = False
         self._last_heartbeat_time = 0.0
         self._last_heartbeat_state: WatcherState | None = None
@@ -303,12 +304,12 @@ class WatcherLoop:
             if self.state == WatcherState.PAUSED:
                 if self._paused_since is None:
                     self._paused_since = datetime.now(tz=UTC)
-                else:
+                elif self._paused_by_sentinel:
                     pause_duration = (datetime.now(tz=UTC) - self._paused_since).total_seconds()
                     try:
                         auto_stop_timeout = int(self._settings.auto_stop_timeout_seconds)
                     except (ValueError, TypeError):
-                        auto_stop_timeout = 1800
+                        auto_stop_timeout = 0
 
                     if auto_stop_timeout > 0 and pause_duration > auto_stop_timeout:
                         logger.warning(
@@ -331,12 +332,14 @@ class WatcherLoop:
                             )
 
                         self._paused_since = None  # reset to prevent spamming
+                        self._paused_by_sentinel = False
             elif self.state not in (
                 WatcherState.OFFLINE,
                 WatcherState.CAMERA_OFFLINE,
                 WatcherState.STALLED,
             ):
                 self._paused_since = None
+                self._paused_by_sentinel = False
 
             if self.state in (WatcherState.ARMED, WatcherState.CAMERA_OFFLINE):
                 detection_enabled = await self._db.get_setting("detection_enabled", "true")
@@ -405,6 +408,7 @@ class WatcherLoop:
             self._prev_print_state = None
             self._current_filename = None
             self._paused_since = None
+            self._paused_by_sentinel = False
             self._alerted_new_print = False
             return
 
@@ -661,10 +665,12 @@ class WatcherLoop:
             pause_ok = True
             self.state = WatcherState.PAUSED
             self._paused_since = datetime.now(tz=UTC)
+            self._paused_by_sentinel = True
         except asyncio.CancelledError:
             if pause_sent:
                 self.state = WatcherState.PAUSED
                 self._paused_since = datetime.now(tz=UTC)
+                self._paused_by_sentinel = True
             else:
                 logger.critical("Watcher cancelled before printer pause completed")
             raise
