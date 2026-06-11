@@ -577,3 +577,116 @@ async def test_close_stale_jobs_does_not_affect_non_printing(db: Database) -> No
 
     rows = await db.get_recent_jobs()
     assert rows[0]["status"] == "failed"
+
+
+# ---------------------------------------------------------------------------
+# Read isolation: readers must not see uncommitted writes
+# ---------------------------------------------------------------------------
+
+
+async def test_read_does_not_see_uncommitted_write(db: Database) -> None:
+    """A concurrent read must not observe a row that has been executed but not committed.
+
+    We simulate an in-progress write by holding the writer lock manually (via
+    _write), suspending inside it, and then performing a read from a second
+    coroutine.  Because both reads and writes now acquire the same lock, the
+    reader is blocked until the writer rolls back — it never sees the dirty row.
+
+    The writer deliberately rolls back (never fires allow_commit), so the only
+    committed state is "row absent".  If the lock were bypassed, the reader
+    would complete during the writer's open transaction and return the dirty
+    value 'dirty_sentinel'; with the lock it returns None (row absent after
+    rollback).  This makes a dirty read detectable.
+    """
+    import asyncio
+
+    write_started = asyncio.Event()
+    allow_rollback = asyncio.Event()
+
+    async def slow_writer() -> None:
+        try:
+            async with db._write() as conn:
+                await conn.execute(
+                    "INSERT INTO runtime_settings (key, value)"
+                    " VALUES ('isolation_test', 'dirty_sentinel')"
+                )
+                write_started.set()
+                # Pause here — transaction is open, row exists but not committed.
+                # We will roll back by raising after allow_rollback fires.
+                await allow_rollback.wait()
+                raise RuntimeError("deliberate rollback")
+        except RuntimeError:
+            pass  # expected — ensures the transaction is rolled back
+
+    async def concurrent_reader() -> str | None:
+        # Wait until the writer has executed (but not committed) before reading.
+        await write_started.wait()
+        # This read must block on the lock until the writer releases it.
+        return await db.get_setting("isolation_test")
+
+    writer_task = asyncio.create_task(slow_writer())
+    reader_task = asyncio.create_task(concurrent_reader())
+
+    # Give both tasks real scheduling time so that a reader NOT blocked by a
+    # lock would have enough time to complete its aiosqlite worker round-trip.
+    await asyncio.sleep(0.05)
+
+    # The reader must still be pending — blocked on the lock.
+    # If get_setting bypassed _read() (no lock), it could have completed already.
+    assert not reader_task.done(), (
+        "Reader completed before the writer released the lock — "
+        "dirty read possible (lock not held during read)"
+    )
+
+    # Release the writer so it rolls back, which frees the lock.
+    allow_rollback.set()
+    await writer_task
+
+    # Now the reader can proceed; the transaction was rolled back so the row is
+    # absent — a dirty read would have returned 'dirty_sentinel'.
+    result = await reader_task
+    assert result is None, (
+        f"Expected None (row absent after rollback) but got {result!r} — "
+        "reader may have seen uncommitted data"
+    )
+
+
+# ---------------------------------------------------------------------------
+# CancelledError in _write leaves no pending statements
+# ---------------------------------------------------------------------------
+
+
+async def test_cancelled_write_rolls_back(db: Database) -> None:
+    """asyncio.CancelledError inside _write must trigger rollback so the next
+    write starts with a clean connection and does not accidentally commit the
+    cancelled write's statements.
+    """
+    import asyncio
+    import contextlib
+
+    inside_write = asyncio.Event()
+
+    async def write_that_gets_cancelled() -> None:
+        async with db._write() as conn:
+            await conn.execute(
+                "INSERT INTO runtime_settings (key, value) VALUES ('cancel_test', 'should_not_persist')"
+            )
+            inside_write.set()
+            # Yield control so the cancellation can land.
+            await asyncio.sleep(10)  # Will be cancelled here.
+
+    task = asyncio.create_task(write_that_gets_cancelled())
+    await inside_write.wait()
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    # After cancellation the transaction must have been rolled back.
+    # A subsequent read must not find the cancelled insert.
+    val = await db.get_setting("cancel_test")
+    assert val is None, f"Cancelled write must not persist; got {val!r}"
+
+    # The connection must be usable for a fresh write.
+    await db.set_setting("after_cancel", "ok")
+    result = await db.get_setting("after_cancel")
+    assert result == "ok"

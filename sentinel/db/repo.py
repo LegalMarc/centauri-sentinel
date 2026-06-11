@@ -1,4 +1,4 @@
-"""Async repository layer — all DB writes go through a single asyncio.Lock."""
+"""Async repository layer — all DB reads and writes go through a single asyncio.Lock."""
 
 from __future__ import annotations
 
@@ -16,7 +16,14 @@ logger = logging.getLogger(__name__)
 
 
 class Database:
-    """Wrapper around an aiosqlite connection with a serialising writer lock."""
+    """Wrapper around an aiosqlite connection with a serialising lock for all operations.
+
+    A single asyncio.Lock serialises both reads and writes so that readers never
+    observe uncommitted (dirty) data from concurrent writers on the same connection.
+    aiosqlite serialises individual statements per connection, but that does not
+    prevent a read from landing between another task's execute and commit, which
+    would expose not-yet-committed rows that may later be rolled back.
+    """
 
     def __init__(self, db_path: str) -> None:
         self._path = db_path
@@ -53,18 +60,31 @@ class Database:
     async def _write(
         self, clear_analytics_cache: bool = False
     ) -> AsyncGenerator[aiosqlite.Connection, None]:
-        # Reads do NOT need this lock: aiosqlite serialises via its own
-        # connection thread and SQLite WAL provides snapshot isolation.
+        # Both reads and writes acquire this lock so that no read can land
+        # between a writer's execute and commit on the same connection.
+        # On any exit that did not reach commit (including asyncio.CancelledError
+        # and other BaseExceptions), the transaction is rolled back and the
+        # exception re-raised, so the next writer starts with a clean connection.
         async with self._lock:
             assert self._conn is not None, "Database.connect() was not called"
+            committed = False
             try:
                 yield self._conn
                 await self._conn.commit()
+                committed = True
                 if clear_analytics_cache:
                     self._analytics_cache = None
-            except Exception:
-                await self._conn.rollback()
+            except BaseException:
+                if not committed:
+                    await self._conn.rollback()
                 raise
+
+    @asynccontextmanager
+    async def _read(self) -> AsyncGenerator[aiosqlite.Connection, None]:
+        """Context manager that serialises reads with the writer lock."""
+        async with self._lock:
+            assert self._conn is not None, "Database.connect() was not called"
+            yield self._conn
 
     @property
     def _db(self) -> aiosqlite.Connection:
@@ -74,7 +94,7 @@ class Database:
     async def ping(self) -> bool:
         """Return True if the DB connection is live (used by /readyz)."""
         try:
-            async with self._db.execute("SELECT 1") as cur:
+            async with self._read() as db, db.execute("SELECT 1") as cur:
                 await cur.fetchone()
             return True
         except Exception:
@@ -101,21 +121,27 @@ class Database:
             return cursor.lastrowid or 0
 
     async def get_recent_detections(self, limit: int = 50) -> list[dict[str, object]]:
-        async with self._db.execute(
-            "SELECT id, ts_utc, score, consecutive, confirmed, snapshot_path"
-            " FROM detection_events ORDER BY id DESC LIMIT ?",
-            (limit,),
-        ) as cur:
+        async with (
+            self._read() as db,
+            db.execute(
+                "SELECT id, ts_utc, score, consecutive, confirmed, snapshot_path"
+                " FROM detection_events ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ) as cur,
+        ):
             rows = await cur.fetchall()
             return [dict(r) for r in rows]
 
     async def get_snapshots_for_cleanup(self, keep_limit: int = 50, limit: int = -1) -> list[str]:
         """Return snapshot_paths of old detection events that should be deleted."""
-        async with self._db.execute(
-            "SELECT snapshot_path FROM detection_events WHERE snapshot_path IS NOT NULL"
-            " ORDER BY id DESC LIMIT ? OFFSET ?",
-            (limit, keep_limit),
-        ) as cur:
+        async with (
+            self._read() as db,
+            db.execute(
+                "SELECT snapshot_path FROM detection_events WHERE snapshot_path IS NOT NULL"
+                " ORDER BY id DESC LIMIT ? OFFSET ?",
+                (limit, keep_limit),
+            ) as cur,
+        ):
             rows = await cur.fetchall()
             return [row["snapshot_path"] for row in rows]
 
@@ -147,11 +173,14 @@ class Database:
             return cursor.lastrowid or 0
 
     async def get_recent_pauses(self, limit: int = 50) -> list[dict[str, object]]:
-        async with self._db.execute(
-            "SELECT id, ts_utc, source, result, error_message"
-            " FROM pause_history ORDER BY id DESC LIMIT ?",
-            (limit,),
-        ) as cur:
+        async with (
+            self._read() as db,
+            db.execute(
+                "SELECT id, ts_utc, source, result, error_message"
+                " FROM pause_history ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ) as cur,
+        ):
             rows = await cur.fetchall()
             return [dict(r) for r in rows]
 
@@ -164,9 +193,10 @@ class Database:
             val = self._settings_cache[key]
             return val if val is not None else default
 
-        async with self._db.execute(
-            "SELECT value FROM runtime_settings WHERE key = ?", (key,)
-        ) as cur:
+        async with (
+            self._read() as db,
+            db.execute("SELECT value FROM runtime_settings WHERE key = ?", (key,)) as cur,
+        ):
             row = await cur.fetchone()
             val = str(row["value"]) if row else None
             self._settings_cache[key] = val
@@ -215,9 +245,10 @@ class Database:
             )
 
     async def get_heartbeat(self) -> dict[str, Any] | None:
-        async with self._db.execute(
-            "SELECT last_tick_utc, state FROM watcher_heartbeat WHERE id = 1"
-        ) as cur:
+        async with (
+            self._read() as db,
+            db.execute("SELECT last_tick_utc, state FROM watcher_heartbeat WHERE id = 1") as cur,
+        ):
             row = await cur.fetchone()
             return dict(row) if row else None
 
@@ -262,12 +293,15 @@ class Database:
 
     async def get_recent_jobs(self, limit: int = 50) -> list[dict[str, Any]]:
         """Return the most recent print jobs."""
-        async with self._db.execute(
-            "SELECT id, filename, started_at, ended_at, duration_seconds,"
-            " filament_used_g, status, pauses_count"
-            " FROM print_jobs ORDER BY id DESC LIMIT ?",
-            (limit,),
-        ) as cur:
+        async with (
+            self._read() as db,
+            db.execute(
+                "SELECT id, filename, started_at, ended_at, duration_seconds,"
+                " filament_used_g, status, pauses_count"
+                " FROM print_jobs ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ) as cur,
+        ):
             rows = await cur.fetchall()
             return [dict(r) for r in rows]
 
@@ -314,15 +348,18 @@ class Database:
         if self._analytics_cache is not None:
             return self._analytics_cache
 
-        async with self._db.execute(
-            "SELECT COUNT(*) as total_jobs,"
-            " SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed_jobs,"
-            " SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed_jobs,"
-            " SUM(duration_seconds) as total_duration_seconds,"
-            " SUM(filament_used_g) as total_filament_g,"
-            " SUM(pauses_count) as total_pauses"
-            " FROM print_jobs WHERE status IN ('completed', 'failed')"
-        ) as cur:
+        async with (
+            self._read() as db,
+            db.execute(
+                "SELECT COUNT(*) as total_jobs,"
+                " SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed_jobs,"
+                " SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed_jobs,"
+                " SUM(duration_seconds) as total_duration_seconds,"
+                " SUM(filament_used_g) as total_filament_g,"
+                " SUM(pauses_count) as total_pauses"
+                " FROM print_jobs WHERE status IN ('completed', 'failed')"
+            ) as cur,
+        ):
             row = await cur.fetchone()
             res = dict(row) if row else {}
 
@@ -331,10 +368,13 @@ class Database:
         success_rate = (completed / total * 100) if total > 0 else 0.0
 
         # Average duration of completed prints
-        async with self._db.execute(
-            "SELECT AVG(duration_seconds) as avg_duration FROM print_jobs"
-            " WHERE status = 'completed' AND duration_seconds IS NOT NULL"
-        ) as cur_avg:
+        async with (
+            self._read() as db,
+            db.execute(
+                "SELECT AVG(duration_seconds) as avg_duration FROM print_jobs"
+                " WHERE status = 'completed' AND duration_seconds IS NOT NULL"
+            ) as cur_avg,
+        ):
             row_avg = await cur_avg.fetchone()
             avg_duration = (
                 row_avg["avg_duration"] if row_avg and row_avg["avg_duration"] is not None else 0.0
@@ -367,8 +407,11 @@ class Database:
 
     async def get_all_active_snapshot_paths(self) -> list[str]:
         """Return all active snapshot paths stored in the database."""
-        async with self._db.execute(
-            "SELECT snapshot_path FROM detection_events WHERE snapshot_path IS NOT NULL"
-        ) as cur:
+        async with (
+            self._read() as db,
+            db.execute(
+                "SELECT snapshot_path FROM detection_events WHERE snapshot_path IS NOT NULL"
+            ) as cur,
+        ):
             rows = await cur.fetchall()
             return [row["snapshot_path"] for row in rows if row["snapshot_path"]]
