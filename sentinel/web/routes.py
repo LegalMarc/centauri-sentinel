@@ -288,27 +288,42 @@ def make_router(
     async def control_pause() -> Response:
         if db is None or watcher is None or watcher.printer is None:
             raise HTTPException(status_code=503, detail="Service not initialised")
+        from sentinel.printer.errors import PauseDebouncedError
+
         try:
-            sent = await watcher.printer.pause()
+            await watcher.printer.pause()
+        except PauseDebouncedError:
+            # Debounce fired — check whether the printer is genuinely paused already.
+            try:
+                live = await watcher.printer.status()
+                if live.print_state == "paused":
+                    await db.record_pause(source="web", result="ok")
+                    await watcher.get_fresh_status(force=True)
+                    return Response(
+                        content='{"status": "ok", "message": "Print paused"}',
+                        media_type="application/json",
+                    )
+            except Exception:
+                pass
+            await db.record_pause(
+                source="web",
+                result="error",
+                error_message="Pause suppressed by debounce; printer status unclear",
+            )
+            return Response(
+                content='{"status": "error", "message": "Pause suppressed — debounce active; retrying next tick"}',
+                status_code=429,
+                media_type="application/json",
+            )
         except Exception as exc:
             logger.exception("Pause failed via Web API")
             await db.record_pause(source="web", result="error", error_message=str(exc))
             raise HTTPException(status_code=500, detail="Pause failed — check server logs") from exc
-        if sent:
-            await db.record_pause(source="web", result="ok")
-            await watcher.get_fresh_status(force=True)
-            return Response(
-                content='{"status": "ok", "message": "Print paused"}', media_type="application/json"
-            )
-        else:
-            await db.record_pause(
-                source="web", result="error", error_message="Printer already paused"
-            )
-            return Response(
-                content='{"status": "error", "message": "Printer already paused"}',
-                status_code=400,
-                media_type="application/json",
-            )
+        await db.record_pause(source="web", result="ok")
+        await watcher.get_fresh_status(force=True)
+        return Response(
+            content='{"status": "ok", "message": "Print paused"}', media_type="application/json"
+        )
 
     @router.post("/api/control/resume")
     async def control_resume() -> Response:

@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 from sentinel.bot.commands import BotCommandHandler
 from sentinel.config import Settings
+from sentinel.printer.errors import PauseDebouncedError
 from sentinel.watcher.state import WatcherState
 
 if TYPE_CHECKING:
@@ -495,14 +496,27 @@ async def test_callback_resume_failure_edits_text() -> None:
     assert "failed" in update.callback_query.edit_message_text.call_args[0][0].lower()
 
 
-async def test_cmd_pause_already_paused() -> None:
+async def test_cmd_pause_debounced_printer_not_paused() -> None:
+    """When debounced and printer is still printing, the response warns rather than claiming success."""
     printer = AsyncMock()
-    printer.pause.return_value = False
+    printer.pause.side_effect = PauseDebouncedError("debounced")
+    # printer.status reports still printing (not paused)
+    from sentinel.printer.types import PrinterStatus
+
+    printer.status.return_value = PrinterStatus(
+        printing=True,
+        elapsed_seconds=100.0,
+        current_layer=5,
+        total_layers=50,
+        filename="test.gcode",
+        print_state="printing",
+    )
     handler = _make_handler(printer=printer)
     update = _make_update()
     await handler.cmd_pause(update, None)
     update.message.reply_text.assert_called_once()
-    assert "already" in update.message.reply_text.call_args[0][0].lower()
+    reply = update.message.reply_text.call_args[0][0].lower()
+    assert "suppressed" in reply or "debounce" in reply or "retry" in reply
 
 
 async def test_cmd_resume_failure() -> None:

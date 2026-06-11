@@ -24,7 +24,7 @@ import aiomqtt
 import tenacity
 
 from sentinel.network import resolve_and_validate_printer_ip
-from sentinel.printer.errors import PrinterProtocolError, PrinterTimeoutError
+from sentinel.printer.errors import PauseDebouncedError, PrinterProtocolError, PrinterTimeoutError
 from sentinel.printer.types import METHOD_STATUS_PUSH, PrinterStatus
 
 if TYPE_CHECKING:
@@ -263,29 +263,44 @@ class PrinterClient:
     async def print_elapsed_seconds(self) -> float:
         return (await self.status()).elapsed_seconds
 
-    async def pause(self) -> bool:
+    async def pause(self) -> None:
         """Send pause command.
 
-        Returns True if the command was published, False if the debounce window
-        was active (a pause was already sent within _PAUSE_DEBOUNCE_S seconds).
+        Raises PauseDebouncedError if a pause was already published within
+        _PAUSE_DEBOUNCE_S seconds of this call.  Callers that catch
+        PauseDebouncedError must query printer status directly to determine
+        whether the printer is actually paused.
+
         _last_pause_at is only updated on a successful publish so a failed
         attempt does not block the next retry.
         """
         now = time.monotonic()
         if now - self._last_pause_at < _PAUSE_DEBOUNCE_S:
-            logger.debug("pause() called within debounce window — skipping duplicate publish")
-            return False
+            logger.debug("pause() called within debounce window — raising PauseDebouncedError")
+            raise PauseDebouncedError(
+                "pause suppressed: already sent within the last "
+                f"{_PAUSE_DEBOUNCE_S:.0f}s debounce window"
+            )
         self._last_pause_at = now
         try:
             await self._with_retry(lambda: self._send_command({"method": 1001}))
         except Exception:
             self._last_pause_at = 0.0
             raise
-        return True
+
+    def clear_pause_debounce(self) -> None:
+        """Reset the debounce anchor so the next pause() call publishes immediately.
+
+        Call this after a confirmed resume so that a re-detection within the
+        30-second window is not silently dropped.
+        """
+        self._last_pause_at = 0.0
+        logger.debug("Pause debounce anchor cleared")
 
     async def resume(self) -> None:
-        """Send resume command."""
+        """Send resume command and clear the pause debounce anchor."""
         await self._with_retry(lambda: self._send_command({"method": 1002}))
+        self.clear_pause_debounce()
 
     async def stop(self) -> None:
         """Send stop command.

@@ -11,6 +11,7 @@ import httpx
 import pytest
 
 from sentinel.config import Settings
+from sentinel.printer.errors import PauseDebouncedError
 from sentinel.watcher.state import WatcherState
 from sentinel.web.app import create_app
 
@@ -1370,20 +1371,33 @@ async def test_control_pause_failure(
     )
 
 
-async def test_control_pause_already_paused_edge(
+async def test_control_pause_debounced_printer_still_printing(
     mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: MagicMock
 ) -> None:
+    """When debounced and printer is still printing, route returns 429 with error message."""
     printer = AsyncMock()
-    printer.pause.return_value = False
+    printer.pause.side_effect = PauseDebouncedError("debounced")
+    from sentinel.printer.types import PrinterStatus
+
+    printer.status.return_value = PrinterStatus(
+        printing=True,
+        elapsed_seconds=100.0,
+        current_layer=5,
+        total_layers=50,
+        filename="test.gcode",
+        print_state="printing",
+    )
     mock_watcher.printer = printer
     app_state = create_app(
         _base_settings(auth_enabled=False), db=mock_db, watcher=mock_watcher, camera=mock_camera
     )
     async with _client(app_state) as c:
         r = await c.post("/api/control/pause")
-    assert r.status_code == 400
+    assert r.status_code == 429
     mock_db.record_pause.assert_called_once_with(
-        source="web", result="error", error_message="Printer already paused"
+        source="web",
+        result="error",
+        error_message="Pause suppressed by debounce; printer status unclear",
     )
 
 

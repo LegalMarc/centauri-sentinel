@@ -21,6 +21,7 @@ from sentinel.camera.errors import CameraOfflineError
 from sentinel.config import Settings
 from sentinel.db.repo import Database
 from sentinel.ml.types import MlResult
+from sentinel.printer.errors import PauseDebouncedError
 from sentinel.printer.types import PrinterStatus
 from sentinel.watcher.loop import WatcherLoop
 from sentinel.watcher.state import WatcherState
@@ -121,8 +122,9 @@ async def _make_watcher(
 
     printer = MagicMock()
     printer.status = AsyncMock(return_value=printer_status or _idle_status())
-    printer.pause = AsyncMock()
+    printer.pause = AsyncMock(return_value=None)
     printer.stop = AsyncMock()
+    printer.clear_pause_debounce = MagicMock()
 
     camera = MagicMock()
     camera.grab = AsyncMock(return_value=b"\xff\xd8\xff\xd9")
@@ -1862,3 +1864,102 @@ async def test_snooze_write_order_is_crash_safe() -> None:
 
     watcher.cancel_snooze()
     await db.close()
+
+
+# ---------------------------------------------------------------------------
+# Issue #50 — pause debounce / resume interaction
+# ---------------------------------------------------------------------------
+
+
+async def test_resume_then_redetect_publishes_pause() -> None:
+    """After resume(), a fresh confirmed detection must publish a real pause.
+
+    Scenario: auto-pause at t0 → user resumes → watcher transitions PAUSED→ARMED
+    (which clears the debounce anchor) → detection re-confirms within the 30s
+    window → pause() is called again and must NOT raise PauseDebouncedError.
+    """
+    settings = Settings(
+        printer_ip="10.0.0.1",
+        printer_access_code="test",
+        detection_warmup_seconds=0,
+        ml_confirm_count=1,
+        ml_score_threshold=0.4,
+        ml_poll_interval_seconds=10,
+        watcher_stall_seconds=60,
+        resume_cooldown_seconds=0,
+    )
+    watcher, printer, _camera, _ml, _db = await _make_watcher(
+        settings=settings,
+        printer_status=_printing_status(),
+    )
+
+    # Track how many times pause() is actually called
+    pause_call_count = 0
+
+    async def _counting_pause() -> None:
+        nonlocal pause_call_count
+        pause_call_count += 1
+
+    printer.pause = AsyncMock(side_effect=_counting_pause)
+
+    # First confirmed detection → pause
+    await watcher._on_confirmed_detection(MlResult(score=0.9), b"\xff\xd8\xff\xd9")
+    assert watcher.state == WatcherState.PAUSED
+    assert pause_call_count == 1
+
+    # Simulate PAUSED → ARMED state transition (user resumes externally).
+    # This must call clear_pause_debounce on the printer.
+    watcher.state = WatcherState.ARMED
+    printer.clear_pause_debounce.assert_called_once()
+
+    # Second confirmed detection within what would have been the debounce window.
+    # Because debounce was cleared, pause() must be called again.
+    await watcher._on_confirmed_detection(MlResult(score=0.9), b"\xff\xd8\xff\xd9")
+    assert pause_call_count == 2
+    assert watcher.state == WatcherState.PAUSED
+
+
+async def test_debounced_pause_does_not_set_paused_when_printer_still_printing() -> None:
+    """A debounced pause must NOT transition watcher to PAUSED if printer is still printing.
+
+    Scenario: auto-pause at t0, printer still printing (debounce fired but
+    previous pause was somehow lost) → watcher must stay ARMED and retry.
+    """
+    settings = Settings(
+        printer_ip="10.0.0.1",
+        printer_access_code="test",
+        detection_warmup_seconds=0,
+        ml_confirm_count=1,
+        ml_score_threshold=0.4,
+        ml_poll_interval_seconds=10,
+        watcher_stall_seconds=60,
+        resume_cooldown_seconds=0,
+    )
+    watcher, printer, _camera, _ml, _db = await _make_watcher(
+        settings=settings,
+        printer_status=_printing_status(),
+    )
+    dispatcher = _make_dispatcher()
+    watcher._dispatcher = dispatcher
+
+    # Simulate debounce already active (first pause was just sent)
+    printer.pause = AsyncMock(side_effect=PauseDebouncedError("debounced"))
+    # Printer status says still printing (not paused)
+    printer.status = AsyncMock(
+        return_value=PrinterStatus(
+            printing=True,
+            elapsed_seconds=400.0,
+            current_layer=10,
+            total_layers=100,
+            filename="test.gcode",
+            print_state="printing",
+        )
+    )
+
+    await watcher._on_confirmed_detection(MlResult(score=0.9), b"\xff\xd8\xff\xd9")
+
+    # Must NOT transition to PAUSED — printer is still printing
+    assert watcher.state != WatcherState.PAUSED
+    # Must warn via dispatcher
+    dispatcher.dispatch_text.assert_called_once()
+    assert "debounce" in dispatcher.dispatch_text.call_args[0][0].lower()

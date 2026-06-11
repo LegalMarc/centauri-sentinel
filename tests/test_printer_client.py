@@ -15,7 +15,7 @@ import pytest
 
 from sentinel.config import Settings
 from sentinel.printer.client import PrinterClient, _parse_status
-from sentinel.printer.errors import PrinterProtocolError, PrinterTimeoutError
+from sentinel.printer.errors import PauseDebouncedError, PrinterProtocolError, PrinterTimeoutError
 from sentinel.printer.types import PrinterStatus
 
 # ---------------------------------------------------------------------------
@@ -363,28 +363,26 @@ async def test_send_command_with_known_serial_uses_serial_topic() -> None:
 
 
 # ---------------------------------------------------------------------------
-# PrinterClient.pause() — bool return and debounce
+# PrinterClient.pause() — debounce raises PauseDebouncedError
 # ---------------------------------------------------------------------------
 
 
-async def test_pause_returns_true_on_success() -> None:
+async def test_pause_succeeds_first_call() -> None:
     cm, _ = await _make_publish_client()
     with patch("sentinel.printer.client.aiomqtt.Client", return_value=cm):
         client = PrinterClient(_SETTINGS)
         client._serial_number = "TESTSERIAL"
-        result = await client.pause()
-    assert result is True
+        await client.pause()  # must not raise
 
 
-async def test_pause_returns_false_within_debounce_window() -> None:
+async def test_pause_raises_debounced_within_debounce_window() -> None:
     cm, mock_client = await _make_publish_client()
     with patch("sentinel.printer.client.aiomqtt.Client", return_value=cm):
         client = PrinterClient(_SETTINGS)
         client._serial_number = "TESTSERIAL"
-        first = await client.pause()
-        second = await client.pause()
-    assert first is True
-    assert second is False
+        await client.pause()
+        with pytest.raises(PauseDebouncedError):
+            await client.pause()
     assert mock_client.publish.call_count == 1  # only one actual publish
 
 
@@ -405,7 +403,7 @@ async def test_pause_failure_does_not_lock_debounce() -> None:
 
 
 async def test_pause_concurrent_calls_debounced() -> None:
-    """Concurrent calls to pause() should be debounced correctly (only one publish)."""
+    """Concurrent calls to pause() — exactly one succeeds, the other raises PauseDebouncedError."""
     client = PrinterClient(_SETTINGS)
     publishes = 0
 
@@ -415,11 +413,39 @@ async def test_pause_concurrent_calls_debounced() -> None:
         await asyncio.sleep(0.05)
 
     with patch.object(client, "_send_command", side_effect=_slow_publish):
-        # Trigger two pause calls concurrently
-        res1, res2 = await asyncio.gather(client.pause(), client.pause())
+        results = await asyncio.gather(client.pause(), client.pause(), return_exceptions=True)
 
-    assert (res1 is True and res2 is False) or (res1 is False and res2 is True)
+    successes = [r for r in results if r is None]
+    debounced = [r for r in results if isinstance(r, PauseDebouncedError)]
+    assert len(successes) == 1
+    assert len(debounced) == 1
     assert publishes == 1
+
+
+async def test_clear_pause_debounce_allows_immediate_repause() -> None:
+    """clear_pause_debounce() resets the anchor so a subsequent pause() publishes."""
+    cm, mock_client = await _make_publish_client()
+    with patch("sentinel.printer.client.aiomqtt.Client", return_value=cm):
+        client = PrinterClient(_SETTINGS)
+        client._serial_number = "TESTSERIAL"
+        await client.pause()
+        client.clear_pause_debounce()
+        await client.pause()  # must not raise; debounce was cleared
+    assert mock_client.publish.call_count == 2
+
+
+async def test_resume_clears_pause_debounce() -> None:
+    """resume() must clear the pause debounce so re-detection publishes a real pause."""
+    cm, mock_client = await _make_publish_client()
+    with patch("sentinel.printer.client.aiomqtt.Client", return_value=cm):
+        client = PrinterClient(_SETTINGS)
+        client._serial_number = "TESTSERIAL"
+        await client.pause()
+        assert client._last_pause_at > 0.0
+        await client.resume()
+        assert client._last_pause_at == pytest.approx(0.0)
+        await client.pause()  # must not raise after resume
+    assert mock_client.publish.call_count == 3  # pause + resume + pause
 
 
 # ---------------------------------------------------------------------------

@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
 from sentinel.camera.errors import CameraOfflineError
+from sentinel.printer.errors import PauseDebouncedError
 from sentinel.watcher.state import WatcherState
 
 if TYPE_CHECKING:
@@ -47,8 +48,9 @@ class MLClient(Protocol):
 
 class Printer(Protocol):
     async def status(self) -> PrinterStatus: ...
-    async def pause(self) -> bool: ...
+    async def pause(self) -> None: ...
     async def stop(self) -> None: ...
+    def clear_pause_debounce(self) -> None: ...
 
 
 class WatcherLoop:
@@ -102,6 +104,11 @@ class WatcherLoop:
         ):
             self._last_resume_time = time.monotonic()
             logger.info("Printer resumed — setting resume cooldown anchor")
+            # Clear the printer's pause debounce so that a re-detection within
+            # the 30-second window publishes a real pause rather than being
+            # silently dropped (external resume path — client.resume() handles
+            # the command-driven path directly).
+            getattr(self._printer, "clear_pause_debounce", lambda: None)()
         self._state = value
 
     @property
@@ -580,10 +587,15 @@ class WatcherLoop:
                     "🚨 Sentinel ML service is failing continuously. Pausing printer for safety."
                 )
                 try:
-                    if await self._printer.pause():
-                        self.state = WatcherState.PAUSED
-                        self._paused_since = datetime.now(tz=UTC)
-                        self._confirm_count = 0
+                    await self._printer.pause()
+                    self.state = WatcherState.PAUSED
+                    self._paused_since = datetime.now(tz=UTC)
+                    self._confirm_count = 0
+                except PauseDebouncedError:
+                    logger.warning(
+                        "ML-failure pause suppressed by debounce — "
+                        "printer may already be paused from a prior command"
+                    )
                 except Exception as e:
                     logger.error("Failed to pause printer on ML failure: %s", e)
                 self._ml_error_count = 0
@@ -655,9 +667,7 @@ class WatcherLoop:
 
         async def _do_pause() -> None:
             nonlocal pause_sent
-            paused = await self._printer.pause()
-            if not paused:
-                logger.info("Pause suppressed by debounce; treating as success")
+            await self._printer.pause()
             pause_sent = True
 
         try:
@@ -674,6 +684,40 @@ class WatcherLoop:
             else:
                 logger.critical("Watcher cancelled before printer pause completed")
             raise
+        except PauseDebouncedError:
+            # The debounce window is active — we did NOT send a new pause command.
+            # Inspect the live printer status to determine the real outcome:
+            # - if the printer is already paused, the earlier pause took effect → treat as success.
+            # - if the printer is still printing, the pause was silently lost → stay ARMED and retry.
+            logger.info(
+                "Pause suppressed by debounce window — checking live printer status "
+                "to determine whether printer is actually paused"
+            )
+            try:
+                live_status = await self._printer.status()
+                printer_is_paused = live_status.print_state == "paused"
+            except Exception:
+                logger.warning(
+                    "Could not fetch live printer status after debounced pause; "
+                    "staying ARMED to retry on next tick"
+                )
+                printer_is_paused = False
+
+            if printer_is_paused:
+                logger.info("Debounced pause: printer confirmed paused — transitioning PAUSED")
+                pause_ok = True
+                self.state = WatcherState.PAUSED
+                self._paused_since = datetime.now(tz=UTC)
+                self._paused_by_sentinel = True
+            else:
+                logger.warning(
+                    "Debounced pause: printer still printing — staying ARMED, will retry next tick"
+                )
+                self._confirm_count = consecutive_count
+                self._dispatcher.dispatch_text(
+                    "⚠️ Pause suppressed by debounce window but printer is still printing. "
+                    "Sentinel remains armed and will retry if failure is still detected."
+                )
         except Exception:
             logger.exception("Printer pause failed — notifying anyway")
             # if the failure is still detected, instead of waiting for N more frames.

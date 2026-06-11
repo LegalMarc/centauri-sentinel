@@ -256,8 +256,32 @@ class BotCommandHandler:
         if not await self._check_rate_limit(update):
             return
         assert update.message is not None
+        from sentinel.printer.errors import PauseDebouncedError
+
         try:
-            sent = await self._printer.pause()
+            await self._printer.pause()
+        except PauseDebouncedError:
+            # Debounce fired — check whether the printer is genuinely paused.
+            try:
+                live = await self._printer.status()
+                if live.print_state == "paused":
+                    await self._db.record_pause(source="telegram", result="ok")
+                    await self._watcher.get_fresh_status(force=True)
+                    await update.message.reply_text("Print paused.", reply_markup=_TUI_KEYBOARD)
+                    return
+            except Exception:
+                pass
+            await self._db.record_pause(
+                source="telegram",
+                result="error",
+                error_message="Pause suppressed by debounce; printer status unclear",
+            )
+            await update.message.reply_text(
+                "Pause request suppressed — a pause was already sent recently. "
+                "If the printer is still running, it will be retried automatically.",
+                reply_markup=_TUI_KEYBOARD,
+            )
+            return
         except Exception as exc:
             logger.exception("Pause failed via Telegram command")
             await self._db.record_pause(source="telegram", result="error", error_message=str(exc))
@@ -265,17 +289,9 @@ class BotCommandHandler:
                 "Pause failed — check the printer.", reply_markup=_TUI_KEYBOARD
             )
             return
-        if sent:
-            await self._db.record_pause(source="telegram", result="ok")
-            await self._watcher.get_fresh_status(force=True)
-            await update.message.reply_text("Print paused.", reply_markup=_TUI_KEYBOARD)
-        else:
-            await self._db.record_pause(
-                source="telegram", result="error", error_message="Printer already paused"
-            )
-            await update.message.reply_text(
-                "Printer is already paused.", reply_markup=_TUI_KEYBOARD
-            )
+        await self._db.record_pause(source="telegram", result="ok")
+        await self._watcher.get_fresh_status(force=True)
+        await update.message.reply_text("Print paused.", reply_markup=_TUI_KEYBOARD)
 
     async def cmd_resume(self, update: Update, context: Any) -> None:
         if not self._authorized(update):
