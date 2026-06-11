@@ -111,23 +111,23 @@ def make_router(
         detection_enabled = detection_enabled_str == "true"
         printer_ip = printer_ip_val or settings.printer_ip
         ml_confirm_count = int(
-            ml_confirm_count_str if ml_confirm_count_str is not None else settings.ml_confirm_count
-        )  # type: ignore
+            ml_confirm_count_str if ml_confirm_count_str is not None else settings.ml_confirm_count  # type: ignore[arg-type]
+        )
         ml_score_threshold = float(
-            ml_score_threshold_str
+            ml_score_threshold_str  # type: ignore[arg-type]
             if ml_score_threshold_str is not None
             else settings.ml_score_threshold
-        )  # type: ignore
+        )
         ml_poll_interval_seconds = int(
-            ml_poll_interval_str
+            ml_poll_interval_str  # type: ignore[arg-type]
             if ml_poll_interval_str is not None
             else settings.ml_poll_interval_seconds
-        )  # type: ignore
+        )
         detection_warmup_seconds = int(
-            detection_warmup_str
+            detection_warmup_str  # type: ignore[arg-type]
             if detection_warmup_str is not None
             else settings.detection_warmup_seconds
-        )  # type: ignore
+        )
 
         from sentinel import __version__
 

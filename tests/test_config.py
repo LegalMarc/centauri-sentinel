@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+
 import pytest
 
 from sentinel.config import Settings
@@ -294,12 +295,6 @@ def test_resume_cooldown_seconds_valid() -> None:
 def test_resume_cooldown_seconds_invalid() -> None:
     with pytest.raises(ValueError, match="RESUME_COOLDOWN_SECONDS must be at least 0"):
         Settings(resume_cooldown_seconds=-1)
-
-
-
-
-
-
 
 
 def test_log_format_default() -> None:

@@ -7,6 +7,7 @@ import so `python -m sentinel --help` works from ticket #1 onward.
 from __future__ import annotations
 
 from functools import lru_cache
+from typing import Any
 
 from pydantic import SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -253,6 +254,7 @@ class Settings(BaseSettings):
 
     def model_post_init(self, __context: Any) -> None:
         import os
+
         if "PYTEST_CURRENT_TEST" in os.environ:
             return
 
@@ -267,6 +269,7 @@ class Settings(BaseSettings):
             if key in os.environ:
                 os.environ[key] = "********"
                 os.environ.pop(key, None)
+
 
 @lru_cache
 def get_settings() -> Settings:

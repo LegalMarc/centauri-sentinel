@@ -108,5 +108,6 @@ omit = ["sentinel/__main__.py"]
 
 [dependency-groups]
 dev = [
+    "pre-commit>=4.6.0",
     "types-pyyaml>=6.0.12.20260518",
 ]

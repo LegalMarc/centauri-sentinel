@@ -81,13 +81,16 @@ def validate_https(url: str) -> str:
     if url:
         parsed = urllib.parse.urlparse(url)
         # Allow localhost, 127.0.0.1, and ::1 over HTTP
-        if parsed.hostname and parsed.scheme == "http":
-            if parsed.hostname in ("localhost", "127.0.0.1", "::1", "obico-ml"):
-                logger.warning(
-                    "SECURITY WARNING: Transmitting data over cleartext HTTP to local/internal host %s",
-                    parsed.hostname,
-                )
-                return url
+        if (
+            parsed.hostname
+            and parsed.scheme == "http"
+            and parsed.hostname in ("localhost", "127.0.0.1", "::1", "obico-ml")
+        ):
+            logger.warning(
+                "SECURITY WARNING: Transmitting data over cleartext HTTP to local/internal host %s",
+                parsed.hostname,
+            )
+            return url
         if not url.startswith("https://"):
             raise ValueError(f"URL must use HTTPS to protect credentials and privacy: {url}")
     return url

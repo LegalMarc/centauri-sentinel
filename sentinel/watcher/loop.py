@@ -641,7 +641,7 @@ class WatcherLoop:
             else:
                 logger.critical("Watcher cancelled before printer pause completed")
             raise
-        except Exception as e:
+        except Exception:
             logger.exception("Printer pause failed — notifying anyway")
             # if the failure is still detected, instead of waiting for N more frames.
             self._confirm_count = consecutive_count
