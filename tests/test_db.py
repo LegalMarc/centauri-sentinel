@@ -449,16 +449,145 @@ def test_migrate_sync(tmp_path: Path) -> None:
 
 
 async def test_migrate_executescript_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failure mid-schema (injected via a bad SQL statement) must propagate
+    as an exception and leave no partial tables committed."""
+    import sentinel.db.migrate as migrate_mod
+
     path = str(tmp_path / "script_error.db")
 
-    # Patch aiosqlite.Connection.executescript to raise
-    async def mock_executescript(self, sql_script: str) -> object:
-        raise RuntimeError("mock executescript fail")
+    original_split = migrate_mod._split_sql
 
-    monkeypatch.setattr(aiosqlite.Connection, "executescript", mock_executescript)
+    def patched_split(sql: str) -> list[str]:
+        stmts = original_split(sql)
+        # Inject a guaranteed-to-fail statement after the first real statement.
+        stmts.insert(1, "SELECT * FROM __nonexistent_table_xyz__")
+        return stmts
 
-    with pytest.raises(RuntimeError, match="mock executescript fail"):
+    monkeypatch.setattr(migrate_mod, "_split_sql", patched_split)
+
+    with pytest.raises(aiosqlite.OperationalError):
         await migrate(path)
+
+
+async def test_migrate_atomicity_mid_schema_no_partial_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failure mid-schema must leave no schema_version row and no partial
+    tables — the transaction must be fully rolled back.
+
+    We inject a failing SQL statement between the first and second real schema
+    statements.  Because all schema DDL now runs inside a single explicit
+    transaction, the rollback must undo the first CREATE TABLE as well.
+    """
+    import sentinel.db.migrate as migrate_mod
+
+    path = str(tmp_path / "atomic.db")
+
+    original_split = migrate_mod._split_sql
+
+    def patched_split(sql: str) -> list[str]:
+        stmts = original_split(sql)
+        # Inject a bad statement between the first CREATE TABLE (schema_version)
+        # and the second (detection_events), simulating a mid-migration crash.
+        stmts.insert(1, "INSERT INTO __no_such_table__ (x) VALUES (1)")
+        return stmts
+
+    monkeypatch.setattr(migrate_mod, "_split_sql", patched_split)
+
+    with pytest.raises(aiosqlite.OperationalError):
+        await migrate(path)
+
+    # Restore the original split so we can inspect the DB cleanly.
+    monkeypatch.setattr(migrate_mod, "_split_sql", original_split)
+
+    # The transaction must have been rolled back — no schema_version table.
+    async with (
+        aiosqlite.connect(path) as conn,
+        conn.execute("SELECT name FROM sqlite_master WHERE type='table'") as cur,
+    ):
+        tables = {row[0] for row in await cur.fetchall()}
+
+    assert "schema_version" not in tables, (
+        f"schema_version must not exist after a rolled-back migration; found tables: {tables}"
+    )
+
+
+async def test_v1_rename_atomicity_crash_after_first_rename(
+    tmp_path: Path,
+) -> None:
+    """A crash after the first v1 table rename (but before schema_version is
+    renamed) must leave the DB re-migratable.
+
+    We simulate the crash by directly constructing the interrupted state:
+      - detection_events has already been renamed to detection_events_v1
+      - schema_version still exists with version=1 (it would have been renamed
+        LAST, so it survives the crash / rollback)
+    This is the exact state left by a process crash mid-v1-sequence when
+    schema_version is renamed last and the rename sequence is transactional
+    (crash → rollback → detection_events_v1 renamed back; but here we test
+    the OLD non-transactional case that the fix defends against by making
+    schema_version last).
+
+    With the new transactional approach the whole sequence rolls back on crash,
+    so schema_version always survives and version=1 is still readable.  We
+    test both the re-enterable state and successful completion.
+    """
+    path = str(tmp_path / "v1_crash.db")
+
+    # Build a database that represents the interrupted mid-v1-rename state:
+    # detection_events has been renamed but schema_version has NOT yet been
+    # renamed (schema_version is renamed LAST in the new code).
+    interrupted_stmts = [
+        # schema_version still intact — version=1 is readable
+        "CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')))",
+        # detection_events already renamed
+        "CREATE TABLE detection_events_v1 (id INTEGER PRIMARY KEY AUTOINCREMENT, ts_utc TEXT NOT NULL, score REAL NOT NULL, consecutive INTEGER NOT NULL, confirmed INTEGER NOT NULL, snapshot_path TEXT)",
+        # other tables still at original names
+        "CREATE TABLE pause_history (id INTEGER PRIMARY KEY AUTOINCREMENT, ts_utc TEXT NOT NULL, source TEXT NOT NULL, result TEXT NOT NULL, error_message TEXT)",
+        "CREATE TABLE runtime_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')))",
+        "CREATE TABLE watcher_heartbeat (id INTEGER PRIMARY KEY CHECK (id = 1), last_tick_utc TEXT NOT NULL, state TEXT NOT NULL)",
+        "INSERT INTO schema_version (version) VALUES (1)",
+        # data row in the already-renamed table
+        "INSERT INTO detection_events_v1 (ts_utc, score, consecutive, confirmed) VALUES ('2026-01-01T00:00:00Z', 0.9, 1, 1)",
+    ]
+    async with aiosqlite.connect(path) as conn:
+        for stmt in interrupted_stmts:
+            await conn.execute(stmt)
+        await conn.commit()
+
+    # migrate() must recover from this state and complete successfully.
+    # (detection_events rename will fail silently because detection_events_v1
+    # already exists; the others will succeed; schema_version renamed last.)
+    await migrate(path)
+
+    # The full schema must now exist.
+    async with (
+        aiosqlite.connect(path) as conn,
+        conn.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name") as cur,
+    ):
+        tables = {row[0] for row in await cur.fetchall()}
+
+    expected_new = {
+        "schema_version",
+        "detection_events",
+        "pause_history",
+        "runtime_settings",
+        "watcher_heartbeat",
+    }
+    assert expected_new <= tables, f"Expected new schema tables; got {tables}"
+
+    # The _v1 data tables must still be present (data preserved).
+    assert "detection_events_v1" in tables, (
+        f"detection_events_v1 must be preserved after successful v1 migration; got {tables}"
+    )
+
+    # The data row must still be accessible.
+    async with (
+        aiosqlite.connect(path) as conn,
+        conn.execute("SELECT COUNT(*) FROM detection_events_v1") as cur,
+    ):
+        row = await cur.fetchone()
+    assert row is not None and row[0] == 1, "Data row in detection_events_v1 must be preserved"
 
 
 async def test_repo_additional_coverage(db: Database, monkeypatch: pytest.MonkeyPatch) -> None:
