@@ -21,16 +21,52 @@ def test_entrypoint_sh_syntax() -> None:
 
 
 def test_dockerfile_uses_gosu_not_suexec() -> None:
-    """Verify that the Dockerfile does not use Alpine's su-exec but uses Debian's gosu."""
+    """Verify that the Dockerfile installs gosu and does not set USER before ENTRYPOINT.
+
+    Design: root-entrypoint.  The container starts as root so entrypoint.sh can
+    chown /data for bind-mounted volumes, then drops to sentinel via
+    ``exec gosu sentinel "$@"``.  Setting ``USER sentinel`` before the ENTRYPOINT
+    would break the chown and is therefore explicitly disallowed.
+    """
     dockerfile_path = Path(__file__).parent.parent / "Dockerfile"
     assert dockerfile_path.exists()
 
     content = dockerfile_path.read_text()
 
-    # Assert gosu is installed and used
-    assert "gosu" in content.lower()
+    # Assert gosu is installed (Debian-style, not Alpine su-exec)
+    assert "gosu" in content.lower(), "Dockerfile must install gosu for privilege drop"
     # Assert su-exec is not present
-    assert "su-exec" not in content.lower()
+    assert "su-exec" not in content.lower(), "Dockerfile must not use Alpine su-exec"
+    # Assert USER sentinel does not appear — entrypoint must start as root
+    assert "USER sentinel" not in content, (
+        "Dockerfile must not set USER sentinel before ENTRYPOINT; "
+        "the entrypoint runs as root to chown /data, then uses gosu to drop privileges"
+    )
+
+
+def test_entrypoint_sh_uses_gosu_drop() -> None:
+    """Verify entrypoint.sh drops privileges via gosu (root-entrypoint design).
+
+    The entrypoint must exec gosu sentinel so the application process runs as
+    the non-root sentinel user even though the container starts as root.
+    """
+    entrypoint_path = Path(__file__).parent.parent / "docker" / "entrypoint.sh"
+    assert entrypoint_path.exists()
+
+    content = entrypoint_path.read_text()
+
+    # Must use gosu to drop privileges
+    assert "gosu sentinel" in content, (
+        "entrypoint.sh must use 'gosu sentinel' to drop from root to sentinel"
+    )
+    # Must exec (replace the shell process, not fork)
+    assert "exec gosu sentinel" in content, (
+        "entrypoint.sh must use 'exec gosu sentinel' so gosu becomes PID 1 (signal forwarding)"
+    )
+    # Must chown /data so bind-mounted volumes get correct ownership
+    assert "chown" in content and "/data" in content, (
+        "entrypoint.sh must chown /data so bind-mounted volumes are writable by sentinel"
+    )
 
 
 def test_docker_compose_yaml_syntax() -> None:

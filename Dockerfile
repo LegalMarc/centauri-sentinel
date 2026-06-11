@@ -14,11 +14,14 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
 # ---------------------------------------------------------------------------
-# Stage 2 — runtime: copy venv + source, run as non-root
+# Stage 2 — runtime: copy venv + source, run as non-root via gosu
 # ---------------------------------------------------------------------------
 FROM python:3.12.8-slim AS runtime
 
-# Non-root user + gosu for privilege drop in entrypoint
+# Non-root user + gosu for privilege drop in entrypoint.
+# The container starts as root so the entrypoint can fix /data ownership on
+# bind-mounted volumes (Docker creates them root:root on first use), then
+# drops privileges to sentinel via `exec gosu sentinel "$@"`.
 RUN apt-get update -qq \
     && apt-get install -y --no-install-recommends gosu \
     && rm -rf /var/lib/apt/lists/* \
@@ -36,17 +39,18 @@ ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-# Data directory — pre-create so permissions are correct when mount is empty.
-# The entrypoint.sh script re-chowns on every startup to handle first-mount
-# race where Docker creates the volume as root.
+# Data directory — pre-create so ownership is set correctly in the image layer.
+# The entrypoint.sh script re-chowns on every startup to handle the first-mount
+# race where Docker creates a bind-mounted directory as root before the
+# container starts.
 RUN mkdir -p /data/snapshots && chown -R sentinel:sentinel /data /app
 
-# Entrypoint: fixes /data ownership then drops to sentinel user
+# Entrypoint: runs as root, re-chowns /data if needed, then drops to sentinel
+# via gosu.  The container intentionally has no USER directive; the entrypoint
+# must start as root so it can call chown before exec-ing gosu to drop
+# privileges.
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
-
-# Use USER sentinel to ensure the container runs as non-root natively.
-USER sentinel
 
 EXPOSE 8000
 
