@@ -6,6 +6,7 @@ All PTB objects are mocked so no network connection is needed.
 
 from __future__ import annotations
 
+import contextlib
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from sentinel.bot.runner import BotRunner
@@ -17,7 +18,8 @@ from sentinel.config import Settings
 
 _SETTINGS_NO_TG = Settings(printer_ip="10.0.0.1", printer_access_code="test")
 _SETTINGS_TG = Settings(
-    printer_ip="10.0.0.1", printer_access_code="test",
+    printer_ip="10.0.0.1",
+    printer_access_code="test",
     telegram_bot_token="123:token",
     telegram_chat_id="-100",
     telegram_user_ids="42",
@@ -204,6 +206,85 @@ async def test_bot_runner_stop_times_out() -> None:
 # ---------------------------------------------------------------------------
 # BotRunner Supervisor Tests
 # ---------------------------------------------------------------------------
+
+
+async def test_supervisor_stops_old_app_before_restart() -> None:
+    """Supervisor must call _real_stop on the crashed app before creating a new one."""
+    import asyncio
+
+    handler = _make_handler()
+
+    # Build two distinct app mocks: the "crashed" one and the "fresh" one.
+    crashed_app, _ = _make_ptb_app()
+    crashed_app.updater.running = False  # already crashed — is_running() → False
+
+    fresh_app, fresh_builder = _make_ptb_app()
+    fresh_app.updater.running = True
+
+    call_log: list[str] = []
+
+    # Wrap crashed_app stop/shutdown to record ordering relative to build()
+    original_stop = crashed_app.stop
+    original_shutdown = crashed_app.shutdown
+
+    async def tracked_stop(*a: object, **kw: object) -> None:
+        call_log.append("old_app.stop")
+        await original_stop(*a, **kw)
+
+    async def tracked_shutdown(*a: object, **kw: object) -> None:
+        call_log.append("old_app.shutdown")
+        await original_shutdown(*a, **kw)
+
+    crashed_app.stop = tracked_stop
+    crashed_app.shutdown = tracked_shutdown
+
+    build_call_count = 0
+
+    def tracked_build() -> MagicMock:
+        nonlocal build_call_count
+        build_call_count += 1
+        call_log.append("build")
+        return fresh_app
+
+    fresh_builder.build.side_effect = tracked_build
+
+    original_sleep = asyncio.sleep
+
+    async def mock_sleep(delay: float) -> None:
+        await original_sleep(0)
+
+    with (
+        patch("telegram.ext.Application") as mock_app_class,
+        patch("telegram.ext.CommandHandler"),
+        patch("telegram.ext.CallbackQueryHandler"),
+        patch("asyncio.sleep", side_effect=mock_sleep),
+    ):
+        mock_app_class.builder.return_value = fresh_builder
+        runner = BotRunner(_SETTINGS_TG, handler)
+
+        # Inject a pre-crashed app directly — skip _real_start's builder path.
+        runner._app = crashed_app
+
+        # Kick the supervisor loop for one restart cycle then stop.
+        runner._running = True
+        supervisor = asyncio.create_task(runner._supervisor_loop())
+
+        for _ in range(100):
+            await asyncio.sleep(0)
+            if build_call_count >= 1:
+                break
+
+        runner._running = False
+        supervisor.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await supervisor
+
+    # The old app must have been stopped before a new one was built.
+    assert "old_app.stop" in call_log, f"old_app.stop not called; log={call_log}"
+    assert "old_app.shutdown" in call_log, f"old_app.shutdown not called; log={call_log}"
+    build_idx = call_log.index("build")
+    stop_idx = call_log.index("old_app.stop")
+    assert stop_idx < build_idx, f"old_app.stop must happen before build(); log={call_log}"
 
 
 async def test_bot_runner_supervisor_restart_and_alert() -> None:

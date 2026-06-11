@@ -144,6 +144,7 @@ class BotRunner:
                     break
 
                 try:
+                    await self._real_stop()
                     await self._real_start()
                     logger.info("Telegram bot restarted successfully")
                     if self._dispatcher and self.crash_count > 1:
