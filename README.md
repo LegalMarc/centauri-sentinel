@@ -77,6 +77,8 @@ Only `PRINTER_IP` is required. Everything else has a sane default.
 | `ML_CONFIRM_COUNT` | `3` | Consecutive positive frames before triggering a pause |
 | `ML_POLL_INTERVAL_SECONDS` | `10` | Seconds between frame grabs |
 | `ML_SCORE_THRESHOLD` | `0.4` | Per-frame confidence threshold (0.0 – 1.0) |
+| `ML_CONSECUTIVE_FAILURE_THRESHOLD` | `10` | Consecutive ML API failures before disabling detection |
+| `ML_CALLBACK_HOST` | — | Override the hostname used in ML callback URLs (optional) |
 
 ### Detection behaviour
 
@@ -86,6 +88,15 @@ Only `PRINTER_IP` is required. Everything else has a sane default.
 | `DETECTION_ENABLED_DEFAULT` | `true` | Initial detection state — can be toggled at runtime via bot |
 | `WATCHER_STALL_SECONDS` | `60` | Heartbeat age that triggers a stall alert |
 | `AUTO_STOP_TIMEOUT_SECONDS` | `0` | Auto-stop the print after this many seconds of being paused by Sentinel (0 to disable). Must be 0 or >= 60. |
+| `RESUME_COOLDOWN_SECONDS` | `5` | Minimum seconds between consecutive resumes |
+
+### Notifications (general)
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `NOTIFY_ON_PRINT_START` | `false` | Send a notification when a print job starts |
+| `NOTIFY_ON_PRINT_COMPLETED` | `true` | Send a notification when a print job completes |
+| `NOTIFY_ON_PRINT_PAUSED` | `true` | Send a notification when a print is paused by Sentinel |
 
 ### Telegram (optional)
 
@@ -108,6 +119,7 @@ Disabled if `NTFY_URL` is unset.
 |---|---|---|
 | `NTFY_URL` | — | Topic URL, e.g. `https://ntfy.sh/your-long-random-topic` |
 | `NTFY_TOKEN` | — | Bearer token for self-hosted ntfy with auth |
+| `NTFY_SEND_SNAPSHOTS` | `false` | Set `true` to upload camera snapshots with each ntfy alert (opt-in; see Privacy Notice below) |
 
 See [ntfy setup](#ntfy-setup) below.
 
@@ -119,6 +131,7 @@ Disabled if `AUTH_USERNAME` is unset.
 |---|---|---|
 | `AUTH_USERNAME` | — | HTTP Basic Auth username |
 | `AUTH_PASSWORD_BCRYPT` | — | bcrypt hash of your password (required when `AUTH_USERNAME` is set) |
+| `AUTH_COOKIE_SECURE` | `auto` | Session cookie `Secure` flag: `auto` (set when HTTPS detected), `always`, or `never` |
 
 Generate a bcrypt hash:
 ```sh
@@ -142,9 +155,12 @@ python3 -c "import bcrypt; print(bcrypt.hashpw(b'yourpassword', bcrypt.gensalt()
 | Variable | Default | Purpose |
 |---|---|---|
 | `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL` |
+| `LOG_FORMAT` | `text` | Log output format: `text` or `json` |
 | `DB_PATH` | `/data/sentinel.db` | SQLite database path (should be on a named volume) |
 | `SNAPSHOT_RETENTION_LIMIT` | `50` | Maximum number of snapshot files to keep on disk. Oldest files are deleted periodically |
-| `EVENT_RETENTION_DAYS` | `90` | Days to keep historical detection/pause records in SQLite |
+| `SNAPSHOT_CLEANUP_INTERVAL_SECONDS` | `3600` | How often (in seconds) the snapshot cleanup task runs |
+| `EVENT_RETENTION_DAYS` | `0` | Days to keep historical detection/pause records in SQLite (0 = unlimited) |
+| `CAMERA_MAX_STREAMS` | `3` | Maximum simultaneous MJPEG stream connections |
 
 ---
 
