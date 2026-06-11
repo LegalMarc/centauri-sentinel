@@ -1520,6 +1520,56 @@ async def test_print_duration_recording_and_back_to_back() -> None:
     await db.close()
 
 
+async def test_confirm_count_resets_on_back_to_back_job_transition() -> None:
+    """_confirm_count must be zero before any frame is checked for job B."""
+    # Use detection_warmup_seconds=300; job A has elapsed=400 (armed), job B will
+    # have elapsed=5 (warmup) so _check_frame does not run in the transition tick.
+    settings = Settings(
+        printer_ip="10.0.0.1",
+        printer_access_code="test",
+        detection_warmup_seconds=300,
+        ml_confirm_count=3,
+        ml_score_threshold=0.4,
+        ml_poll_interval_seconds=10,
+        watcher_stall_seconds=60,
+        resume_cooldown_seconds=0,
+    )
+    # ml_score=0.9 pushes _confirm_count up each tick while ARMED
+    watcher, printer, _, _, db = await _make_watcher(
+        settings=settings,
+        printer_status=_printing_status(),  # elapsed=400 > warmup=300 → ARMED
+        ml_score=0.9,
+    )
+
+    # First tick: job A starts in ARMED state, one above-threshold frame is counted
+    await watcher.tick()
+    assert watcher._confirm_count == 1, "pre-condition: streak started for job A"
+
+    # Second tick: filename changes while still printing → back-to-back transition.
+    # elapsed_seconds=5 < warmup=300 so job B enters WARMUP and _check_frame
+    # does not run in this tick — confirming the reset happens before any new frame.
+    status_b = PrinterStatus(
+        printing=True,
+        elapsed_seconds=5.0,
+        current_layer=1,
+        total_layers=100,
+        filename="job_b.gcode",
+        print_state="printing",
+    )
+    printer.status = AsyncMock(return_value=status_b)
+    await watcher.tick()
+
+    # _confirm_count must be 0: the stale streak from job A must not carry forward,
+    # and _check_frame has not yet run for job B (still in WARMUP).
+    assert watcher._confirm_count == 0, (
+        "_confirm_count must be reset to 0 on back-to-back job transition"
+    )
+    assert watcher._current_filename == "job_b.gcode"
+    assert watcher.state == WatcherState.WARMUP
+
+    await db.close()
+
+
 async def test_stale_printer_status_transitions_to_offline() -> None:
     import dataclasses
 

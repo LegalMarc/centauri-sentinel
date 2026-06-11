@@ -466,6 +466,9 @@ class WatcherLoop:
             self._current_job_id = None
             self._print_start = datetime.now(tz=UTC)
             self._alerted_new_print = False
+            # Reset detection counters so job A's streak does not carry into job B
+            self._confirm_count = 0
+            self._ml_error_count = 0
 
         # Start job tracking if not already active
         if self._current_job_id is None:
