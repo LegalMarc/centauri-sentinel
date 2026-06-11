@@ -1007,6 +1007,38 @@ async def test_on_confirmed_detection_pause_exception() -> None:
     assert pauses[0]["error_message"] == "Printer pause failed"
 
 
+async def test_on_confirmed_detection_db_error_still_dispatches() -> None:
+    """DB write failure must not suppress dispatch_detection (issue #61 fix 1)."""
+    dispatcher = _make_dispatcher()
+    watcher, _printer, _camera, _ml, db = await _make_watcher(dispatcher=dispatcher)
+
+    db.record_pause = AsyncMock(side_effect=Exception("DB locked"))
+
+    result = MlResult(score=0.87)
+    await watcher._on_confirmed_detection(result, b"\xff\xd8\xff\xd9")
+
+    dispatcher.dispatch_detection.assert_called_once()
+    call_args = dispatcher.dispatch_detection.call_args
+    assert abs(call_args[0][0] - 0.87) < 1e-6
+
+
+async def test_loop_db_error_on_interval_read_uses_default() -> None:
+    """DB error reading ml_poll_interval_seconds must not kill the loop (issue #61 fix 2)."""
+    watcher, _printer, _camera, _ml, db = await _make_watcher()
+    watcher._running = True
+
+    async def mock_tick() -> None:
+        watcher._running = False
+
+    watcher._tick = AsyncMock(side_effect=mock_tick)
+    db.get_setting = AsyncMock(side_effect=Exception("DB error"))
+
+    with patch("sentinel.watcher.loop.asyncio.sleep") as mock_sleep:
+        await watcher._loop()
+
+    mock_sleep.assert_called_once_with(float(_SETTINGS.ml_poll_interval_seconds))
+
+
 async def test_watchdog_loop_cancellation() -> None:
     watcher, *_ = await _make_watcher()
     task = asyncio.create_task(watcher._watchdog())

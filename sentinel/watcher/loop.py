@@ -246,15 +246,22 @@ class WatcherLoop:
             except Exception:
                 logger.exception("Watcher loop tick raised unexpectedly")
 
-            poll_interval_str = await self._db.get_setting(
-                "ml_poll_interval_seconds",
-                str(self._settings.ml_poll_interval_seconds),
-            )
-            if poll_interval_str is None:
-                poll_interval_str = str(self._settings.ml_poll_interval_seconds)
             try:
-                poll_interval = float(poll_interval_str)
-            except (ValueError, TypeError):
+                poll_interval_str = await self._db.get_setting(
+                    "ml_poll_interval_seconds",
+                    str(self._settings.ml_poll_interval_seconds),
+                )
+                if poll_interval_str is None:
+                    poll_interval_str = str(self._settings.ml_poll_interval_seconds)
+                try:
+                    poll_interval = float(poll_interval_str)
+                except (ValueError, TypeError):
+                    poll_interval = float(self._settings.ml_poll_interval_seconds)
+            except Exception:
+                logger.exception(
+                    "DB error reading ml_poll_interval_seconds — using default %.1f s",
+                    float(self._settings.ml_poll_interval_seconds),
+                )
                 poll_interval = float(self._settings.ml_poll_interval_seconds)
             await asyncio.sleep(poll_interval)
 
@@ -670,19 +677,23 @@ class WatcherLoop:
                 "The watcher remains armed and will retry if failure is still detected."
             )
 
-        pause_id = await self._db.record_pause(
-            source="auto",
-            result="ok" if pause_ok else "error",
-            error_message=None if pause_ok else "Printer pause failed",
-        )
-        await self._db.record_detection(
-            score=result.score,
-            consecutive=consecutive_count,
-            confirmed=1,
-            snapshot_path=snapshot_path,
-        )
-
         self._dispatcher.dispatch_detection(result.score, snapshot_id, jpeg)
+
+        try:
+            pause_id = await self._db.record_pause(
+                source="auto",
+                result="ok" if pause_ok else "error",
+                error_message=None if pause_ok else "Printer pause failed",
+            )
+            await self._db.record_detection(
+                score=result.score,
+                consecutive=consecutive_count,
+                confirmed=1,
+                snapshot_path=snapshot_path,
+            )
+        except Exception:
+            logger.exception("DB write failed after detection — notification already dispatched")
+            pause_id = None
 
         # Cleanup old snapshots
         await self.cleanup_old_snapshots()
