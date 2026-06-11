@@ -403,6 +403,58 @@ async def test_watchdog_no_alert_when_no_heartbeat() -> None:
     dispatcher.dispatch_stall.assert_not_called()
 
 
+async def test_watchdog_no_false_stall_when_poll_interval_exceeds_stall_window() -> None:
+    """A healthy loop with poll_interval=120s and stall=60s must not trigger STALLED.
+
+    The heartbeat age (between stall_s and 2*poll_interval) is expected for a
+    healthy loop running slowly; the watchdog must use effective_stall =
+    max(stall_s, 2 * poll_interval) = 240s before alerting.
+    """
+    dispatcher = _make_dispatcher()
+    # watcher_stall_seconds=60, ml_poll_interval_seconds=120
+    settings = Settings(
+        printer_ip="10.0.0.1",
+        printer_access_code="test",
+        watcher_stall_seconds=60,
+        ml_poll_interval_seconds=120,
+    )
+    watcher, _, _, _, db = await _make_watcher(settings=settings, dispatcher=dispatcher)
+
+    # Write a heartbeat that is 90 seconds old — older than stall_s(60) but
+    # younger than effective_stall(2*120=240).  A healthy 120s-interval loop
+    # can legitimately have a heartbeat this old.
+    ts_90s_ago = (datetime.now(tz=UTC) - timedelta(seconds=90)).isoformat()
+    await db.update_heartbeat(ts_90s_ago, "ARMED")
+    # Store the poll interval in the DB (mirrors what the settings API would do)
+    await db.set_setting("ml_poll_interval_seconds", "120")
+
+    await watcher._watchdog_tick(db)
+
+    assert watcher.state != WatcherState.STALLED
+    dispatcher.dispatch_stall.assert_not_called()
+
+
+async def test_watchdog_still_alerts_when_genuinely_stalled_with_large_poll_interval() -> None:
+    """Even with a 120s poll interval, a heartbeat older than 240s must fire STALLED."""
+    dispatcher = _make_dispatcher()
+    settings = Settings(
+        printer_ip="10.0.0.1",
+        printer_access_code="test",
+        watcher_stall_seconds=60,
+        ml_poll_interval_seconds=120,
+    )
+    watcher, _, _, _, db = await _make_watcher(settings=settings, dispatcher=dispatcher)
+
+    ts_300s_ago = (datetime.now(tz=UTC) - timedelta(seconds=300)).isoformat()
+    await db.update_heartbeat(ts_300s_ago, "ARMED")
+    await db.set_setting("ml_poll_interval_seconds", "120")
+
+    await watcher._watchdog_tick(db)
+
+    assert watcher.state == WatcherState.STALLED
+    dispatcher.dispatch_stall.assert_called_once()
+
+
 # ---------------------------------------------------------------------------
 # run_forever — TaskGroup lifecycle
 # ---------------------------------------------------------------------------

@@ -820,6 +820,24 @@ class WatcherLoop:
 
     async def _watchdog_tick(self, db: Database) -> None:
         stall_s = self._settings.watcher_stall_seconds
+
+        # Derive the effective stall threshold so that a large poll interval
+        # (set via env or POST /api/settings) does not trigger false STALLED alerts.
+        # A healthy loop writes a heartbeat on every tick; the earliest the watchdog
+        # could see a legitimate stall is 2x the poll interval after the last tick,
+        # so we use max(stall_s, 2 * poll_interval) as the effective threshold.
+        try:
+            poll_interval_str = await db.get_setting(
+                "ml_poll_interval_seconds",
+                str(self._settings.ml_poll_interval_seconds),
+            )
+            if poll_interval_str is None:
+                poll_interval_str = str(self._settings.ml_poll_interval_seconds)
+            poll_interval = float(poll_interval_str)
+        except Exception:
+            poll_interval = float(self._settings.ml_poll_interval_seconds)
+        effective_stall = max(stall_s, 2.0 * poll_interval)
+
         heartbeat = await db.get_heartbeat()
         if heartbeat is None:
             return
@@ -831,7 +849,7 @@ class WatcherLoop:
             dt = dt.replace(tzinfo=UTC)
         age = (datetime.now(tz=UTC) - dt).total_seconds()
 
-        if age > stall_s and self.state != WatcherState.STALLED:
+        if age > effective_stall and self.state != WatcherState.STALLED:
             logger.error("Heartbeat stale (age=%.0fs) — watcher stalled", age)
             self.state = WatcherState.STALLED
             self._dispatcher.dispatch_stall()
