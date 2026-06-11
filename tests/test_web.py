@@ -747,6 +747,65 @@ async def test_auth_healthz_always_open(auth_app: object) -> None:
 # ---------------------------------------------------------------------------
 
 
+async def test_internal_snapshot_bypasses_dns_rebinding_check(
+    mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: AsyncMock
+) -> None:
+    """Host: sentinel:8000 must not be blocked by the DNS-rebinding guard.
+
+    This is the core regression from issue #59: in compose, obico-ml sends
+    Host: sentinel:8000 which is not in the allowlist.  After the fix the
+    /__internal_snapshot/ prefix exemption fires before the host check.
+    """
+    from sentinel.ml.nonce import get_nonce_store
+
+    # external_bind_allowed=False is the default compose setting; the
+    # hostname "sentinel" is not in the allowlist and is not a private IP.
+    settings = _base_settings(
+        auth_enabled=True,
+        auth_username="admin",
+        auth_password_bcrypt=_HASHED_PASS,
+        external_bind_allowed=False,
+    )
+    secured_app = create_app(settings, db=mock_db, watcher=mock_watcher, camera=mock_camera)
+
+    nonce = get_nonce_store().put(_FAKE_JPEG)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=secured_app),
+        base_url="http://sentinel:8000",
+        headers={"Host": "sentinel:8000"},
+    ) as c:
+        r = await c.get(f"/__internal_snapshot/{nonce}")
+
+    assert r.status_code == 200, (
+        f"Expected 200 but got {r.status_code} ({r.text!r}); "
+        "DNS-rebinding check must not block /__internal_snapshot/ routes"
+    )
+    assert r.content == _FAKE_JPEG
+
+
+async def test_dns_rebinding_still_blocks_other_routes(
+    mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: AsyncMock
+) -> None:
+    """DNS-rebinding protection must remain active for non-internal routes.
+
+    Regression guard: ensure the exemption hoist did not accidentally disable
+    the host allowlist for arbitrary routes (Host: evil.example on / → 403).
+    """
+    settings = _base_settings(external_bind_allowed=False)
+    guarded_app = create_app(settings, db=mock_db, watcher=mock_watcher, camera=mock_camera)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=guarded_app),
+        base_url="http://evil.example",
+        headers={"Host": "evil.example"},
+    ) as c:
+        r = await c.get("/")
+
+    assert r.status_code == 403
+    assert "DNS Rebinding Protection" in r.text
+
+
 async def test_internal_snapshot_allow_multiple_retries(app: object) -> None:
     from sentinel.ml.nonce import get_nonce_store
 

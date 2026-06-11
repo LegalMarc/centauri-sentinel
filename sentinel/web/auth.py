@@ -87,6 +87,16 @@ class AuthMiddleware:
             return
 
         headers = dict(scope.get("headers", []))
+
+        # Internal routes are always exempt — checked first, before host/CSRF
+        # guards, so that the ML callback (Host: sentinel:8000) is never
+        # blocked by DNS-rebinding protection.  The endpoint is independently
+        # secured by the per-process internal_token query param + TTL'd nonce.
+        path: str = scope.get("path", "")
+        if path.startswith("/__internal_snapshot/"):
+            await self._app(scope, receive, send)
+            return
+
         host_header = headers.get(b"host", b"").decode().split(":")[0]
 
         is_private_ip = False
@@ -146,10 +156,6 @@ class AuthMiddleware:
                     )
                     await response(scope, receive, send)
                     return
-        path: str = scope.get("path", "")
-        if path.startswith("/__internal_snapshot/"):
-            await self._app(scope, receive, send)
-            return
 
         if not self._enabled:
             # Ticket 1: strictly block any client IP that is not localhost when auth is disabled.
