@@ -176,6 +176,62 @@ async def test_healthz_exposes_bot_crash_count() -> None:
     assert data["telegram_bot_crash_count"] == 3
 
 
+async def test_healthz_503_when_watcher_task_dead() -> None:
+    """Container health check must return 503 when the watcher task has died."""
+    import asyncio
+
+    from fastapi import FastAPI
+
+    settings = _base_settings()
+    app = create_app(settings)
+    assert isinstance(app, FastAPI)
+
+    # Create a task that completes immediately (simulates a dead watcher)
+    async def _dead() -> None:
+        pass
+
+    dead_task: asyncio.Task[None] = asyncio.ensure_future(_dead())
+    await asyncio.sleep(0)  # let the event loop run the task to completion
+    app.state.watcher_task = dead_task
+
+    async with _client(app) as c:
+        r = await c.get("/healthz")
+    assert r.status_code == 503
+    data = r.json()
+    assert data["status"] == "degraded"
+    assert data["watcher"] == "dead"
+
+
+async def test_healthz_200_when_watcher_task_alive() -> None:
+    """Container health check must return 200 while watcher task is running."""
+    import asyncio
+
+    from fastapi import FastAPI
+
+    settings = _base_settings()
+    app = create_app(settings)
+    assert isinstance(app, FastAPI)
+
+    # Create a task that never finishes (simulates a live watcher)
+    async def _live() -> None:
+        await asyncio.sleep(9999)
+
+    live_task: asyncio.Task[None] = asyncio.ensure_future(_live())
+    app.state.watcher_task = live_task
+
+    try:
+        async with _client(app) as c:
+            r = await c.get("/healthz")
+        assert r.status_code == 200
+        assert r.json()["status"] == "ok"
+    finally:
+        live_task.cancel()
+        import contextlib
+
+        with contextlib.suppress(asyncio.CancelledError):
+            await live_task
+
+
 # ---------------------------------------------------------------------------
 # / — status page
 # ---------------------------------------------------------------------------
@@ -601,6 +657,7 @@ async def test_limit_upload_size_middleware_edge_cases() -> None:
     mw.app.side_effect = mock_app
 
     from fastapi import HTTPException
+
     with pytest.raises(HTTPException) as excinfo:
         await mw(scope, mock_receive, mock_send)
     assert excinfo.value.status_code == 413
@@ -1487,7 +1544,11 @@ async def test_auth_middleware_edge_cases() -> None:
         "type": "http",
         "method": "GET",
         "path": "/",
-        "headers": [(b"host", b"test"), (b"authorization", b"Basic YWRtaW46d3JvbmdwYXNz"), (b"user-agent", b"ua")],
+        "headers": [
+            (b"host", b"test"),
+            (b"authorization", b"Basic YWRtaW46d3JvbmdwYXNz"),
+            (b"user-agent", b"ua"),
+        ],
     }
     with patch("sentinel.web.auth.bcrypt.checkpw", return_value=False):
         await mw_evict(scope_evict, AsyncMock(), AsyncMock())

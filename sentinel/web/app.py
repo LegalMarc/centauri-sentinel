@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -15,6 +16,8 @@ from sentinel.web.auth import AuthMiddleware
 from sentinel.web.routes import make_router
 
 if TYPE_CHECKING:
+    import asyncio
+
     from sentinel.config import Settings
     from sentinel.db.repo import Database
 
@@ -97,12 +100,23 @@ def create_app(
     app.add_middleware(LimitUploadSizeMiddleware)
 
     @app.get("/healthz")
-    async def healthz(request: Request) -> dict[str, Any]:
+    async def healthz(request: Request) -> Response:
         res: dict[str, Any] = {"status": "ok"}
         bot = getattr(request.app.state, "bot", None)
         if bot is not None:
             res["telegram_bot_crash_count"] = getattr(bot, "crash_count", 0)
-        return res
+
+        watcher_task: asyncio.Task[None] | None = getattr(request.app.state, "watcher_task", None)
+        if watcher_task is not None and watcher_task.done():
+            res["status"] = "degraded"
+            res["watcher"] = "dead"
+            return Response(
+                content=json.dumps(res),
+                status_code=503,
+                media_type="application/json",
+            )
+
+        return Response(content=json.dumps(res), media_type="application/json")
 
     @app.get("/__internal_snapshot/{nonce}")
     async def internal_snapshot(nonce: str, request: Request) -> Response:

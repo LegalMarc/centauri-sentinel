@@ -1,6 +1,8 @@
 """Tests for sentinel/healthcheck.py.
 
-Covers the main() probe: 200 → exit(0), non-200 → exit(1), exception → exit(1).
+Covers the main() probe against /healthz: 200 → exit(0), non-200 → exit(1),
+exception → exit(1).  The probe must target /healthz (liveness), NOT /readyz
+(readiness), so external-device failures do not restart the container.
 """
 
 from __future__ import annotations
@@ -106,3 +108,29 @@ def test_healthcheck_uses_bind_port_env(monkeypatch: pytest.MonkeyPatch) -> None
         main()
 
     assert "9999" in captured_url[0]
+
+
+# ---------------------------------------------------------------------------
+# Probes /healthz, NOT /readyz
+# ---------------------------------------------------------------------------
+
+
+def test_healthcheck_probes_healthz_not_readyz() -> None:
+    """The container probe must target /healthz (liveness) so that a
+    powered-off printer does not restart the container."""
+    resp = _make_response(200)
+    captured_url: list[str] = []
+
+    def _fake_urlopen(url: str, timeout: int) -> MagicMock:
+        captured_url.append(url)
+        return resp
+
+    with (
+        patch("sentinel.healthcheck.urllib.request.urlopen", side_effect=_fake_urlopen),
+        pytest.raises(SystemExit),
+    ):
+        main()
+
+    assert len(captured_url) == 1
+    assert "/healthz" in captured_url[0]
+    assert "/readyz" not in captured_url[0]

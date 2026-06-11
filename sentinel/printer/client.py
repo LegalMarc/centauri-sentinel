@@ -328,9 +328,12 @@ class PrinterClient:
                 if exc:
                     self._listener_task = None
                     raise exc
-            # Clear state on listener restart to prevent infinite timeout loops from stale data
+            # Clear state on listener restart to prevent infinite timeout loops from stale data.
+            # Seed _last_update_time to 0.0 (not time.monotonic()) so is_connected returns
+            # False until a real MQTT status push arrives — a permanent auth failure must not
+            # flap as "connected" for the first 15 s of each reconnect attempt.
             self._accumulated_data = {}
-            self._last_update_time = time.monotonic()
+            self._last_update_time = 0.0
             self._listener_task = asyncio.create_task(self._listen_loop())
 
         if not self._accumulated_data:

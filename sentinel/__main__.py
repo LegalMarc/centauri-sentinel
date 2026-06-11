@@ -187,6 +187,7 @@ async def _run(args: argparse.Namespace) -> None:
 
     watcher_task: asyncio.Task[None] = asyncio.create_task(watcher.run_forever(), name="watcher")
     server_task: asyncio.Task[None] = asyncio.create_task(server.serve(), name="server")
+    app.state.watcher_task = watcher_task
 
     try:
         done, pending = await asyncio.wait(

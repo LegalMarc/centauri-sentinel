@@ -814,3 +814,56 @@ async def test_printer_client_stop_pending() -> None:
     with patch.object(client, "_fetch_status", return_value=s):
         await client.status()
     assert client.stop_pending is False
+
+
+# ---------------------------------------------------------------------------
+# is_connected — must report False until a real MQTT status push is received
+# ---------------------------------------------------------------------------
+
+
+def test_is_connected_false_when_no_update() -> None:
+    """A fresh client (or one just restarted) must report not connected.
+
+    _last_update_time is seeded to 0.0, so the 15-second window check
+    produces False immediately — no stale-but-fresh-looking "connected" window.
+    """
+    client = PrinterClient(_SETTINGS)
+    # No listener task and _last_update_time == 0.0 by default
+    assert client._last_update_time == 0.0
+    assert client.is_connected is False
+
+
+def test_is_connected_false_after_listener_restart() -> None:
+    """After a listener restart, _last_update_time must be reset to 0.0, not
+    time.monotonic(), so is_connected returns False until a real push arrives.
+
+    This prevents a permanent MQTT auth failure from flapping as 'connected'
+    for 15 seconds on every reconnect attempt.
+    """
+    client = PrinterClient(_SETTINGS)
+    # Simulate what _fetch_status does on a listener restart
+    client._accumulated_data = {}
+    client._last_update_time = 0.0  # the fix: seeded to 0.0, not time.monotonic()
+    # Even if a task is present, no real update → not connected
+    assert client.is_connected is False
+
+
+async def test_is_connected_true_after_real_update() -> None:
+    """is_connected is True only after _last_update_time is set by a live push."""
+    client = PrinterClient(_SETTINGS)
+
+    async def _dummy() -> None:
+        await asyncio.sleep(9999)
+
+    task: asyncio.Task[None] = asyncio.ensure_future(_dummy())
+    client._listener_task = task
+    # Simulate a real MQTT push updating the timestamp
+    client._last_update_time = time.monotonic()
+    try:
+        assert client.is_connected is True
+    finally:
+        task.cancel()
+        import contextlib
+
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
