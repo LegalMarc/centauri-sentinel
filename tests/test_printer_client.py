@@ -88,6 +88,18 @@ def test_parse_status_idle() -> None:
     assert status.printing is False
 
 
+def test_parse_status_legacy_printing_sets_print_state() -> None:
+    """Legacy branch with CurrentStatus==1 must yield print_state='printing'."""
+    status = _parse_status(_status_payload(printing=True))
+    assert status.print_state == "printing"
+
+
+def test_parse_status_legacy_idle_sets_print_state() -> None:
+    """Legacy branch with CurrentStatus==0 must yield print_state='idle'."""
+    status = _parse_status(_status_payload(printing=False))
+    assert status.print_state == "idle"
+
+
 def test_parse_status_filename_none_on_empty() -> None:
     status = _parse_status(_status_payload(filename=None))
     assert status.filename is None

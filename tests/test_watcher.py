@@ -42,7 +42,8 @@ async def cleanup_resources() -> Any:
 
 
 _SETTINGS = Settings(
-    printer_ip="10.0.0.1", printer_access_code="test",
+    printer_ip="10.0.0.1",
+    printer_access_code="test",
     detection_warmup_seconds=300,
     ml_confirm_count=3,
     ml_score_threshold=0.4,
@@ -65,6 +66,7 @@ def _printing_status(elapsed: float = 400.0) -> PrinterStatus:
         current_layer=10,
         total_layers=100,
         filename="test.gcode",
+        print_state="printing",
     )
 
 
@@ -75,6 +77,7 @@ def _warmup_status() -> PrinterStatus:
         current_layer=2,
         total_layers=100,
         filename="test.gcode",
+        print_state="printing",
     )
 
 
@@ -232,7 +235,8 @@ async def test_confirmed_detection_transitions_to_paused() -> None:
         dispatcher=dispatcher,
     )
     settings = Settings(
-        printer_ip="10.0.0.1", printer_access_code="test",
+        printer_ip="10.0.0.1",
+        printer_access_code="test",
         detection_warmup_seconds=0,
         ml_confirm_count=1,
         ml_score_threshold=0.4,
@@ -256,7 +260,8 @@ async def test_pause_fails_notifier_still_fires() -> None:
         dispatcher=dispatcher,
     )
     settings = Settings(
-        printer_ip="10.0.0.1", printer_access_code="test",
+        printer_ip="10.0.0.1",
+        printer_access_code="test",
         detection_warmup_seconds=0,
         ml_confirm_count=1,
         ml_score_threshold=0.4,
@@ -283,7 +288,8 @@ async def test_db_records_detection_on_pause() -> None:
         ml_score=0.9,
     )
     settings = Settings(
-        printer_ip="10.0.0.1", printer_access_code="test",
+        printer_ip="10.0.0.1",
+        printer_access_code="test",
         detection_warmup_seconds=0,
         ml_confirm_count=1,
         ml_score_threshold=0.4,
@@ -402,7 +408,8 @@ async def test_watchdog_no_alert_when_no_heartbeat() -> None:
 # ---------------------------------------------------------------------------
 
 _FAST_SETTINGS = Settings(
-    printer_ip="10.0.0.1", printer_access_code="test",
+    printer_ip="10.0.0.1",
+    printer_access_code="test",
     detection_warmup_seconds=0,
     ml_confirm_count=1,
     ml_score_threshold=0.4,
@@ -444,9 +451,6 @@ async def test_loop_swallows_unexpected_exceptions() -> None:
     assert call_count == 2  # loop executed twice despite exception on first
 
 
-
-
-
 async def test_cancelled_before_pause_does_not_set_paused_state() -> None:
     watcher, _, _, _, _ = await _make_watcher()
 
@@ -475,7 +479,8 @@ async def test_snapshot_saving_and_cleanup() -> None:
         ml_score=0.9,
     )
     watcher._settings = Settings(
-        printer_ip="10.0.0.1", printer_access_code="test",
+        printer_ip="10.0.0.1",
+        printer_access_code="test",
         detection_warmup_seconds=0,
         ml_confirm_count=1,
         ml_score_threshold=0.4,
@@ -965,8 +970,18 @@ async def test_watchdog_auto_stop(monkeypatch) -> None:
     watcher.state = WatcherState.PAUSED
     watcher._paused_since = datetime.now(tz=UTC) - timedelta(seconds=2000)
 
-    # Mock printer status
-    printer.status = AsyncMock(return_value=_printing_status())
+    # Use print_state="paused" — a printer paused by sentinel detection reports this
+    # state, and _update_state must keep the watcher in PAUSED for the auto-stop
+    # timeout check to fire.
+    paused_status = PrinterStatus(
+        printing=True,
+        elapsed_seconds=400.0,
+        current_layer=10,
+        total_layers=100,
+        filename="test.gcode",
+        print_state="paused",
+    )
+    printer.status = AsyncMock(return_value=paused_status)
 
     await watcher._tick()
     printer.stop.assert_called_once()
@@ -1012,7 +1027,8 @@ async def test_warmup_fallback(monkeypatch) -> None:
 async def test_cleanup_respects_configurable_limit() -> None:
     watcher, _printer, _camera, _ml, db = await _make_watcher()
     watcher._settings = Settings(
-        printer_ip="10.0.0.1", printer_access_code="test",
+        printer_ip="10.0.0.1",
+        printer_access_code="test",
         snapshot_retention_limit=5,  # Keep only 5
         db_path=str(db._path),
     )
@@ -1031,7 +1047,8 @@ async def test_cleanup_respects_configurable_limit() -> None:
 async def test_periodic_cleanup_task_runs_and_exits() -> None:
     watcher, _printer, _camera, _ml, db = await _make_watcher()
     watcher._settings = Settings(
-        printer_ip="10.0.0.1", printer_access_code="test",
+        printer_ip="10.0.0.1",
+        printer_access_code="test",
         snapshot_cleanup_interval_seconds=1,  # Sleep 1s
         snapshot_retention_limit=5,
         db_path=str(db._path),
@@ -1066,7 +1083,8 @@ async def test_fallback_directory_cleanup_deletes_orphans() -> None:
 
     watcher, _printer, _camera, _ml, db = await _make_watcher()
     watcher._settings = Settings(
-        printer_ip="10.0.0.1", printer_access_code="test",
+        printer_ip="10.0.0.1",
+        printer_access_code="test",
         db_path=str(db._path),
     )
 
@@ -1385,7 +1403,8 @@ async def test_snapshot_cleanup_permission_error_clears_db_reference(
 
 async def test_watcher_resume_cooldown_skips_processing() -> None:
     settings = Settings(
-        printer_ip="10.0.0.1", printer_access_code="test",
+        printer_ip="10.0.0.1",
+        printer_access_code="test",
         detection_warmup_seconds=300,
         ml_confirm_count=3,
         ml_score_threshold=0.4,
@@ -1418,7 +1437,8 @@ async def test_watcher_resume_cooldown_skips_processing() -> None:
 
 async def test_watcher_resume_cooldown_expiry() -> None:
     settings = Settings(
-        printer_ip="10.0.0.1", printer_access_code="test",
+        printer_ip="10.0.0.1",
+        printer_access_code="test",
         detection_warmup_seconds=300,
         ml_confirm_count=3,
         ml_score_threshold=0.4,

@@ -82,6 +82,10 @@ def _parse_status(
             total_layers = int(attrs.get("TotalLayer", 0))
             filename = attrs.get("Filename") or None
             thumbnail_base64 = attrs.get("Thumbnail") or payload.get("thumbnail") or None
+            # Derive print_state from the boolean: the Attributes format only documents
+            # CurrentStatus==1 as "printing" (docs/verified-assumptions.md); no paused or
+            # completed codes have been verified, so we use the boolean as the sole mapping.
+            print_state = "printing" if printing else "idle"
             return PrinterStatus(
                 printing=printing,
                 elapsed_seconds=elapsed,
@@ -89,6 +93,7 @@ def _parse_status(
                 total_layers=total_layers,
                 filename=filename,
                 thumbnail_base64=thumbnail_base64,
+                print_state=print_state,
                 raw=payload,
             )
 
