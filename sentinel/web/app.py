@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 from pathlib import Path
@@ -46,17 +47,36 @@ class LimitUploadSizeMiddleware:
             return
 
         body_size = 0
+        _oversized = False
+        _response_started = False
 
         async def bounded_receive() -> dict[str, Any]:
-            nonlocal body_size
+            nonlocal body_size, _oversized
             msg: dict[str, Any] = await receive()
             if msg["type"] == "http.request":
                 body_size += len(msg.get("body", b""))
                 if body_size > 1024 * 1024:
-                    raise HTTPException(status_code=413, detail="Payload Too Large")
+                    _oversized = True
+                    # Signal end-of-body so the app sees a clean EOF rather
+                    # than an incomplete stream; it will attempt to respond
+                    # with whatever it parsed from the truncated body.
+                    return {"type": "http.request", "body": b"", "more_body": False}
             return msg
 
-        await self.app(scope, bounded_receive, send)
+        async def guarded_send(message: dict[str, Any]) -> None:
+            nonlocal _response_started
+            if _oversized:
+                # Swallow the downstream response entirely; we will send 413.
+                if message["type"] == "http.response.start":
+                    _response_started = True
+                return
+            await send(message)
+
+        await self.app(scope, bounded_receive, guarded_send)
+
+        if _oversized:
+            response = Response(status_code=413, content="Payload Too Large")
+            await response(scope, receive, send)
 
 
 def create_app(
@@ -122,8 +142,8 @@ def create_app(
     async def internal_snapshot(nonce: str, request: Request) -> Response:
         """Single-use JPEG endpoint for the Obico ML API URL-fetch flow."""
         if internal_token is not None:
-            t = request.query_params.get("t")
-            if not t or t != internal_token:
+            t = request.query_params.get("t") or ""
+            if not t or not hmac.compare_digest(t, internal_token):
                 raise HTTPException(status_code=403, detail="Forbidden: Invalid internal token")
 
         jpeg = get_nonce_store().get(nonce)

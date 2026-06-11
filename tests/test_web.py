@@ -606,6 +606,29 @@ async def test_limit_upload_size_middleware(app: object) -> None:
     assert r.text == "Payload Too Large"
 
 
+async def test_limit_upload_size_middleware_streamed_body_413(app: object) -> None:
+    """Chunked/streamed POST with no Content-Length that exceeds 1 MiB must
+    receive an actual 413 response — not a 500 or a connection reset.
+
+    httpx async content= generator omits Content-Length, exercising the
+    streamed-body path in LimitUploadSizeMiddleware.bounded_receive.
+    """
+
+    async def _oversized_body():
+        # Yield two 600 KB chunks — total 1.2 MiB, no content-length
+        yield b"x" * 600_000
+        yield b"x" * 600_000
+
+    async with _client(app) as c:
+        r = await c.post(
+            "/api/settings",
+            content=_oversized_body(),
+            headers={"Content-Type": "application/json", "Origin": "http://test"},
+        )
+    assert r.status_code == 413
+    assert r.text == "Payload Too Large"
+
+
 async def test_limit_upload_size_middleware_edge_cases() -> None:
     from unittest.mock import ANY
 
@@ -624,6 +647,7 @@ async def test_limit_upload_size_middleware_edge_cases() -> None:
     mw.app.assert_called_once_with(scope, ANY, ANY)
 
     # 3. HTTP POST request streaming body exceeding 1MB (without Content-Length header)
+    #    The middleware must send a proper 413 response, not raise HTTPException.
     mw = LimitUploadSizeMiddleware(AsyncMock())
     scope = {
         "type": "http",
@@ -649,19 +673,19 @@ async def test_limit_upload_size_middleware_edge_cases() -> None:
 
     # We mock mw.app to simulate reading the body
     async def mock_app(scope: object, receive: object, send: object) -> None:
-        # Read the first chunk
+        # Read the first chunk (ok)
         await receive()
-        # Read the second chunk, which will trigger the exception
-        await receive()
+        # Read the second chunk — bounded_receive returns empty EOF instead of raising
+        msg = await receive()
+        assert msg == {"type": "http.request", "body": b"", "more_body": False}
 
     mw.app.side_effect = mock_app
 
-    from fastapi import HTTPException
-
-    with pytest.raises(HTTPException) as excinfo:
-        await mw(scope, mock_receive, mock_send)
-    assert excinfo.value.status_code == 413
-    assert excinfo.value.detail == "Payload Too Large"
+    await mw(scope, mock_receive, mock_send)
+    # Middleware must have sent an http.response.start with status 413
+    assert any(m.get("status") == 413 for m in sent_messages), (
+        f"Expected a 413 response message but got: {sent_messages}"
+    )
 
     # 4. Standard runtime exception propagation
     mw = LimitUploadSizeMiddleware(AsyncMock())
@@ -799,6 +823,52 @@ async def test_dns_rebinding_still_blocks_other_routes(
         transport=httpx.ASGITransport(app=guarded_app),
         base_url="http://evil.example",
         headers={"Host": "evil.example"},
+    ) as c:
+        r = await c.get("/")
+
+    assert r.status_code == 403
+    assert "DNS Rebinding Protection" in r.text
+
+
+async def test_dns_rebinding_ipv6_loopback_allowed(
+    mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: AsyncMock
+) -> None:
+    """Host: [::1]:8000 must pass the DNS-rebinding check.
+
+    Before the fix, host_header.split(':')[0] turned '[::1]:8000' into '['
+    so the '::1' allowlist entry was dead code and IPv6 loopback was always 403.
+    """
+    settings = _base_settings(external_bind_allowed=False)
+    guarded_app = create_app(settings, db=mock_db, watcher=mock_watcher, camera=mock_camera)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=guarded_app, client=("::1", 12345)),
+        base_url="http://[::1]:8000",
+        headers={"Host": "[::1]:8000", "Origin": "http://[::1]:8000"},
+    ) as c:
+        r = await c.get("/healthz")
+
+    assert r.status_code == 200, (
+        f"Expected 200 for IPv6 loopback but got {r.status_code} ({r.text!r}); "
+        "IPv6 host parsing in DNS-rebinding check is broken"
+    )
+
+
+async def test_dns_rebinding_ipv6_global_still_blocked(
+    mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: AsyncMock
+) -> None:
+    """Host: [2606:2800::1]:8000 (global unicast) must still be rejected.
+
+    Using 2606:2800::1 (Fastly range) which Python's ipaddress module correctly
+    classifies as non-private/non-loopback global unicast.
+    """
+    settings = _base_settings(external_bind_allowed=False)
+    guarded_app = create_app(settings, db=mock_db, watcher=mock_watcher, camera=mock_camera)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=guarded_app),
+        base_url="http://[2606:2800::1]:8000",
+        headers={"Host": "[2606:2800::1]:8000"},
     ) as c:
         r = await c.get("/")
 

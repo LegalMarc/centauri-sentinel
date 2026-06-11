@@ -1,7 +1,13 @@
-"""Single-use in-memory nonce store for JPEG snapshots.
+"""TTL-bound in-memory nonce store for JPEG snapshots.
 
 The ML API fetches snapshots by URL; the sentinel exposes them via
-/__internal_snapshot/<nonce>. Each nonce can only be read once.
+/__internal_snapshot/<nonce>.  Nonces are TTL-bound (default 60 s) and are
+removed by the ML client in a ``finally`` block via ``pop()`` after each
+detection round-trip, so they are effectively single-use in production.
+
+The web endpoint uses ``get()`` (non-destructive) so that the ML client can
+retry the same nonce within its TTL window if the first HTTP request fails.
+Use ``pop()`` directly for single-use consumers.
 
 Entries expire after _TTL_S seconds regardless of consumption so a
 crashed or unreachable ML API cannot cause unbounded memory growth.
@@ -18,7 +24,14 @@ _MAX_SIZE = 20  # hard cap; oldest entry evicted when reached
 
 
 class NonceStore:
-    """Thread-safe single-use JPEG store with TTL expiry."""
+    """Thread-safe TTL-bound JPEG store.
+
+    Each nonce lives until its TTL expires or a consumer calls ``pop()``.
+    ``get()`` is non-destructive — callers may read the same nonce multiple
+    times within the TTL window (used by the ML client for retries).
+    ``pop()`` atomically removes the entry and is appropriate for
+    single-use consumers.
+    """
 
     def __init__(self, ttl: float = _TTL_S) -> None:
         self._store: dict[str, tuple[bytes, float]] = {}  # nonce → (jpeg, expires_at)

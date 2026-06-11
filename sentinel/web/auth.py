@@ -97,7 +97,14 @@ class AuthMiddleware:
             await self._app(scope, receive, send)
             return
 
-        host_header = headers.get(b"host", b"").decode().split(":")[0]
+        _raw_host = headers.get(b"host", b"").decode()
+        # urlsplit correctly handles bracketed IPv6 literals like [::1]:8000,
+        # returning hostname="::1" (brackets stripped, no port appended).
+        # Plain hostnames and IPv4 addresses are unchanged.
+        from urllib.parse import urlsplit as _urlsplit
+
+        _split = _urlsplit(f"//{_raw_host}")
+        host_header: str = _split.hostname or _raw_host
 
         is_private_ip = False
         with contextlib.suppress(ValueError):
