@@ -117,6 +117,7 @@ async def test_detect_results_list_format() -> None:
         result = await ml.detect(_JPEG)
 
     assert result.score == pytest.approx(0.85)
+    assert result.error is False
 
 
 async def test_detect_flat_score_format() -> None:
@@ -128,6 +129,7 @@ async def test_detect_flat_score_format() -> None:
         result = await ml.detect(_JPEG)
 
     assert result.score == pytest.approx(0.42)
+    assert result.error is False
 
 
 async def test_detect_empty_results_returns_fail_open() -> None:
@@ -155,6 +157,7 @@ async def test_detect_http_5xx_fail_open() -> None:
         result = await ml.detect(_JPEG)
 
     assert result.score == 0.0
+    assert result.error is True
 
 
 async def test_detect_connect_error_fail_open() -> None:
@@ -168,6 +171,7 @@ async def test_detect_connect_error_fail_open() -> None:
         result = await ml.detect(_JPEG)
 
     assert result.score == 0.0
+    assert result.error is True
 
 
 async def test_detect_malformed_json_fail_open() -> None:
@@ -179,6 +183,7 @@ async def test_detect_malformed_json_fail_open() -> None:
         result = await ml.detect(_JPEG)
 
     assert result.score == 0.0
+    assert result.error is True
 
 
 async def test_detect_timeout_fail_open() -> None:
@@ -192,6 +197,7 @@ async def test_detect_timeout_fail_open() -> None:
         result = await ml.detect(_JPEG)
 
     assert result.score == 0.0
+    assert result.error is True
 
 
 # ---------------------------------------------------------------------------

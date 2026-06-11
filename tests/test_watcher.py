@@ -752,6 +752,100 @@ async def test_confirm_count_retained_on_ml_failure() -> None:
     assert watcher._confirm_count == 2
 
 
+# ---------------------------------------------------------------------------
+# Fail-closed: ml_consecutive_failure_threshold respected
+# ---------------------------------------------------------------------------
+
+
+async def test_fail_closed_pauses_at_custom_threshold() -> None:
+    """Watcher must pause after exactly ml_consecutive_failure_threshold consecutive ML errors."""
+    settings = Settings(
+        printer_ip="10.0.0.1",
+        printer_access_code="test",
+        detection_warmup_seconds=0,
+        ml_consecutive_failure_threshold=3,
+        ml_confirm_count=3,
+        ml_score_threshold=0.4,
+        ml_poll_interval_seconds=10,
+        watcher_stall_seconds=60,
+        resume_cooldown_seconds=0,
+    )
+    watcher, printer, _camera, ml, _db = await _make_watcher(
+        settings=settings,
+        printer_status=_printing_status(),
+    )
+    ml.detect = AsyncMock(return_value=MlResult(score=0.0, error=True))
+
+    # Two failures — should NOT pause yet
+    await watcher.tick()
+    await watcher.tick()
+    printer.pause.assert_not_called()
+    assert watcher.state != WatcherState.PAUSED
+
+    # Third failure — must pause (threshold=3)
+    await watcher.tick()
+    printer.pause.assert_called_once()
+    assert watcher.state == WatcherState.PAUSED
+
+
+async def test_fail_closed_does_not_pause_before_threshold() -> None:
+    """With default threshold=10, the watcher must NOT pause after only 5 errors."""
+    settings = Settings(
+        printer_ip="10.0.0.1",
+        printer_access_code="test",
+        detection_warmup_seconds=0,
+        ml_consecutive_failure_threshold=10,
+        ml_confirm_count=3,
+        ml_score_threshold=0.4,
+        ml_poll_interval_seconds=10,
+        watcher_stall_seconds=60,
+        resume_cooldown_seconds=0,
+    )
+    watcher, printer, _camera, ml, _db = await _make_watcher(
+        settings=settings,
+        printer_status=_printing_status(),
+    )
+    ml.detect = AsyncMock(return_value=MlResult(score=0.0, error=True))
+
+    for _ in range(5):
+        await watcher.tick()
+
+    # 5 errors with threshold=10 — must not have paused
+    printer.pause.assert_not_called()
+    assert watcher.state != WatcherState.PAUSED
+
+
+async def test_fail_closed_error_count_resets_on_success() -> None:
+    """_ml_error_count resets to 0 on a successful ML result."""
+    settings = Settings(
+        printer_ip="10.0.0.1",
+        printer_access_code="test",
+        detection_warmup_seconds=0,
+        ml_consecutive_failure_threshold=3,
+        ml_confirm_count=3,
+        ml_score_threshold=0.4,
+        ml_poll_interval_seconds=10,
+        watcher_stall_seconds=60,
+        resume_cooldown_seconds=0,
+    )
+    watcher, printer, _camera, ml, _db = await _make_watcher(
+        settings=settings,
+        printer_status=_printing_status(),
+    )
+    ml.detect = AsyncMock(return_value=MlResult(score=0.0, error=True))
+
+    # Two failures
+    await watcher.tick()
+    await watcher.tick()
+    assert watcher._ml_error_count == 2
+
+    # Success resets the counter
+    ml.detect = AsyncMock(return_value=MlResult(score=0.1, error=False))
+    await watcher.tick()
+    assert watcher._ml_error_count == 0
+    printer.pause.assert_not_called()
+
+
 async def test_paused_externally_transitions_to_paused_state() -> None:
     """If print_state is 'paused', the watcher transitions to PAUSED and doesn't run detection."""
     watcher, printer, camera, ml, _ = await _make_watcher(printer_status=_printing_status())
