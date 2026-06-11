@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import pytest
 
@@ -329,3 +330,71 @@ def test_camera_max_streams_valid() -> None:
 def test_camera_max_streams_invalid() -> None:
     with pytest.raises(ValueError, match="CAMERA_MAX_STREAMS must be at least 1"):
         Settings(camera_max_streams=0)
+
+
+# ---------------------------------------------------------------------------
+# README doc-consistency tests
+# Parses the README config table and asserts documented defaults match
+# Settings() defaults for keys that have been historically mis-documented.
+# ---------------------------------------------------------------------------
+
+
+def _parse_readme_defaults() -> dict[str, str]:
+    """Parse all README config-table rows into {VAR_NAME: default_string}."""
+    readme_path = Path(__file__).parent.parent / "README.md"
+    defaults: dict[str, str] = {}
+    for line in readme_path.read_text().splitlines():
+        # Match table rows of the form: | `VAR_NAME` | default | ... |
+        stripped = line.strip()
+        if not stripped.startswith("|"):
+            continue
+        cells = [c.strip() for c in stripped.split("|")]
+        # cells[0] is empty (before the first |), cells[1]=var, cells[2]=default, ...
+        if len(cells) < 4:
+            continue
+        var_cell = cells[1]
+        default_cell = cells[2]
+        # var_cell must be a backtick-quoted identifier
+        if not (var_cell.startswith("`") and var_cell.endswith("`")):
+            continue
+        var_name = var_cell[1:-1]
+        # Strip surrounding backticks from the default value if present
+        default_val = default_cell.strip("`")
+        defaults[var_name] = default_val
+    return defaults
+
+
+def test_readme_telegram_send_snapshots_default_matches_code() -> None:
+    """README must document TELEGRAM_SEND_SNAPSHOTS default as false (code default)."""
+    defaults = _parse_readme_defaults()
+    assert "TELEGRAM_SEND_SNAPSHOTS" in defaults, (
+        "TELEGRAM_SEND_SNAPSHOTS not found in README config table"
+    )
+    readme_val = defaults["TELEGRAM_SEND_SNAPSHOTS"].lower()
+    assert readme_val == "false", (
+        f"README documents TELEGRAM_SEND_SNAPSHOTS default as {readme_val!r} but "
+        f"Settings().telegram_send_snapshots is False"
+    )
+    # Also confirm code default
+    assert Settings().telegram_send_snapshots is False
+
+
+def test_readme_ml_api_token_file_default_matches_code() -> None:
+    """README must document ML_API_TOKEN_FILE default matching config.py."""
+    defaults = _parse_readme_defaults()
+    assert "ML_API_TOKEN_FILE" in defaults, "ML_API_TOKEN_FILE not found in README config table"
+    readme_val = defaults["ML_API_TOKEN_FILE"]
+    code_val = Settings().ml_api_token_file
+    assert readme_val == code_val, (
+        f"README documents ML_API_TOKEN_FILE default as {readme_val!r} but "
+        f"Settings().ml_api_token_file is {code_val!r}"
+    )
+
+
+def test_readme_no_plaintext_auth_password_row() -> None:
+    """README must not present AUTH_PASSWORD as a supported option (it's hard-rejected)."""
+    defaults = _parse_readme_defaults()
+    assert "AUTH_PASSWORD" not in defaults, (
+        "README config table still has an AUTH_PASSWORD row — remove it, "
+        "plaintext passwords are rejected at startup"
+    )

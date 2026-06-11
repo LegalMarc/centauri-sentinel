@@ -73,7 +73,7 @@ Only `PRINTER_IP` is required. Everything else has a sane default.
 | Variable | Default | Purpose |
 |---|---|---|
 | `ML_API_URL` | `http://obico-ml:3333` | Internal URL of the Obico ML container |
-| `ML_API_TOKEN_FILE` | `/shared/token` | Path to the shared auth token (written by `token-init`) |
+| `ML_API_TOKEN_FILE` | `shared/token` | Path to the shared auth token (written by `token-init`); override to `/shared/token` when using Docker Compose |
 | `ML_CONFIRM_COUNT` | `3` | Consecutive positive frames before triggering a pause |
 | `ML_POLL_INTERVAL_SECONDS` | `10` | Seconds between frame grabs |
 | `ML_SCORE_THRESHOLD` | `0.4` | Per-frame confidence threshold (0.0 – 1.0) |
@@ -96,7 +96,7 @@ Disabled if `TELEGRAM_BOT_TOKEN` is unset.
 | `TELEGRAM_BOT_TOKEN` | — | Bot token from @BotFather |
 | `TELEGRAM_CHAT_ID` | — | Chat to send alerts to |
 | `TELEGRAM_USER_IDS` | — | Comma-separated list of authorised user IDs |
-| `TELEGRAM_SEND_SNAPSHOTS` | `true` | If set to false, Telegram notifications send text-only alerts without uploading snapshots |
+| `TELEGRAM_SEND_SNAPSHOTS` | `false` | Set `true` to upload camera snapshots to Telegram with each alert (opt-in; see Privacy Notice below) |
 
 See [Telegram setup](#telegram-setup) below.
 
@@ -118,13 +118,14 @@ Disabled if `AUTH_USERNAME` is unset.
 | Variable | Default | Purpose |
 |---|---|---|
 | `AUTH_USERNAME` | — | HTTP Basic Auth username |
-| `AUTH_PASSWORD` | — | Plaintext password — hashed with bcrypt at startup (use instead of `AUTH_PASSWORD_BCRYPT` for convenience) |
-| `AUTH_PASSWORD_BCRYPT` | — | Pre-computed bcrypt hash — takes precedence over `AUTH_PASSWORD` |
+| `AUTH_PASSWORD_BCRYPT` | — | bcrypt hash of your password (required when `AUTH_USERNAME` is set) |
 
-Generate a pre-computed hash:
+Generate a bcrypt hash:
 ```sh
 python3 -c "import bcrypt; print(bcrypt.hashpw(b'yourpassword', bcrypt.gensalt()).decode())"
 ```
+
+> **Note:** Plaintext `AUTH_PASSWORD` is no longer accepted. Use `AUTH_PASSWORD_BCRYPT` with a pre-computed hash.
 
 ### Web server
 
@@ -170,7 +171,7 @@ python3 -c "import bcrypt; print(bcrypt.hashpw(b'yourpassword', bcrypt.gensalt()
 - centauri-sentinel enforces an allowlist on both chat ID and user ID. Messages from unknown
   chats or users are silently ignored.
 - The `/stop` command requires a `/confirm` within 30 seconds to prevent accidental pauses.
-- **Privacy Notice:** Telegram notifications upload camera snapshots to Telegram's servers. You can opt-out of image uploads while keeping text-only alerts by setting the environment variable `TELEGRAM_SEND_SNAPSHOTS=false`.
+- **Privacy Notice:** By default, Telegram notifications are text-only. Set `TELEGRAM_SEND_SNAPSHOTS=true` to opt in to uploading camera snapshots to Telegram's servers with each alert.
 
 **Available bot commands:**
 
