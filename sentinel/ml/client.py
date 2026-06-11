@@ -62,6 +62,7 @@ class MlClient:
             )
         self._consecutive_failures = 0
         self._failure_threshold = settings.ml_consecutive_failure_threshold
+        self._token_unreadable_warned = False
 
     # ------------------------------------------------------------------
     # Public API
@@ -148,6 +149,14 @@ class MlClient:
                 self._token = self._token_file.read_text().strip()
                 self._token_mtime = mtime
         except OSError:
+            if not self._token_unreadable_warned:
+                self._token_unreadable_warned = True
+                logger.warning(
+                    "ML API token file exists but cannot be read: %s — "
+                    "requests will be sent without authentication. "
+                    "Check file permissions (sentinel UID 1000 needs read access).",
+                    self._token_file,
+                )
             return None
         return self._token
 

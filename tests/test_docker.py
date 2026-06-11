@@ -56,7 +56,11 @@ def test_token_init_entrypoint_syntax() -> None:
 
 
 def test_token_init_permissions(tmp_path: Path) -> None:
-    """Verify that docker/token-init/entrypoint.sh creates token file with 600 permissions."""
+    """Verify that docker/token-init/entrypoint.sh creates token file with 644 permissions.
+
+    The volume is private (ml-token), so 0644 is safe and allows sentinel
+    (UID 1000) to read the token on a read-only volume mount.
+    """
     entrypoint_path = Path(__file__).parent.parent / "docker" / "token-init" / "entrypoint.sh"
     assert entrypoint_path.exists()
 
@@ -71,8 +75,10 @@ def test_token_init_permissions(tmp_path: Path) -> None:
     assert res.returncode == 0, f"entrypoint.sh failed: {res.stderr}"
     assert token_file.exists()
 
-    # Get file mode and check it's 600 (octal 0o100600)
+    # Get file mode and check it's 644 (octal 0o100644)
     mode = token_file.stat().st_mode
     # Extract permission bits
     perms = mode & 0o777
-    assert perms == 0o600, f"Expected permissions 0600, got {oct(perms)}"
+    assert perms == 0o644, (
+        f"Expected permissions 0644 (readable by sentinel UID 1000), got {oct(perms)}"
+    )
