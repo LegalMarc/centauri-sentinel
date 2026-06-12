@@ -38,30 +38,42 @@ for the full variable reference.
 
 ### Enabling dashboard auth — escape `$` as `$$`
 
-To enable the login form, set `AUTH_USERNAME` and `AUTH_PASSWORD_BCRYPT` (a
-bcrypt hash of your password). Generate the hash:
+To enable the login form, set `AUTH_USERNAME` and the bcrypt hash of your
+password. Generate the hash with the built-in helper (prompts securely):
 
 ```sh
-python3 -c "import bcrypt; print(bcrypt.hashpw(b'yourpassword', bcrypt.gensalt()).decode())"
+python -m sentinel hash-password
 ```
+
+It prints both the raw hash and a pre-escaped `AUTH_PASSWORD_BCRYPT=…` line.
 
 > **⚠️ Critical gotcha.** Coolify writes environment variables into a generated
 > `.env` file, and Docker Compose interpolates `$` in `.env` values. A bcrypt
-> hash is full of `$` separators (`$2b$12$…`), so a raw hash is **silently
-> corrupted** and every login fails with "Invalid username or password."
+> hash is full of `$` separators (`$2b$12$…`), so a raw hash pasted into the
+> `AUTH_PASSWORD_BCRYPT` field is **silently corrupted** and every login fails
+> with "Invalid username or password."
 >
-> Enter the value with each `$` doubled to `$$` in the Coolify env var field:
+> Paste the **pre-escaped** value (each `$` doubled to `$$`) that the helper
+> prints:
 >
 > ```
 > AUTH_USERNAME=admin
 > AUTH_PASSWORD_BCRYPT=$$2b$$12$$X5qE.czdChxBlEzJHYwZPe9jUkcv6uN9OVnwuJWxwz0xZwr91oN.2
 > ```
->
-> Produce the escaped form directly:
->
-> ```sh
-> python3 -c "import bcrypt; print(bcrypt.hashpw(b'yourpassword', bcrypt.gensalt()).decode().replace('\$','\$\$'))"
-> ```
+
+**Avoiding the escaping entirely.** If you mount the hash as a file — via a
+Coolify [secret/storage](https://coolify.io/docs) or a bind mount — set
+`AUTH_PASSWORD_BCRYPT_FILE` to its path instead. File contents are not
+interpolated, so no escaping is needed and the hash stays out of
+`docker inspect`:
+
+```sh
+python -m sentinel hash-password --file ./auth_hash   # writes the raw hash
+```
+
+```
+AUTH_PASSWORD_BCRYPT_FILE=/run/secrets/auth_hash
+```
 
 ## Re-deploying after a code change
 

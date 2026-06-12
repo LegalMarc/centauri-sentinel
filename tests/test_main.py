@@ -4,11 +4,16 @@ from __future__ import annotations
 
 import argparse
 import os
+import stat
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from sentinel.__main__ import _run
+from sentinel.__main__ import _hash_password, _run
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 @pytest.mark.asyncio
@@ -60,3 +65,68 @@ async def test_main_cli_overrides() -> None:
         from sentinel.config import get_settings
 
         get_settings.cache_clear()
+
+
+# ---------------------------------------------------------------------------
+# hash-password CLI command (Pattern 3)
+# ---------------------------------------------------------------------------
+
+
+def test_hash_password_prints_both_forms(capsys: pytest.CaptureFixture[str]) -> None:
+    import bcrypt
+
+    args = argparse.Namespace(password="hunter2", file=None, rounds=4)
+    _hash_password(args)
+
+    out = capsys.readouterr().out
+    # The pre-escaped .env form must be present and correctly escaped.
+    assert "AUTH_PASSWORD_BCRYPT=$$2b$$04$$" in out
+    assert "AUTH_PASSWORD_BCRYPT_FILE=" in out
+    # The raw hash line must verify against the password.
+    raw_line = next(line.strip() for line in out.splitlines() if line.strip().startswith("$2b$"))
+    assert bcrypt.checkpw(b"hunter2", raw_line.encode())
+
+
+def test_hash_password_writes_file_with_restricted_perms(tmp_path: Path) -> None:
+    import bcrypt
+
+    target = tmp_path / "auth_hash"
+    args = argparse.Namespace(password="hunter2", file=str(target), rounds=4)
+    _hash_password(args)
+
+    content = target.read_text().strip()
+    assert bcrypt.checkpw(b"hunter2", content.encode())
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+
+
+def test_hash_password_prompts_when_password_omitted(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import bcrypt
+
+    args = argparse.Namespace(password=None, file=None, rounds=4)
+    with patch("getpass.getpass", side_effect=["hunter2", "hunter2"]):
+        _hash_password(args)
+
+    out = capsys.readouterr().out
+    raw_line = next(line.strip() for line in out.splitlines() if line.strip().startswith("$2b$"))
+    assert bcrypt.checkpw(b"hunter2", raw_line.encode())
+
+
+def test_hash_password_mismatch_exits(capsys: pytest.CaptureFixture[str]) -> None:
+    args = argparse.Namespace(password=None, file=None, rounds=4)
+    with (
+        patch("getpass.getpass", side_effect=["hunter2", "different"]),
+        pytest.raises(SystemExit) as exc,
+    ):
+        _hash_password(args)
+    assert exc.value.code == 1
+    assert "do not match" in capsys.readouterr().err
+
+
+def test_hash_password_empty_exits(capsys: pytest.CaptureFixture[str]) -> None:
+    args = argparse.Namespace(password="", file=None, rounds=4)
+    with pytest.raises(SystemExit) as exc:
+        _hash_password(args)
+    assert exc.value.code == 1
+    assert "empty" in capsys.readouterr().err

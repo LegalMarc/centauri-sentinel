@@ -162,6 +162,66 @@ def test_auth_validation_invalid_bcrypt_hash() -> None:
         Settings(auth_username="admin", auth_password_bcrypt="not_bcrypt_hash")
 
 
+# ---------------------------------------------------------------------------
+# AUTH_PASSWORD_BCRYPT_FILE — file-based hash (Pattern 2)
+# ---------------------------------------------------------------------------
+
+
+def _bcrypt_hash(password: bytes) -> str:
+    import bcrypt
+
+    return bcrypt.hashpw(password, bcrypt.gensalt(rounds=4)).decode()
+
+
+def test_auth_password_bcrypt_file_loads(tmp_path: Path) -> None:
+    import bcrypt
+
+    hash_value = _bcrypt_hash(b"secret")
+    hash_file = tmp_path / "auth_hash"
+    hash_file.write_text(hash_value + "\n")  # trailing newline must be stripped
+
+    s = Settings(auth_username="admin", auth_password_bcrypt_file=str(hash_file))
+
+    assert s.auth_enabled
+    assert s.auth_password_bcrypt == hash_value
+    assert bcrypt.checkpw(b"secret", s.auth_password_bcrypt.encode())
+
+
+def test_auth_password_bcrypt_file_takes_precedence_over_inline(tmp_path: Path) -> None:
+    """The file value wins when both the file and an inline hash are set."""
+    file_hash = _bcrypt_hash(b"from-file")
+    hash_file = tmp_path / "auth_hash"
+    hash_file.write_text(file_hash)
+
+    s = Settings(
+        auth_username="admin",
+        auth_password_bcrypt="$2b$12$inlinexxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        auth_password_bcrypt_file=str(hash_file),
+    )
+
+    assert s.auth_password_bcrypt == file_hash
+
+
+def test_auth_password_bcrypt_file_missing_raises(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match=r"AUTH_PASSWORD_BCRYPT_FILE.*does not exist"):
+        Settings(auth_username="admin", auth_password_bcrypt_file=str(tmp_path / "nope"))
+
+
+def test_auth_password_bcrypt_file_empty_raises(tmp_path: Path) -> None:
+    hash_file = tmp_path / "empty"
+    hash_file.write_text("   \n")
+    with pytest.raises(ValueError, match=r"AUTH_PASSWORD_BCRYPT_FILE.*is empty"):
+        Settings(auth_username="admin", auth_password_bcrypt_file=str(hash_file))
+
+
+def test_auth_password_bcrypt_file_invalid_hash_raises(tmp_path: Path) -> None:
+    """A file whose contents are not a bcrypt hash is rejected by format validation."""
+    hash_file = tmp_path / "bad"
+    hash_file.write_text("not-a-bcrypt-hash")
+    with pytest.raises(ValueError, match="AUTH_PASSWORD_BCRYPT must be a valid bcrypt hash"):
+        Settings(auth_username="admin", auth_password_bcrypt_file=str(hash_file))
+
+
 def test_printer_ip_validation_valid_ip() -> None:
     s = Settings(printer_ip="192.168.1.10")
     assert s.printer_ip == "192.168.1.10"

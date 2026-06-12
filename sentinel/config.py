@@ -138,13 +138,19 @@ class Settings(BaseSettings):
     ntfy_send_snapshots: bool = False
 
     # Auth
-    # Set either AUTH_PASSWORD_BCRYPT (a bcrypt hash starting with $2b$) or the
-    # plain-text AUTH_PASSWORD.
-    # WARNING: Plain-text AUTH_PASSWORD in environment variables is visible via
-    # `docker inspect` and `/proc/<pid>/environ`. For production, always use
-    # AUTH_PASSWORD_BCRYPT.
+    # Provide the bcrypt hash of the dashboard password one of two ways:
+    #   - AUTH_PASSWORD_BCRYPT      — the hash inline. In a Docker Compose .env
+    #                                 file you must escape every `$` as `$$`.
+    #   - AUTH_PASSWORD_BCRYPT_FILE — path to a file containing the hash. Preferred:
+    #                                 no escaping, and the hash never appears in
+    #                                 `docker inspect` / `/proc/<pid>/environ`.
+    #                                 Takes precedence over the inline value.
+    # Generate a hash with:  python -m sentinel hash-password
+    # WARNING: Plain-text AUTH_PASSWORD is not accepted (it would be visible via
+    # `docker inspect`); the validator rejects it.
     auth_username: str | None = None
     auth_password_bcrypt: str | None = None
+    auth_password_bcrypt_file: str | None = None
     auth_password: SecretStr | None = None
     auth_cookie_secure: str = "auto"
 
@@ -183,11 +189,19 @@ class Settings(BaseSettings):
             if not self.telegram_user_ids or not self.telegram_user_ids.strip():
                 raise ValueError("TELEGRAM_USER_IDS is required when TELEGRAM_BOT_TOKEN is set")
 
-        # 2. Auth checks
+        # 2. Auth — resolve the bcrypt hash from a file if configured.  The file
+        # path takes precedence over an inline AUTH_PASSWORD_BCRYPT.  Reading from
+        # a file sidesteps Docker Compose's `$`-interpolation of `.env` values,
+        # which silently corrupts an inline hash.
+        if self.auth_password_bcrypt_file:
+            self.auth_password_bcrypt = self._read_bcrypt_file(self.auth_password_bcrypt_file)
+
         if self.auth_username:
             if not self.auth_password_bcrypt and not self.auth_password:
                 raise ValueError(
-                    "AUTH_PASSWORD or AUTH_PASSWORD_BCRYPT is required when AUTH_USERNAME is set"
+                    "AUTH_PASSWORD_BCRYPT or AUTH_PASSWORD_BCRYPT_FILE is required "
+                    "when AUTH_USERNAME is set. Generate a hash with: "
+                    "python -m sentinel hash-password"
                 )
             if self.auth_password_bcrypt and not (
                 self.auth_password_bcrypt.startswith("$2a$")
@@ -208,6 +222,31 @@ class Settings(BaseSettings):
             )
         self.auth_password = None
         return self
+
+    @staticmethod
+    def _read_bcrypt_file(path_str: str) -> str:
+        """Read and return the stripped bcrypt hash from ``path_str``.
+
+        Raises ValueError with an actionable message if the file is missing,
+        unreadable, or empty.  Hash-format validation (``$2a$``/``$2b$``/``$2y$``)
+        is handled by the caller alongside the inline-hash path.
+        """
+        from pathlib import Path
+
+        path = Path(path_str)
+        try:
+            content = path.read_text(encoding="utf-8")
+        except FileNotFoundError as exc:
+            msg = f"AUTH_PASSWORD_BCRYPT_FILE points to {path_str!r}, which does not exist"
+            raise ValueError(msg) from exc
+        except OSError as exc:
+            msg = f"AUTH_PASSWORD_BCRYPT_FILE {path_str!r} could not be read: {exc}"
+            raise ValueError(msg) from exc
+        hash_value = content.strip()
+        if not hash_value:
+            msg = f"AUTH_PASSWORD_BCRYPT_FILE {path_str!r} is empty"
+            raise ValueError(msg)
+        return hash_value
 
     @field_validator("log_level")
     @classmethod

@@ -39,43 +39,58 @@ PRINTER_ACCESS_CODE=123456   # from the printer's Settings → Network screen
 Everything else has a safe default — see
 [README.md](../README.md#configuration-reference) for the full reference.
 
-### Enabling dashboard auth (recommended if reachable beyond localhost)
+### Enable dashboard auth (recommended)
 
 The dashboard binds on `0.0.0.0` by default, so the startup guard refuses to
-start when the host is externally reachable unless auth is configured. To enable
-the login form, set a username and a **bcrypt hash** of your password.
+start when the host is externally reachable unless auth is configured. Set a
+username plus a **bcrypt hash** of your password.
 
-Generate the hash:
+Generate the hash with the built-in helper — it prompts for the password and
+never echoes it:
 
 ```sh
-python3 -c "import bcrypt; print(bcrypt.hashpw(b'yourpassword', bcrypt.gensalt()).decode())"
-# -> $2b$12$X5qE.czdChxBlEzJHYwZPe9jUkcv6uN9OVnwuJWxwz0xZwr91oN.2
+python -m sentinel hash-password
 ```
 
-> **⚠️ Critical `.env` gotcha — escape every `$` as `$$`.**
-> Docker Compose performs variable interpolation on values in the `.env` file,
-> so a literal `$` is treated as the start of a variable reference. A bcrypt
-> hash is full of `$` separators (`$2b$12$…`) and **will be silently corrupted**
-> — the container receives a broken hash and every login fails with
-> "Invalid username or password."
->
-> Double every `$` to `$$` when writing the hash into `.env`:
->
-> ```sh
-> # WRONG — interpolated and corrupted:
-> AUTH_USERNAME=admin
-> AUTH_PASSWORD_BCRYPT=$2b$12$X5qE.czdChxBlEzJHYwZPe9jUkcv6uN9OVnwuJWxwz0xZwr91oN.2
->
-> # RIGHT — each $ doubled to $$:
-> AUTH_USERNAME=admin
-> AUTH_PASSWORD_BCRYPT=$$2b$$12$$X5qE.czdChxBlEzJHYwZPe9jUkcv6uN9OVnwuJWxwz0xZwr91oN.2
-> ```
->
-> Produce the escaped form in one step:
->
-> ```sh
-> python3 -c "import bcrypt; print(bcrypt.hashpw(b'yourpassword', bcrypt.gensalt()).decode().replace('\$','\$\$'))"
-> ```
+You then have two ways to supply the hash. **The file approach is recommended**
+because it avoids a Docker Compose footgun (see the warning below).
+
+**Option 1 — secret file (recommended).** Write the hash to a file and point
+`AUTH_PASSWORD_BCRYPT_FILE` at it. File contents are *not* interpolated by
+Compose, so there is nothing to escape, and the hash never shows up in
+`docker inspect`:
+
+```sh
+mkdir -p secrets
+python -m sentinel hash-password --file ./secrets/auth_hash
+```
+
+```sh
+# .env
+AUTH_USERNAME=admin
+AUTH_PASSWORD_BCRYPT_FILE=/run/secrets/auth_hash
+```
+
+Mount the file into the container (add to the `sentinel` service in
+`docker-compose.yml`, or use Docker/Coolify secrets):
+
+```yaml
+    volumes:
+      - ./secrets/auth_hash:/run/secrets/auth_hash:ro
+```
+
+**Option 2 — inline env var.** Put the hash directly in `.env`:
+
+> **⚠️ Escape every `$` as `$$`.** Docker Compose interpolates `$` in `.env`
+> values, so a raw bcrypt hash (`$2b$12$…`) is **silently corrupted** and every
+> login fails with "Invalid username or password." `python -m sentinel
+> hash-password` prints the correctly pre-escaped line for you:
+
+```sh
+# .env  (note the doubled $$ — this is what the helper prints)
+AUTH_USERNAME=admin
+AUTH_PASSWORD_BCRYPT=$$2b$$12$$X5qE.czdChxBlEzJHYwZPe9jUkcv6uN9OVnwuJWxwz0xZwr91oN.2
+```
 
 ## 3. Start the stack
 
@@ -167,7 +182,7 @@ docker compose down -v         # stop AND delete volumes (wipes DB + token)
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| Every login fails with "Invalid username or password" | `$` in the bcrypt hash was interpolated by Compose | Escape each `$` as `$$` in `.env` (see step 2) |
+| Every login fails with "Invalid username or password" | `$` in an inline bcrypt hash was interpolated by Compose | Use `AUTH_PASSWORD_BCRYPT_FILE` (no escaping), or double each `$` to `$$` in `.env` — see [Enable dashboard auth](#enable-dashboard-auth-recommended) |
 | Container refuses to start, logs mention external bind | Reachable externally with auth unset | Set `AUTH_USERNAME` + `AUTH_PASSWORD_BCRYPT`, or restrict the host |
 | `sentinel` unhealthy, ML errors in logs | `obico-ml` not healthy yet | Wait for `obico-ml` healthcheck; check `docker compose logs obico-ml` |
 | Can't reach the printer | Wrong `PRINTER_IP` / not on same LAN | Verify the IP and that the host shares the printer's network |

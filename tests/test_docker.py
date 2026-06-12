@@ -158,46 +158,57 @@ def test_compose_bind_port_mapping() -> None:
     )
 
 
-def test_compose_auth_vars_are_required() -> None:
-    """AUTH_USERNAME and AUTH_PASSWORD_BCRYPT must use :? syntax so docker compose
-    fails immediately with a clear error when they are not set, instead of
-    starting and crash-looping on the safety.check_external_bind() RuntimeError.
+def test_compose_username_is_required() -> None:
+    """AUTH_USERNAME must use :? syntax so docker compose fails immediately with a
+    clear error when auth is half-configured, instead of starting and
+    crash-looping on the safety.check_external_bind() RuntimeError.
+
+    AUTH_USERNAME is the auth toggle; it must not be left to a silent empty
+    default. (The bcrypt hash itself may come from either AUTH_PASSWORD_BCRYPT or
+    AUTH_PASSWORD_BCRYPT_FILE — see test_compose_password_accepts_file_or_inline.)
     """
     compose_path = Path(__file__).parent.parent / "docker-compose.yml"
     compose_text = compose_path.read_text()
 
-    assert re.search(r"\$\{AUTH_USERNAME:?", compose_text), (
+    assert re.search(r"\$\{AUTH_USERNAME:\?", compose_text), (
         "docker-compose.yml must use ${AUTH_USERNAME:?...} (required-var syntax) "
         "so that missing auth causes an immediate compose error rather than a "
         "crash-loop inside the container."
     )
-    assert re.search(r"\$\{AUTH_PASSWORD_BCRYPT:?", compose_text), (
-        "docker-compose.yml must use ${AUTH_PASSWORD_BCRYPT:?...} (required-var syntax) "
-        "so that missing auth causes an immediate compose error rather than a "
-        "crash-loop inside the container."
-    )
+
+    username_lines = [
+        line for line in compose_text.splitlines() if re.match(r"\s+AUTH_USERNAME:", line)
+    ]
+    assert username_lines, "Expected an AUTH_USERNAME line in the compose file"
+    for line in username_lines:
+        assert ":-" not in line, (
+            f"AUTH_USERNAME must not use :- (optional default) syntax: {line!r}.  "
+            "Use :? so compose exits immediately when the toggle is unset."
+        )
 
 
-def test_compose_auth_vars_not_optional() -> None:
-    """Confirm that AUTH_USERNAME and AUTH_PASSWORD_BCRYPT do NOT use :- (optional/default)
-    syntax, which would silently pass an empty string to the container.
+def test_compose_password_accepts_file_or_inline() -> None:
+    """The bcrypt hash may be supplied inline (AUTH_PASSWORD_BCRYPT) or via a file
+    (AUTH_PASSWORD_BCRYPT_FILE).  Both must be passed through to the container, and
+    AUTH_PASSWORD_BCRYPT must NOT be :?-required — that would block the
+    file-based path.  The app's config validator enforces that at least one is
+    present when AUTH_USERNAME is set, preserving the no-silent-unauthenticated
+    guarantee.
     """
     compose_path = Path(__file__).parent.parent / "docker-compose.yml"
     compose_text = compose_path.read_text()
 
-    # Extract just the AUTH_ lines to check them specifically
-    auth_lines = [
-        line
-        for line in compose_text.splitlines()
-        if re.match(r"\s+AUTH_(USERNAME|PASSWORD_BCRYPT):", line)
-    ]
-    assert auth_lines, "Expected AUTH_USERNAME and AUTH_PASSWORD_BCRYPT lines in compose file"
-
-    for line in auth_lines:
-        assert ":-" not in line, (
-            f"Auth var line must not use :- (optional default) syntax: {line!r}.  "
-            "Use :? so compose exits immediately when the var is unset."
-        )
+    assert "AUTH_PASSWORD_BCRYPT:" in compose_text, "AUTH_PASSWORD_BCRYPT must be passed through"
+    assert "AUTH_PASSWORD_BCRYPT_FILE:" in compose_text, (
+        "AUTH_PASSWORD_BCRYPT_FILE must be passed through so the file-based hash works"
+    )
+    # AUTH_PASSWORD_BCRYPT must not use required-var (:?) syntax now that the file
+    # alternative exists.  (The negative lookahead avoids matching the _FILE var.)
+    assert not re.search(r"\$\{AUTH_PASSWORD_BCRYPT:\?", compose_text), (
+        "AUTH_PASSWORD_BCRYPT must not use :? (required) syntax now that "
+        "AUTH_PASSWORD_BCRYPT_FILE is a valid alternative; the app validates that "
+        "one of the two is set."
+    )
 
 
 def test_token_init_permissions(tmp_path: Path) -> None:

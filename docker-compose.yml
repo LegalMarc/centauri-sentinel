@@ -107,10 +107,17 @@ services:
       # --- Auth (required) ---
       # AUTH_USERNAME and AUTH_PASSWORD_BCRYPT are required: the sentinel binds on
       # 0.0.0.0 by default, so unauthenticated external exposure is refused at startup.
-      # Generate the bcrypt hash:
-      #   python3 -c "import bcrypt; print(bcrypt.hashpw(b'yourpassword', bcrypt.gensalt()).decode())"
+      # Generate the bcrypt hash with the built-in helper:
+      #   python -m sentinel hash-password
+      # Supply it via ONE of the two vars below (the app refuses to start with a
+      # username but no hash). AUTH_PASSWORD_BCRYPT_FILE is preferred: file
+      # contents are not interpolated, so the hash needs no `$$` escaping and
+      # stays out of `docker inspect`. To use it, mount the file, e.g.:
+      #   volumes:
+      #     - ./secrets/auth_hash:/run/secrets/auth_hash:ro
       AUTH_USERNAME: ${AUTH_USERNAME:?AUTH_USERNAME is required — see compose file header for setup instructions}
-      AUTH_PASSWORD_BCRYPT: ${AUTH_PASSWORD_BCRYPT:?AUTH_PASSWORD_BCRYPT is required — see compose file header for bcrypt generation instructions}
+      AUTH_PASSWORD_BCRYPT: ${AUTH_PASSWORD_BCRYPT:-}
+      AUTH_PASSWORD_BCRYPT_FILE: ${AUTH_PASSWORD_BCRYPT_FILE:-}
       AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-auto}
       # --- Web server ---
       BIND_HOST: ${BIND_HOST:-0.0.0.0}

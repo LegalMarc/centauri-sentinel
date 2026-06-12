@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import logging
 import sys
 
@@ -37,6 +38,30 @@ def main() -> None:
         help="Bind port (overrides BIND_PORT env var)",
     )
 
+    hash_parser = subparsers.add_parser(
+        "hash-password",
+        help="Generate a bcrypt hash for the dashboard password (AUTH_PASSWORD_BCRYPT)",
+    )
+    hash_parser.add_argument(
+        "--password",
+        default=None,
+        help=(
+            "Password to hash. Omit to be prompted securely. "
+            "WARNING: passing it here exposes it in your shell history / process list."
+        ),
+    )
+    hash_parser.add_argument(
+        "--file",
+        default=None,
+        help="Write the hash to this file (chmod 600) for use with AUTH_PASSWORD_BCRYPT_FILE",
+    )
+    hash_parser.add_argument(
+        "--rounds",
+        type=int,
+        default=12,
+        help="bcrypt cost factor (default: 12)",
+    )
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -45,6 +70,56 @@ def main() -> None:
 
     if args.command == "run":
         asyncio.run(_run(args))
+    elif args.command == "hash-password":
+        _hash_password(args)
+
+
+def _hash_password(args: argparse.Namespace) -> None:
+    """Generate a bcrypt hash for the dashboard password and print setup hints.
+
+    Removes the two friction points of configuring auth: generating the hash,
+    and the Docker Compose ``.env`` ``$``-escaping footgun.  With ``--file`` the
+    hash is written to a file (the recommended ``AUTH_PASSWORD_BCRYPT_FILE``
+    path, which needs no escaping); otherwise both the raw hash and a
+    pre-escaped ``.env`` line are printed.
+    """
+    import getpass
+
+    import bcrypt
+
+    password = args.password
+    if password is None:
+        password = getpass.getpass("Password: ")
+        if password != getpass.getpass("Confirm password: "):
+            print("Passwords do not match.", file=sys.stderr)
+            sys.exit(1)
+    if not password:
+        print("Password must not be empty.", file=sys.stderr)
+        sys.exit(1)
+
+    hashed = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt(rounds=args.rounds)).decode()
+
+    if args.file:
+        from pathlib import Path
+
+        path = Path(args.file)
+        path.write_text(hashed + "\n", encoding="utf-8")
+        with contextlib.suppress(OSError):
+            path.chmod(0o600)  # best-effort on filesystems without POSIX perms
+        print(f"Wrote bcrypt hash to {path}")
+        print(f"Now set  AUTH_PASSWORD_BCRYPT_FILE={path}  and mount the file into the container.")
+        return
+
+    escaped = hashed.replace("$", "$$")
+    print("bcrypt hash generated.\n")
+    print("Recommended — store it in a file (no escaping, hidden from `docker inspect`):")
+    print(f"    {hashed}")
+    print("  Save that to e.g. ./secrets/auth_hash, then set:")
+    print("    AUTH_PASSWORD_BCRYPT_FILE=/run/secrets/auth_hash")
+    print("  (tip: re-run with --file <path> to write the file for you)\n")
+    print("Alternative — inline in a Docker Compose .env / Coolify env var.")
+    print("  Compose interpolates `$`, so use this PRE-ESCAPED form:")
+    print(f"    AUTH_PASSWORD_BCRYPT={escaped}")
 
 
 async def _run(args: argparse.Namespace) -> None:

@@ -60,10 +60,12 @@ docker compose up -d --build
 The dashboard is at `http://<host-ip>:8000` once the `sentinel` service reports
 healthy (`docker compose ps`).
 
-> **If you enable auth:** when writing `AUTH_PASSWORD_BCRYPT` into `.env`, escape
-> every `$` as `$$` (e.g. `$$2b$$12$$…`). Docker Compose interpolates `$` in
-> `.env` values and will otherwise corrupt the hash, causing all logins to fail.
-> See [docs/docker-deploy.md](docs/docker-deploy.md#enabling-dashboard-auth-recommended-if-reachable-beyond-localhost).
+> **If you enable auth:** generate the password hash with
+> `python -m sentinel hash-password --file ./secrets/auth_hash` and point
+> `AUTH_PASSWORD_BCRYPT_FILE` at it — no `$`-escaping needed. (If you'd rather
+> inline `AUTH_PASSWORD_BCRYPT` in `.env`, you must double every `$` to `$$`;
+> the helper prints that pre-escaped form too.) See
+> [docs/docker-deploy.md](docs/docker-deploy.md#enable-dashboard-auth-recommended).
 
 ### Quick start (Coolify)
 
@@ -74,9 +76,11 @@ healthy (`docker compose ps`).
 
 The dashboard is at the URL Coolify assigns (e.g. `https://<uuid>.your-domain.com`).
 
-> **If you enable auth:** Coolify writes env vars into a generated `.env`, so the
-> same `$$`-escaping rule applies to `AUTH_PASSWORD_BCRYPT`. See the
-> [Coolify guide](docs/coolify-deploy.md) for details.
+> **If you enable auth:** Coolify writes env vars into a generated `.env`, so an
+> inline `AUTH_PASSWORD_BCRYPT` needs each `$` doubled to `$$`. Generate the
+> hash with `python -m sentinel hash-password` (it prints the pre-escaped form),
+> or mount a secret file and use `AUTH_PASSWORD_BCRYPT_FILE`. See the
+> [Coolify guide](docs/coolify-deploy.md#enabling-dashboard-auth--escape--as-) for details.
 
 ---
 
@@ -151,28 +155,38 @@ See [ntfy setup](#ntfy-setup) below.
 
 ### Dashboard auth (optional)
 
-Disabled if `AUTH_USERNAME` is unset.
+Disabled if `AUTH_USERNAME` is unset. When enabled, the dashboard presents an
+HTML login form (password-manager friendly); non-browser clients may still use
+HTTP Basic Auth.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `AUTH_USERNAME` | — | HTTP Basic Auth username |
-| `AUTH_PASSWORD_BCRYPT` | — | bcrypt hash of your password (required when `AUTH_USERNAME` is set) |
+| `AUTH_USERNAME` | — | Login username |
+| `AUTH_PASSWORD_BCRYPT_FILE` | — | **Preferred.** Path to a file containing the bcrypt hash. No `$`-escaping, and the hash stays out of `docker inspect`. Takes precedence over `AUTH_PASSWORD_BCRYPT` |
+| `AUTH_PASSWORD_BCRYPT` | — | bcrypt hash inline (required when `AUTH_USERNAME` is set and no file is given). **In a `.env` file you must escape every `$` as `$$`** |
 | `AUTH_COOKIE_SECURE` | `auto` | Session cookie `Secure` flag: `auto` (set when HTTPS detected), `always`, or `never` |
 
-Generate a bcrypt hash:
+**Generate the hash with the built-in helper** (prompts securely, no need to
+hand-write Python):
+
 ```sh
-python3 -c "import bcrypt; print(bcrypt.hashpw(b'yourpassword', bcrypt.gensalt()).decode())"
+# Write it straight to a file for AUTH_PASSWORD_BCRYPT_FILE (recommended):
+python -m sentinel hash-password --file ./secrets/auth_hash
+
+# Or print it — shows the raw hash AND a pre-escaped AUTH_PASSWORD_BCRYPT= line:
+python -m sentinel hash-password
 ```
 
-> **Note:** Plaintext `AUTH_PASSWORD` is no longer accepted. Use `AUTH_PASSWORD_BCRYPT` with a pre-computed hash.
+> **Why two options?** A bcrypt hash is full of `$` separators (`$2b$12$…`), and
+> Docker Compose interpolates `$` in `.env` values — so an inline hash gets
+> silently corrupted unless every `$` is doubled to `$$`, which manifests as
+> every login failing with "Invalid username or password." Using
+> `AUTH_PASSWORD_BCRYPT_FILE` sidesteps this entirely: file contents are not
+> interpolated. The `hash-password` helper prints the correctly-escaped inline
+> form if you prefer the env-var route.
 
-> **⚠️ `.env` escaping:** when placing the hash in a Docker Compose `.env` file
-> (including Coolify's generated env), double every `$` to `$$` (e.g.
-> `$$2b$$12$$…`). Compose interpolates `$` in `.env` values and will otherwise
-> corrupt the hash, causing all logins to fail. Generate the escaped form with:
-> ```sh
-> python3 -c "import bcrypt; print(bcrypt.hashpw(b'yourpassword', bcrypt.gensalt()).decode().replace('\$','\$\$'))"
-> ```
+> **Note:** Plaintext `AUTH_PASSWORD` is not accepted — it would be visible via
+> `docker inspect`. Use a bcrypt hash via either variable above.
 
 ### Web server
 
