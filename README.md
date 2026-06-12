@@ -39,11 +39,33 @@ history.
 
 ---
 
-## Quick start (Coolify)
+## Deployment
 
-See **[docs/coolify-deploy.md](docs/coolify-deploy.md)** for the step-by-step guide.
+centauri-sentinel runs as a three-service Docker Compose stack (`token-init`,
+`obico-ml`, `sentinel`). Pick whichever fits your setup:
 
-Short version:
+- **[Docker](#quick-start-docker)** — run it directly on any Docker host. Full guide: **[docs/docker-deploy.md](docs/docker-deploy.md)**.
+- **[Coolify](#quick-start-coolify)** — deploy via the Coolify PaaS UI. Full guide: **[docs/coolify-deploy.md](docs/coolify-deploy.md)**.
+
+### Quick start (Docker)
+
+```sh
+git clone https://github.com/LegalMarc/centauri-sentinel.git
+cd centauri-sentinel
+cp .env.example .env
+# edit .env: set PRINTER_IP and PRINTER_ACCESS_CODE
+docker compose up -d --build
+```
+
+The dashboard is at `http://<host-ip>:8000` once the `sentinel` service reports
+healthy (`docker compose ps`).
+
+> **If you enable auth:** when writing `AUTH_PASSWORD_BCRYPT` into `.env`, escape
+> every `$` as `$$` (e.g. `$$2b$$12$$…`). Docker Compose interpolates `$` in
+> `.env` values and will otherwise corrupt the hash, causing all logins to fail.
+> See [docs/docker-deploy.md](docs/docker-deploy.md#enabling-dashboard-auth-recommended-if-reachable-beyond-localhost).
+
+### Quick start (Coolify)
 
 1. In Coolify → **New Resource** → **Docker Compose** → paste this repo URL.
 2. Add env var `PRINTER_IP=<your printer's LAN IP>`.
@@ -51,6 +73,10 @@ Short version:
 4. Click **Deploy**. All three services become healthy in under 90 s.
 
 The dashboard is at the URL Coolify assigns (e.g. `https://<uuid>.your-domain.com`).
+
+> **If you enable auth:** Coolify writes env vars into a generated `.env`, so the
+> same `$$`-escaping rule applies to `AUTH_PASSWORD_BCRYPT`. See the
+> [Coolify guide](docs/coolify-deploy.md) for details.
 
 ---
 
@@ -139,6 +165,14 @@ python3 -c "import bcrypt; print(bcrypt.hashpw(b'yourpassword', bcrypt.gensalt()
 ```
 
 > **Note:** Plaintext `AUTH_PASSWORD` is no longer accepted. Use `AUTH_PASSWORD_BCRYPT` with a pre-computed hash.
+
+> **⚠️ `.env` escaping:** when placing the hash in a Docker Compose `.env` file
+> (including Coolify's generated env), double every `$` to `$$` (e.g.
+> `$$2b$$12$$…`). Compose interpolates `$` in `.env` values and will otherwise
+> corrupt the hash, causing all logins to fail. Generate the escaped form with:
+> ```sh
+> python3 -c "import bcrypt; print(bcrypt.hashpw(b'yourpassword', bcrypt.gensalt()).decode().replace('\$','\$\$'))"
+> ```
 
 ### Web server
 

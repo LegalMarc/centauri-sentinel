@@ -36,6 +36,33 @@ PRINTER_ACCESS_CODE=123456   # change to match your printer's access code
 Everything else has a safe default. See [README.md](../README.md#configuration-reference)
 for the full variable reference.
 
+### Enabling dashboard auth — escape `$` as `$$`
+
+To enable the login form, set `AUTH_USERNAME` and `AUTH_PASSWORD_BCRYPT` (a
+bcrypt hash of your password). Generate the hash:
+
+```sh
+python3 -c "import bcrypt; print(bcrypt.hashpw(b'yourpassword', bcrypt.gensalt()).decode())"
+```
+
+> **⚠️ Critical gotcha.** Coolify writes environment variables into a generated
+> `.env` file, and Docker Compose interpolates `$` in `.env` values. A bcrypt
+> hash is full of `$` separators (`$2b$12$…`), so a raw hash is **silently
+> corrupted** and every login fails with "Invalid username or password."
+>
+> Enter the value with each `$` doubled to `$$` in the Coolify env var field:
+>
+> ```
+> AUTH_USERNAME=admin
+> AUTH_PASSWORD_BCRYPT=$$2b$$12$$X5qE.czdChxBlEzJHYwZPe9jUkcv6uN9OVnwuJWxwz0xZwr91oN.2
+> ```
+>
+> Produce the escaped form directly:
+>
+> ```sh
+> python3 -c "import bcrypt; print(bcrypt.hashpw(b'yourpassword', bcrypt.gensalt()).decode().replace('\$','\$\$'))"
+> ```
+
 ## Re-deploying after a code change
 
 Coolify watches the branch for new commits. Either:
