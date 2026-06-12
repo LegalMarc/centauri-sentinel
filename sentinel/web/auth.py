@@ -32,6 +32,9 @@ import os
 import secrets
 import time
 from typing import TYPE_CHECKING
+from urllib.parse import parse_qs, quote
+from urllib.parse import urlparse as _urlparse
+from urllib.parse import urlsplit as _urlsplit_parse
 
 import bcrypt
 from starlette.responses import Response
@@ -47,6 +50,56 @@ _TTL = 3600  # 1 hour
 # Dummy bcrypt hash used when username is wrong so we always spend bcrypt time
 # regardless of whether the username exists (prevents timing oracle).
 _DUMMY_HASH = bcrypt.hashpw(b"__sentinel_dummy__", bcrypt.gensalt()).decode()
+
+_LOGIN_TEMPLATE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in — Centauri Sentinel</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+     background:#0f172a;color:#e2e8f0;min-height:100vh;
+     display:flex;align-items:center;justify-content:center}
+.card{background:#1e293b;border:1px solid #334155;border-radius:12px;
+      padding:2rem;width:100%;max-width:360px}
+h1{font-size:1.25rem;font-weight:600;margin-bottom:1.5rem;
+   text-align:center;color:#f1f5f9}
+label{display:block;font-size:.875rem;color:#94a3b8;margin-bottom:.375rem}
+input[type=text],input[type=password]{width:100%;padding:.625rem .75rem;
+  border:1px solid #475569;border-radius:6px;background:#0f172a;
+  color:#f1f5f9;font-size:.9375rem;outline:none;transition:border-color .15s}
+input:focus{border-color:#3b82f6}
+.field{margin-bottom:1rem}
+button{width:100%;padding:.625rem;background:#3b82f6;color:#fff;
+       border:none;border-radius:6px;font-size:.9375rem;font-weight:500;
+       cursor:pointer;margin-top:.5rem;transition:background .15s}
+button:hover{background:#2563eb}
+.error{background:#450a0a;border:1px solid #b91c1c;color:#fca5a5;
+       border-radius:6px;padding:.625rem .75rem;margin-bottom:1rem;
+       font-size:.875rem}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Centauri Sentinel</h1>
+  __ERROR_HTML__
+  <form method="post" action="/login">
+    <input type="hidden" name="next" value="__NEXT_URL__">
+    <div class="field">
+      <label for="u">Username</label>
+      <input type="text" id="u" name="username" autocomplete="username" autofocus required>
+    </div>
+    <div class="field">
+      <label for="p">Password</label>
+      <input type="password" id="p" name="password" autocomplete="current-password" required>
+    </div>
+    <button type="submit">Sign in</button>
+  </form>
+</div>
+</body>
+</html>"""
 
 
 def _resolve_client_ip(
@@ -87,6 +140,7 @@ class AuthMiddleware:
             return
 
         headers = dict(scope.get("headers", []))
+        user_agent = headers.get(b"user-agent", b"").decode()
 
         # Internal routes are always exempt — checked first, before host/CSRF
         # guards, so that the ML callback (Host: sentinel:8000) is never
@@ -101,9 +155,7 @@ class AuthMiddleware:
         # urlsplit correctly handles bracketed IPv6 literals like [::1]:8000,
         # returning hostname="::1" (brackets stripped, no port appended).
         # Plain hostnames and IPv4 addresses are unchanged.
-        from urllib.parse import urlsplit as _urlsplit
-
-        _split = _urlsplit(f"//{_raw_host}")
+        _split = _urlsplit_parse(f"//{_raw_host}")
         host_header: str = _split.hostname or _raw_host
 
         is_private_ip = False
@@ -129,14 +181,85 @@ class AuthMiddleware:
             await response(scope, receive, send)
             return
 
+        # /login is exempt from CSRF and auth checks (it IS the auth endpoint).
+        # DNS-rebinding protection above still applies.
+        if path == "/login":
+            method = scope.get("method", "")
+            if method == "GET":
+                qs = scope.get("query_string", b"").decode()
+                next_url = parse_qs(qs).get("next", ["/"])[0]
+                response = Response(
+                    content=self._login_page(next_url),
+                    media_type="text/html",
+                )
+                await response(scope, receive, send)
+                return
+            if method == "POST":
+                body = await self._read_body(receive)
+                form = parse_qs(body.decode("utf-8", errors="replace"))
+                username = form.get("username", [""])[0]
+                password = form.get("password", [""])[0]
+                raw_next = form.get("next", ["/"])[0]
+                safe_next = (
+                    raw_next
+                    if raw_next.startswith("/")
+                    and not raw_next.startswith("//")
+                    and "\\" not in raw_next
+                    else "/"
+                )
+
+                client_ip = _resolve_client_ip(scope, headers, self._settings.trust_proxies)
+                now = time.time()
+                attempts = [t for t in self._auth_attempts.get(client_ip, []) if now - t < 60]
+                if len(attempts) >= 10:
+                    self._auth_attempts[client_ip] = attempts
+                    self._auth_attempts.move_to_end(client_ip)
+                    response = Response(status_code=429, content="Too Many Requests")
+                    await response(scope, receive, send)
+                    return
+                attempts.append(now)
+                self._auth_attempts[client_ip] = attempts
+                self._auth_attempts.move_to_end(client_ip)
+                while len(self._auth_attempts) > 1000:
+                    self._auth_attempts.popitem(last=False)
+
+                if await self._check_credentials(username, password):
+                    cookie = self._make_cookie(user_agent)
+                    if self._auth_cookie_secure == "always":
+                        is_secure = True
+                    elif self._auth_cookie_secure == "never":
+                        is_secure = False
+                    else:
+                        headers_dict = {k.lower(): v for k, v in headers.items()}
+                        proto = headers_dict.get(b"x-forwarded-proto", b"").decode().lower()
+                        scheme = scope.get("scheme", "http").lower()
+                        is_secure = scheme == "https" or proto == "https"
+                    secure_flag = "; Secure" if is_secure else ""
+                    response = Response(
+                        status_code=302,
+                        headers={
+                            "Location": safe_next,
+                            "Set-Cookie": (
+                                f"{_COOKIE_NAME}={cookie}; Path=/; HttpOnly; "
+                                f"SameSite=Strict{secure_flag}; Max-Age={_TTL}"
+                            ),
+                        },
+                    )
+                else:
+                    await asyncio.sleep(0.5)
+                    response = Response(
+                        content=self._login_page(safe_next, error=True),
+                        media_type="text/html",
+                    )
+                await response(scope, receive, send)
+                return
+
         if scope.get("method") in ("POST", "PUT", "DELETE", "PATCH"):
             origin = headers.get(b"origin")
             host = headers.get(b"host", b"")
             if origin:
-                from urllib.parse import urlparse
-
                 try:
-                    parsed_origin = urlparse(origin.decode())
+                    parsed_origin = _urlparse(origin.decode())
                     origin_netloc = parsed_origin.netloc
                 except Exception:
                     origin_netloc = ""
@@ -148,9 +271,7 @@ class AuthMiddleware:
             else:
                 referer = headers.get(b"referer")
                 if referer and host:
-                    from urllib.parse import urlparse
-
-                    parsed = urlparse(referer.decode())
+                    parsed = _urlparse(referer.decode())
                     if parsed.netloc != host.decode():
                         response = Response(
                             status_code=403, content="CSRF Protection: Referer mismatch"
@@ -182,7 +303,6 @@ class AuthMiddleware:
             return
 
         cookie_header = headers.get(b"cookie", b"").decode()
-        user_agent = headers.get(b"user-agent", b"").decode()
 
         if self._valid_cookie(cookie_header, user_agent):
             await self._app(scope, receive, send)
@@ -254,12 +374,41 @@ class AuthMiddleware:
             else:
                 await asyncio.sleep(0.5)
 
-        response = Response(
-            status_code=401,
-            headers={"WWW-Authenticate": 'Basic realm="centauri-sentinel"'},
-            content="Unauthorized",
-        )
+        # Redirect browsers to the login form; return 401 for API clients.
+        accept = headers.get(b"accept", b"").decode()
+        if "text/html" in accept:
+            qs = scope.get("query_string", b"").decode()
+            next_val = f"{path}?{qs}" if qs else path
+            response = Response(
+                status_code=302,
+                headers={"Location": f"/login?next={quote(next_val, safe='/')}"},
+            )
+        else:
+            response = Response(
+                status_code=401,
+                headers={"WWW-Authenticate": 'Basic realm="centauri-sentinel"'},
+                content="Unauthorized",
+            )
         await response(scope, receive, send)
+
+    @staticmethod
+    def _login_page(next_url: str = "/", *, error: bool = False) -> str:
+        error_html = '<p class="error">Invalid username or password.</p>' if error else ""
+        return _LOGIN_TEMPLATE.replace("__ERROR_HTML__", error_html).replace(
+            "__NEXT_URL__", next_url.replace('"', "%22")
+        )
+
+    @staticmethod
+    async def _read_body(receive: Receive) -> bytes:
+        body = b""
+        while True:
+            message = await receive()
+            chunk = message.get("body")
+            if isinstance(chunk, bytes):
+                body += chunk
+            if not message.get("more_body", False):
+                break
+        return body
 
     async def _check_credentials(self, username: str, password: str) -> bool:
         # Constant-time username comparison prevents user-enumeration via timing.
