@@ -172,7 +172,7 @@ New env var added to PLAN.md §5:
 | Field | Value |
 |---|---|
 | Coolify version | 4.1.0 |
-| API base | `https://coolify.example.com/api/v1` |
+| API base | `https://<your-coolify-host>/api/v1` |
 | Auth | `Authorization: Bearer <api-key>` |
 | Create service | `POST /api/v1/services` with `docker_compose_raw` (base64) |
 | Start | `POST /api/v1/services/<uuid>/start` |

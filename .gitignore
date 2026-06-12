@@ -65,3 +65,6 @@ Icon\r
 # Project-internal prompt files
 INITIATION_PROMPT.md
 SYSTEM_PROMPT.md
+
+# Agent build transcripts (kept locally, never published)
+spike/*.jsonl
