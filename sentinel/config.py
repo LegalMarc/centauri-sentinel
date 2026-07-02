@@ -306,6 +306,22 @@ class Settings(BaseSettings):
             raise ValueError(msg)
         return v
 
+    @field_validator("detection_warmup_seconds")
+    @classmethod
+    def _validate_detection_warmup_seconds(cls, v: int) -> int:
+        if v < 0:
+            msg = "DETECTION_WARMUP_SECONDS must be at least 0"
+            raise ValueError(msg)
+        return v
+
+    @field_validator("watcher_stall_seconds")
+    @classmethod
+    def _validate_watcher_stall_seconds(cls, v: int) -> int:
+        if v < 0:
+            msg = "WATCHER_STALL_SECONDS must be at least 0"
+            raise ValueError(msg)
+        return v
+
     @field_validator("snapshot_cleanup_interval_seconds")
     @classmethod
     def _validate_snapshot_cleanup_interval(cls, v: int) -> int:

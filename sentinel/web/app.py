@@ -93,20 +93,6 @@ def create_app(
 
     app = FastAPI(title="centauri-sentinel", version=__version__)
 
-    @app.middleware("http")
-    async def add_csp_header(request: Request, call_next: Any) -> Response:
-        import secrets
-
-        nonce = secrets.token_urlsafe(16)
-        request.state.csp_nonce = nonce
-        response = cast("Response", await call_next(request))
-        response.headers["Content-Security-Policy"] = (
-            f"default-src 'self'; script-src 'self' 'nonce-{nonce}'; "
-            "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
-            "connect-src 'self'; frame-ancestors 'none';"
-        )
-        return response
-
     templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 
     router = make_router(
@@ -160,5 +146,31 @@ def create_app(
         return Response(content=jpeg, media_type="image/jpeg")
 
     app.add_middleware(AuthMiddleware, settings=settings, secret=auth_secret)
+
+    # Registered LAST so it ends up OUTERMOST: Starlette's add_middleware()
+    # prepends each new registration (user_middleware.insert(0, ...)), and
+    # build_middleware_stack() wraps them outside-in from that list, so the
+    # most-recently-registered middleware wraps everything registered before
+    # it. Adding CSP after AuthMiddleware/LimitUploadSizeMiddleware means
+    # every response — including ones AuthMiddleware or
+    # LimitUploadSizeMiddleware short-circuit without calling further into
+    # the app (the /login page, 401/403/429s, redirects, 413s) — still
+    # passes back out through this middleware on the way to the client and
+    # gets a Content-Security-Policy header. Registering it earlier (as an
+    # inner layer, closer to the router) would let those short-circuited
+    # responses skip it entirely.
+    @app.middleware("http")
+    async def add_csp_header(request: Request, call_next: Any) -> Response:
+        import secrets
+
+        nonce = secrets.token_urlsafe(16)
+        request.state.csp_nonce = nonce
+        response = cast("Response", await call_next(request))
+        response.headers["Content-Security-Policy"] = (
+            f"default-src 'self'; script-src 'self' 'nonce-{nonce}'; "
+            "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+            "connect-src 'self'; frame-ancestors 'none';"
+        )
+        return response
 
     return app

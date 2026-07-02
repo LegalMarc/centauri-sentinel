@@ -46,7 +46,9 @@ def test_settings_ntfy_enabled() -> None:
 
 
 def test_settings_auth_enabled() -> None:
-    s = Settings(printer_ip="10.0.0.1", auth_username="admin", auth_password_bcrypt="$2b$12$dummyhash")
+    s = Settings(
+        printer_ip="10.0.0.1", auth_username="admin", auth_password_bcrypt="$2b$12$dummyhash"
+    )
     assert s.auth_enabled
 
 
@@ -70,11 +72,23 @@ def test_sentinel_package_importable() -> None:
 
 
 def test_get_settings_cached() -> None:
-    # get_settings() is lru_cache'd — should return same object
-    # We can't test global cache without clearing it, so just test it doesn't raise
-    # when PRINTER_IP is unset (uses default)
-    s = Settings()
-    assert s.printer_ip == "192.168.1.10"  # default from config.py
+    # get_settings() is lru_cache'd: repeated calls must return the exact
+    # same object, and cache_clear() must force a fresh Settings() build.
+    from sentinel.config import get_settings
+
+    get_settings.cache_clear()
+    try:
+        s1 = get_settings()
+        s2 = get_settings()
+        assert s1 is s2  # cached — identity, not just equality
+
+        get_settings.cache_clear()
+        s3 = get_settings()
+        assert s3 is not s1  # cache_clear() forces re-construction
+        assert s3.printer_ip == "192.168.1.10"  # default from config.py
+    finally:
+        # Don't leak a populated cache into other tests.
+        get_settings.cache_clear()
 
 
 def test_internal_snapshot_endpoint_hit() -> None:

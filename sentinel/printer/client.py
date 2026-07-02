@@ -284,7 +284,11 @@ class PrinterClient:
         self._last_pause_at = now
         try:
             await self._with_retry(lambda: self._send_command({"method": 1001}))
-        except Exception:
+        except BaseException:
+            # BaseException (not Exception) so a mid-publish asyncio.CancelledError
+            # also rolls back the anchor — it's a BaseException in Python 3.8+, and
+            # skipping the rollback here would leave _last_pause_at set as though a
+            # pause were successfully published when nothing was actually sent.
             self._last_pause_at = 0.0
             raise
 
@@ -330,6 +334,11 @@ class PrinterClient:
         self._serial_number = None
         self._accumulated_data = {}
         self._last_update_time = 0.0
+        # A pending stop is an intent aimed at whatever printer we were just
+        # talking to. close()/reconfigure() means we're now talking to a
+        # (possibly different) printer at a (possibly different) address, so
+        # a stale stop intent must not carry over without fresh approval.
+        self._stop_pending = False
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -430,6 +439,29 @@ class PrinterClient:
 
                             content = payload.get("result") or payload.get("data") or {}
                             async with self._state_lock:
+                                # _deep_merge only adds/overwrites keys a push carries; it
+                                # never deletes keys a later push omits. When the print
+                                # transitions from active to inactive, fields like
+                                # filename/thumbnail from the finished job would otherwise
+                                # survive indefinitely into the new idle/next-job state.
+                                # Detect that transition via the modern-format
+                                # print_status.state and reset accumulation so it restarts
+                                # cleanly. Only trigger on an explicit new state (never on
+                                # a push that omits print_status.state) to keep this
+                                # narrowly scoped — not a clear on every push.
+                                new_print_state = content.get("print_status", {}).get("state")
+                                if new_print_state is not None:
+                                    prev_print_state = (
+                                        self._accumulated_data.get("result", {})
+                                        .get("print_status", {})
+                                        .get("state")
+                                    )
+                                    was_active = prev_print_state in ("printing", "paused")
+                                    now_active = new_print_state in ("printing", "paused")
+                                    if was_active and not now_active:
+                                        self._accumulated_data["result"] = {}
+                                        self._accumulated_data["data"] = {}
+
                                 if "result" not in self._accumulated_data:
                                     self._accumulated_data["result"] = {}
                                 if "data" not in self._accumulated_data:
@@ -464,7 +496,7 @@ class PrinterClient:
                 PrinterTimeoutError,
                 ValueError,
             ) as exc:
-                code = getattr(exc, "code", None)
+                code = getattr(exc, "rc", None)
                 if isinstance(exc, aiomqtt.MqttCodeError) and code in (4, 5):
                     logger.critical("MQTT permanent authentication failure: %s", exc)
                     raise
@@ -481,6 +513,12 @@ class PrinterClient:
         known (i.e. no status message has been received since startup or last
         close/reconfigure).  Publishing to a guessed topic would be a silent
         no-op because the printer only subscribes to its own serial-keyed topic.
+
+        The serial is re-checked again right before the topic is built,
+        after IP resolution and the MQTT connect handshake have both
+        awaited: a concurrent close()/reconfigure() can null it out in that
+        window, and publishing under the stale value would silently target
+        a topic nobody subscribes to.
         """
         if self._serial_number is None:
             raise PrinterProtocolError(
@@ -498,6 +536,11 @@ class PrinterClient:
                     identifier=client_id,
                     keepalive=60,
                 ) as client:
+                    if self._serial_number is None:
+                        raise PrinterProtocolError(
+                            "serial became unknown mid-connect (printer was "
+                            "closed/reconfigured); aborting command publish"
+                        )
                     topic = f"elegoo/{self._serial_number}/{self._client_id}/api_request"
                     await client.publish(topic, json.dumps(msg))
         except TimeoutError as exc:

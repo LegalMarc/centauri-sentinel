@@ -13,7 +13,7 @@ import httpx
 import pytest
 
 from sentinel.camera.errors import CameraOfflineError, CameraReadError
-from sentinel.camera.mjpeg import MjpegGrabber, _extract_jpeg
+from sentinel.camera.mjpeg import MjpegGrabber, _extract_jpeg, _format_host_for_url
 from sentinel.config import Settings
 
 _SETTINGS = Settings(printer_ip="10.0.0.1", printer_access_code="test")
@@ -45,6 +45,23 @@ def test_extract_jpeg_trims_leading_garbage() -> None:
     assert frame is not None
     assert frame.startswith(b"\xff\xd8")
     assert frame.endswith(b"\xff\xd9")
+
+
+# ---------------------------------------------------------------------------
+# _format_host_for_url unit tests
+# ---------------------------------------------------------------------------
+
+
+def test_format_host_for_url_brackets_ipv6() -> None:
+    assert _format_host_for_url("fd00::1234") == "[fd00::1234]"
+
+
+def test_format_host_for_url_leaves_ipv4_unchanged() -> None:
+    assert _format_host_for_url("192.168.1.10") == "192.168.1.10"
+
+
+def test_format_host_for_url_leaves_hostname_unchanged() -> None:
+    assert _format_host_for_url("printer.local") == "printer.local"
 
 
 # ---------------------------------------------------------------------------
@@ -464,3 +481,170 @@ async def test_close_full_queue_delivers_sentinel() -> None:
     assert any(isinstance(item, CameraClosedError) for item in items), (
         f"CameraClosedError not found in queue items: {items}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Regression: buffer-overflow CameraReadError must count toward the offline
+# threshold (previously it bypassed the except clause that bumps
+# _consecutive_failures, so is_connected stayed True forever).
+# ---------------------------------------------------------------------------
+
+
+async def test_grab_buffer_overflow_increments_consecutive_failures() -> None:
+    chunks = [b"a" * 8192] * 1350
+    resp = _make_stream_response(chunks)
+    mock_client = _make_httpx_client(resp)
+
+    with patch("sentinel.camera.mjpeg.httpx.AsyncClient", return_value=mock_client):
+        grabber = MjpegGrabber(_SETTINGS)
+        with pytest.raises(CameraReadError) as exc_info:
+            await grabber.grab()
+        assert "limit exceeded" in str(exc_info.value)
+
+    assert grabber._consecutive_failures == 1
+
+
+async def test_grab_buffer_overflow_reaches_offline_after_threshold() -> None:
+    chunks = [b"a" * 8192] * 1350
+    resp = _make_stream_response(chunks)
+    mock_client = _make_httpx_client(resp)
+
+    with patch("sentinel.camera.mjpeg.httpx.AsyncClient", return_value=mock_client):
+        grabber = MjpegGrabber(_SETTINGS)
+        grabber._consecutive_failures = 2  # one more buffer-overflow hits the threshold
+
+        with pytest.raises(CameraOfflineError):
+            await grabber.grab()
+
+    assert grabber.is_connected is False
+
+
+# ---------------------------------------------------------------------------
+# Regression: stream_proxy() restarting a dead broadcaster must clear stale
+# _latest_frame/_latest_exception, mirroring grab() — otherwise a concurrent
+# grab() could observe a stale exception left over from the dead task.
+# ---------------------------------------------------------------------------
+
+
+async def test_stream_proxy_clears_stale_state_before_restarting_broadcaster() -> None:
+    import asyncio
+
+    resp = _make_stream_response([])  # no frames; idle-but-connected, like a live stream
+    mock_client = _make_httpx_client(resp)
+
+    with patch("sentinel.camera.mjpeg.httpx.AsyncClient", return_value=mock_client):
+        grabber = MjpegGrabber(_SETTINGS)
+
+        async def _dead() -> None:
+            return None
+
+        dead_task = asyncio.create_task(_dead())
+        await dead_task
+        assert dead_task.done()
+
+        grabber._broadcaster_task = dead_task
+        grabber._latest_exception = CameraOfflineError("stale from previous dead task")
+        grabber._latest_frame = b"stale frame"
+
+        agen = grabber.stream_proxy()
+        anext_task = asyncio.create_task(agen.__anext__())
+        # Let stream_proxy() run its synchronous restart-and-clear logic and
+        # suspend on its (empty) queue wait.
+        await asyncio.sleep(0.1)
+
+        assert grabber._latest_exception is None
+        assert grabber._latest_frame is None
+
+        anext_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await anext_task
+
+
+# ---------------------------------------------------------------------------
+# Regression: close() racing with grab()'s wait loop (setting
+# self._broadcaster_task = None between polling iterations) must not raise an
+# unhandled AttributeError.
+# ---------------------------------------------------------------------------
+
+
+async def test_grab_survives_concurrent_close_during_wait_loop() -> None:
+    import asyncio
+
+    resp = _make_stream_response([])  # never produces a frame within this test
+    mock_client = _make_httpx_client_with_aclose(resp)
+
+    with patch("sentinel.camera.mjpeg.httpx.AsyncClient", return_value=mock_client):
+        grabber = MjpegGrabber(_SETTINGS)
+        grab_task = asyncio.create_task(grabber.grab())
+        await asyncio.sleep(0.15)  # let grab() start polling in its wait loop
+        assert grabber._broadcaster_task is not None
+
+        await grabber.close()  # concurrently clears self._broadcaster_task mid-poll
+
+        # Must raise a typed camera exception, not AttributeError.
+        with pytest.raises(CameraReadError):
+            await grab_task
+
+
+# ---------------------------------------------------------------------------
+# Regression: several complete JPEG frames arriving back-to-back in a single
+# chunk must all reach a keeping-up listener — _broadcast_loop must yield to
+# the event loop between frames so the maxsize=2 queue's "drop oldest" logic
+# doesn't evict frames purely due to scheduling starvation.
+# ---------------------------------------------------------------------------
+
+
+async def test_stream_proxy_burst_of_frames_all_delivered() -> None:
+    import asyncio
+
+    def _tagged_jpeg(tag: int) -> bytes:
+        return b"\xff\xd8\xff\xe0" + bytes([tag]) + b"\xff\xd9"
+
+    frames = [_tagged_jpeg(i) for i in range(5)]
+    burst_chunk = b"".join(frames)
+
+    resp = _make_stream_response([burst_chunk])
+    mock_client = _make_httpx_client(resp)
+
+    frames_captured: list[bytes] = []
+
+    with patch("sentinel.camera.mjpeg.httpx.AsyncClient", return_value=mock_client):
+        grabber = MjpegGrabber(_SETTINGS)
+
+        async def _consume() -> None:
+            async for frame in grabber.stream_proxy():
+                frames_captured.append(frame)
+                if len(frames_captured) == len(frames):
+                    break
+
+        await asyncio.wait_for(_consume(), timeout=2.0)
+
+    assert frames_captured == frames
+
+
+# ---------------------------------------------------------------------------
+# Regression: IPv6 printer_ip must be bracketed everywhere a URL is built, so
+# a literal IPv6 address doesn't get mis-parsed by urlparse.
+# ---------------------------------------------------------------------------
+
+
+def test_init_brackets_ipv6_printer_ip() -> None:
+    settings = Settings(printer_ip="fd00::1234", printer_access_code="test")
+    grabber = MjpegGrabber(settings)
+    assert grabber._url == "http://[fd00::1234]:8080/mjpeg"
+
+
+async def test_stream_proxy_internal_brackets_resolved_ipv6() -> None:
+    """The netloc rebuilt after resolve_and_validate_printer_ip() must also be
+    bracketed, or the fetch URL is unparseable/wrong for an IPv6 printer."""
+    settings = Settings(printer_ip="fd00::1234", printer_access_code="test")
+    resp = _make_stream_response([_JPEG])
+    mock_client = _make_httpx_client(resp)
+
+    with patch("sentinel.camera.mjpeg.httpx.AsyncClient", return_value=mock_client):
+        grabber = MjpegGrabber(settings)
+        frame = await grabber.grab()
+
+    assert frame == _JPEG
+    fetched_url = mock_client.stream.call_args.args[1]
+    assert fetched_url == "http://[fd00::1234]:8080/mjpeg"

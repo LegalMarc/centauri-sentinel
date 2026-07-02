@@ -6,7 +6,9 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING, Any, Protocol
 
+import httpx
 import tenacity
+from telegram.error import NetworkError
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
@@ -46,8 +48,9 @@ class NotificationDispatcher:
         self._notifiers = notifiers
         self._tasks: dict[asyncio.Task[None], bool] = {}
         # Keep track of active failures per channel
-        # Format: {channel_name: last_failed_snapshot_id}
-        self.failed_channels: dict[str, str] = {}
+        # Format: {channel_name: last_failed_snapshot_id}, where the snapshot id
+        # is None for alert types that never carry one (e.g. stall/text alerts).
+        self.failed_channels: dict[str, str | None] = {}
 
     def _fire_and_forget(self, coro: Coroutine[Any, Any, None], critical: bool = False) -> None:
         """Schedule a coroutine in the background, keeping a strong reference."""
@@ -98,7 +101,13 @@ class NotificationDispatcher:
                     wait=tenacity.wait_exponential(multiplier=0.5, min=0.5, max=60.0),
                     stop=tenacity.stop_after_attempt(5),
                     retry=tenacity.retry_if_exception_type(
-                        (OSError, TimeoutError, ConnectionError)
+                        (
+                            OSError,
+                            TimeoutError,
+                            ConnectionError,
+                            httpx.TransportError,
+                            NetworkError,
+                        )
                     ),
                     before_sleep=tenacity.before_sleep_log(logger, logging.WARNING),
                 )
@@ -110,12 +119,10 @@ class NotificationDispatcher:
                     self.failed_channels.pop(channel_name, None)
                 except Exception:
                     logger.exception("Persistent notification alert failed completely")
-                    if snapshot_id:
-                        self.failed_channels[channel_name] = snapshot_id
+                    self.failed_channels[channel_name] = snapshot_id
         except TimeoutError:
             logger.error("Notification task timed out after 90 seconds")
-            if snapshot_id:
-                self.failed_channels[channel_name] = snapshot_id
+            self.failed_channels[channel_name] = snapshot_id
 
     def dispatch_detection(
         self, score: float, snapshot_id: str | None = None, jpeg: bytes | None = None

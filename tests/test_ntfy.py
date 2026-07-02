@@ -31,10 +31,11 @@ def _enabled_settings(*, token: str | None = None) -> Settings:
 
 def _make_http_client(status_code: int = 200) -> MagicMock:
     resp = MagicMock()
+    resp.status_code = status_code
     resp.raise_for_status = MagicMock()
     if status_code >= 400:
         resp.raise_for_status.side_effect = httpx.HTTPStatusError(
-            "error", request=MagicMock(), response=MagicMock()
+            "error", request=MagicMock(), response=resp
         )
 
     client = MagicMock()
@@ -178,6 +179,29 @@ async def test_retry_exhausted_reraises() -> None:
             await notifier.send_detection_alert(0.5)
 
 
+@pytest.mark.parametrize("status_code", [400, 401])
+async def test_no_retry_on_4xx_status_error(status_code: int) -> None:
+    """Permanent client errors (invalid/revoked token, bad request, ...) must not be retried."""
+    mock_client = _make_http_client(status_code=status_code)
+    with patch("sentinel.notify.ntfy.httpx.AsyncClient", return_value=mock_client):
+        notifier = NtfyNotifier(_enabled_settings())
+        with pytest.raises(httpx.HTTPStatusError):
+            await notifier.send_detection_alert(0.5)
+
+    assert mock_client.post.call_count == 1
+
+
+async def test_retry_on_5xx_status_error() -> None:
+    """Transient server errors should still be retried up to _RETRIES attempts."""
+    mock_client = _make_http_client(status_code=500)
+    with patch("sentinel.notify.ntfy.httpx.AsyncClient", return_value=mock_client):
+        notifier = NtfyNotifier(_enabled_settings())
+        with pytest.raises(httpx.HTTPStatusError):
+            await notifier.send_detection_alert(0.5)
+
+    assert mock_client.post.call_count == 3
+
+
 async def test_detection_alert_with_photo_uploads() -> None:
     mock_client = _make_http_client()
     with patch("sentinel.notify.ntfy.httpx.AsyncClient", return_value=mock_client):
@@ -243,7 +267,9 @@ async def test_detection_alert_disk_read_failure(tmp_path: Any) -> None:
 
 
 async def test_send_text_calls_post() -> None:
-    settings = Settings(printer_ip="10.0.0.1", ntfy_url="https://my-ntfy.local/test", ntfy_send_snapshots=True)
+    settings = Settings(
+        printer_ip="10.0.0.1", ntfy_url="https://my-ntfy.local/test", ntfy_send_snapshots=True
+    )
     mock_client = _make_http_client()
     with patch("sentinel.notify.ntfy.httpx.AsyncClient", return_value=mock_client):
         notifier = NtfyNotifier(settings)
@@ -253,7 +279,9 @@ async def test_send_text_calls_post() -> None:
 
 
 async def test_send_print_started_alert() -> None:
-    settings = Settings(printer_ip="10.0.0.1", ntfy_url="https://my-ntfy.local/test", ntfy_send_snapshots=True)
+    settings = Settings(
+        printer_ip="10.0.0.1", ntfy_url="https://my-ntfy.local/test", ntfy_send_snapshots=True
+    )
     mock_client = _make_http_client()
     with patch("sentinel.notify.ntfy.httpx.AsyncClient", return_value=mock_client):
         notifier = NtfyNotifier(settings)
@@ -262,7 +290,9 @@ async def test_send_print_started_alert() -> None:
 
 
 async def test_send_print_completed_alert() -> None:
-    settings = Settings(printer_ip="10.0.0.1", ntfy_url="https://my-ntfy.local/test", ntfy_send_snapshots=True)
+    settings = Settings(
+        printer_ip="10.0.0.1", ntfy_url="https://my-ntfy.local/test", ntfy_send_snapshots=True
+    )
     mock_client = _make_http_client()
     with patch("sentinel.notify.ntfy.httpx.AsyncClient", return_value=mock_client):
         notifier = NtfyNotifier(settings)
@@ -271,7 +301,9 @@ async def test_send_print_completed_alert() -> None:
 
 
 async def test_send_external_pause_alert() -> None:
-    settings = Settings(printer_ip="10.0.0.1", ntfy_url="https://my-ntfy.local/test", ntfy_send_snapshots=True)
+    settings = Settings(
+        printer_ip="10.0.0.1", ntfy_url="https://my-ntfy.local/test", ntfy_send_snapshots=True
+    )
     mock_client = _make_http_client()
     with patch("sentinel.notify.ntfy.httpx.AsyncClient", return_value=mock_client):
         notifier = NtfyNotifier(settings)
@@ -282,7 +314,9 @@ async def test_send_external_pause_alert() -> None:
 async def test_ntfy_rfc2047_header_encoding() -> None:
     import base64
 
-    settings = Settings(printer_ip="10.0.0.1", ntfy_url="https://my-ntfy.local/test", ntfy_send_snapshots=True)
+    settings = Settings(
+        printer_ip="10.0.0.1", ntfy_url="https://my-ntfy.local/test", ntfy_send_snapshots=True
+    )
     mock_client = _make_http_client()
 
     with patch("sentinel.notify.ntfy.httpx.AsyncClient", return_value=mock_client):
@@ -307,7 +341,9 @@ async def test_ntfy_rfc2047_header_encoding() -> None:
 
 
 async def test_ntfy_no_encoding_for_pure_ascii() -> None:
-    settings = Settings(printer_ip="10.0.0.1", ntfy_url="https://my-ntfy.local/test", ntfy_send_snapshots=True)
+    settings = Settings(
+        printer_ip="10.0.0.1", ntfy_url="https://my-ntfy.local/test", ntfy_send_snapshots=True
+    )
     mock_client = _make_http_client()
 
     with patch("sentinel.notify.ntfy.httpx.AsyncClient", return_value=mock_client):

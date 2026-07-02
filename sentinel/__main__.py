@@ -190,113 +190,121 @@ async def _run(args: argparse.Namespace) -> None:
     db = Database(settings.db_path)
     await db.connect()
 
-    # Persist auth cookie secret across restarts so sessions survive reloads.
-    auth_secret = await db.get_auth_secret()
-    if auth_secret is None:
-        auth_secret = os.urandom(32)
-        await db.set_auth_secret(auth_secret)
-
-    # Initialise detection_enabled on first run; preserve the operator's
-    # intent on subsequent starts by reading from DB rather than config.
-    if await db.get_setting("detection_enabled") is None:
-        await db.set_setting(
-            "detection_enabled",
-            "true" if settings.detection_enabled_default else "false",
-        )
-
-    db_printer_ip = await db.get_setting("printer_ip")
-    if db_printer_ip:
-        from sentinel.network import validate_printer_ip
-
-        try:
-            settings.printer_ip = validate_printer_ip(db_printer_ip)
-        except ValueError as exc:
-            logger.error("Stored printer_ip failed SSRF validation: %s", exc)
-            # fallback to the config default
-            pass
-
-    camera = MjpegGrabber(settings)
-    printer = PrinterClient(settings)
-    ml = MlClient(settings)
-
-    import secrets
-
-    internal_token = secrets.token_urlsafe(32)
-    ml.internal_token = internal_token
-
-    notifiers: list[Notifier] = []
-    telegram: TelegramNotifier | None = None
-    if settings.telegram_enabled:
-        try:
-            telegram = TelegramNotifier(settings)
-            notifiers.append(telegram)
-        except ValueError:
-            raise  # configuration error (e.g. empty TELEGRAM_USER_IDS) — abort startup
-        except Exception:
-            logger.exception("Telegram notifier failed to initialise — notifications disabled")
-    if settings.ntfy_enabled:
-        notifiers.append(NtfyNotifier(settings))
-
-    dispatcher = NotificationDispatcher(notifiers)
-
-    watcher = WatcherLoop(settings, printer, camera, ml, db, dispatcher)
-
-    app = create_app(
-        settings,
-        db=db,
-        watcher=watcher,
-        camera=camera,
-        auth_secret=auth_secret,
-        internal_token=internal_token,
-    )
-
-    config = uvicorn.Config(app, host=host, port=port, log_level=settings.log_level.lower())
-    server = uvicorn.Server(config)
-
-    bot: BotRunner | None = None
-    if telegram is not None:
-        handler = BotCommandHandler(settings, printer, camera, db, watcher, telegram)
-        bot = BotRunner(settings, handler, dispatcher)
-        app.state.bot = bot
-        await bot.start()
-
-    watcher_task: asyncio.Task[None] = asyncio.create_task(watcher.run_forever(), name="watcher")
-    server_task: asyncio.Task[None] = asyncio.create_task(server.serve(), name="server")
-    app.state.watcher_task = watcher_task
-
+    # Everything from here on is wrapped in try/finally so that db.checkpoint()
+    # and db.close() always run on the way out — including when notifier or ML
+    # client construction below raises (e.g. ValueError for a misconfigured
+    # ntfy/Telegram/ML URL), which previously aborted startup before the
+    # (former, narrower) try/finally around the run loop was ever entered.
     try:
-        done, pending = await asyncio.wait(
-            [watcher_task, server_task],
-            return_when=asyncio.FIRST_COMPLETED,
+        # Persist auth cookie secret across restarts so sessions survive reloads.
+        auth_secret = await db.get_auth_secret()
+        if auth_secret is None:
+            auth_secret = os.urandom(32)
+            await db.set_auth_secret(auth_secret)
+
+        # Initialise detection_enabled on first run; preserve the operator's
+        # intent on subsequent starts by reading from DB rather than config.
+        if await db.get_setting("detection_enabled") is None:
+            await db.set_setting(
+                "detection_enabled",
+                "true" if settings.detection_enabled_default else "false",
+            )
+
+        db_printer_ip = await db.get_setting("printer_ip")
+        if db_printer_ip:
+            from sentinel.network import validate_printer_ip
+
+            try:
+                settings.printer_ip = validate_printer_ip(db_printer_ip)
+            except ValueError as exc:
+                logger.error("Stored printer_ip failed SSRF validation: %s", exc)
+                # fallback to the config default
+                pass
+
+        camera = MjpegGrabber(settings)
+        printer = PrinterClient(settings)
+        ml = MlClient(settings)
+
+        import secrets
+
+        internal_token = secrets.token_urlsafe(32)
+        ml.internal_token = internal_token
+
+        notifiers: list[Notifier] = []
+        telegram: TelegramNotifier | None = None
+        if settings.telegram_enabled:
+            try:
+                telegram = TelegramNotifier(settings)
+                notifiers.append(telegram)
+            except ValueError:
+                raise  # configuration error (e.g. empty TELEGRAM_USER_IDS) — abort startup
+            except Exception:
+                logger.exception("Telegram notifier failed to initialise — notifications disabled")
+        if settings.ntfy_enabled:
+            notifiers.append(NtfyNotifier(settings))
+
+        dispatcher = NotificationDispatcher(notifiers)
+
+        watcher = WatcherLoop(settings, printer, camera, ml, db, dispatcher)
+
+        app = create_app(
+            settings,
+            db=db,
+            watcher=watcher,
+            camera=camera,
+            auth_secret=auth_secret,
+            internal_token=internal_token,
         )
-        for task in pending:
-            task.cancel()
-        for task in done:
-            task.result()
+
+        config = uvicorn.Config(app, host=host, port=port, log_level=settings.log_level.lower())
+        server = uvicorn.Server(config)
+
+        bot: BotRunner | None = None
+        if telegram is not None:
+            handler = BotCommandHandler(settings, printer, camera, db, watcher, telegram)
+            bot = BotRunner(settings, handler, dispatcher)
+            app.state.bot = bot
+            await bot.start()
+
+        watcher_task: asyncio.Task[None] = asyncio.create_task(
+            watcher.run_forever(), name="watcher"
+        )
+        server_task: asyncio.Task[None] = asyncio.create_task(server.serve(), name="server")
+        app.state.watcher_task = watcher_task
+
+        try:
+            done, pending = await asyncio.wait(
+                [watcher_task, server_task],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+            for task in done:
+                task.result()
+        finally:
+            watcher_task.cancel()
+            server_task.cancel()
+            await asyncio.gather(watcher_task, server_task, return_exceptions=True)
+            if bot is not None:
+                await bot.stop()
+            # Clean up client resources concurrently to avoid slow shutdown
+            cleanup_tasks = []
+            if hasattr(printer, "close"):
+                cleanup_tasks.append(printer.close())
+            if hasattr(ml, "close"):
+                cleanup_tasks.append(ml.close())
+            if hasattr(camera, "close"):
+                cleanup_tasks.append(camera.close())
+            for notifier in notifiers:
+                if hasattr(notifier, "close"):
+                    cleanup_tasks.append(notifier.close())
+
+            if cleanup_tasks:
+                results = await asyncio.gather(*cleanup_tasks, return_exceptions=True)
+                for res in results:
+                    if isinstance(res, Exception):
+                        logger.exception("Failed to close a resource cleanly: %s", res)
     finally:
-        watcher_task.cancel()
-        server_task.cancel()
-        await asyncio.gather(watcher_task, server_task, return_exceptions=True)
-        if bot is not None:
-            await bot.stop()
-        # Clean up client resources concurrently to avoid slow shutdown
-        cleanup_tasks = []
-        if hasattr(printer, "close"):
-            cleanup_tasks.append(printer.close())
-        if hasattr(ml, "close"):
-            cleanup_tasks.append(ml.close())
-        if hasattr(camera, "close"):
-            cleanup_tasks.append(camera.close())
-        for notifier in notifiers:
-            if hasattr(notifier, "close"):
-                cleanup_tasks.append(notifier.close())
-
-        if cleanup_tasks:
-            results = await asyncio.gather(*cleanup_tasks, return_exceptions=True)
-            for res in results:
-                if isinstance(res, Exception):
-                    logger.exception("Failed to close a resource cleanly: %s", res)
-
         await db.checkpoint()
         await db.close()
 

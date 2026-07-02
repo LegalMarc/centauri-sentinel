@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING, Any
 
 from telegram import KeyboardButton, ReplyKeyboardMarkup
 
+from sentinel.watcher.state import WatcherState
+
 _TUI_KEYBOARD = ReplyKeyboardMarkup(
     [
         [KeyboardButton("📊 Status"), KeyboardButton("📸 Snapshot")],
@@ -278,7 +280,7 @@ class BotCommandHandler:
             )
             await update.message.reply_text(
                 "Pause request suppressed — a pause was already sent recently. "
-                "If the printer is still running, it will be retried automatically.",
+                "If the printer is still printing, please try /pause again in a moment.",
                 reply_markup=_TUI_KEYBOARD,
             )
             return
@@ -301,10 +303,9 @@ class BotCommandHandler:
         assert update.message is not None
         try:
             await self._printer.resume()
-            from sentinel.watcher.state import WatcherState
-
-            if self._watcher.state == WatcherState.PAUSED:
-                self._watcher.state = WatcherState.ARMED
+            await self._watcher.external_transition(
+                WatcherState.ARMED, from_states=(WatcherState.PAUSED, WatcherState.STALLED)
+            )
             await self._watcher.get_fresh_status(force=True)
             await update.message.reply_text("Print resumed.", reply_markup=_TUI_KEYBOARD)
         except Exception:
@@ -411,10 +412,10 @@ class BotCommandHandler:
         if data == "resume":
             try:
                 await self._printer.resume()
-                from sentinel.watcher.state import WatcherState
-
-                if self._watcher.state == WatcherState.PAUSED:
-                    self._watcher.state = WatcherState.ARMED
+                await self._watcher.external_transition(
+                    WatcherState.ARMED, from_states=(WatcherState.PAUSED, WatcherState.STALLED)
+                )
+                await self._watcher.get_fresh_status(force=True)
                 await self._edit_text_or_caption(cq, "Print resumed.")
             except Exception:
                 logger.exception("Resume failed via inline keyboard")
@@ -465,6 +466,7 @@ class BotCommandHandler:
             self._pending_stops.pop(user.id)
             try:
                 await self._printer.stop()
+                await self._watcher.get_fresh_status(force=True)
                 await self._edit_text_or_caption(cq, "Print cancelled.")
             except Exception:
                 logger.exception("Stop failed via inline confirm")

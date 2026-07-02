@@ -103,6 +103,19 @@ def mock_watcher() -> MagicMock:
         return w.last_printer_status
 
     w.get_fresh_status = get_fresh_status
+
+    async def external_transition(
+        new_state: WatcherState, *, from_states: tuple[WatcherState, ...]
+    ) -> bool:
+        # Mirrors WatcherLoop.external_transition()'s check-and-set semantics
+        # so routes.py's call site behaves the same against this fake as it
+        # would against the real watcher.
+        if w.state in from_states:
+            w.state = new_state
+            return True
+        return False
+
+    w.external_transition = external_transition
     return w
 
 
@@ -1057,6 +1070,49 @@ async def test_stream_returns_multipart(mock_db: AsyncMock, mock_watcher: MagicM
     assert "multipart/x-mixed-replace" in r.headers["content-type"]
 
 
+async def test_stream_max_concurrent_ends_cleanly(
+    mock_db: AsyncMock, mock_watcher: MagicMock
+) -> None:
+    """CameraReadError (e.g. camera_max_streams exceeded — "Max concurrent
+    stream proxies reached") is raised by stream_proxy() *after* the 200/
+    multipart headers are already sent. It must be caught so the response
+    ends cleanly instead of propagating as an unhandled exception.
+    """
+    from sentinel.camera.errors import CameraReadError
+
+    async def _gen() -> object:
+        raise CameraReadError("Max concurrent stream proxies reached")
+        yield b""  # pragma: no cover - unreachable; keeps this an async generator
+
+    cam = AsyncMock()
+    cam.stream_proxy = _gen
+    stream_app = create_app(_base_settings(), db=mock_db, watcher=mock_watcher, camera=cam)
+    async with _client(stream_app) as c:
+        r = await c.get("/stream")
+    assert r.status_code == 200
+    assert r.content == b""
+
+
+async def test_stream_camera_offline_ends_cleanly(
+    mock_db: AsyncMock, mock_watcher: MagicMock
+) -> None:
+    """CameraOfflineError raised mid-stream must also be caught so the
+    response ends cleanly, same as CameraClosedError/CameraReadError."""
+    from sentinel.camera.errors import CameraOfflineError
+
+    async def _gen() -> object:
+        raise CameraOfflineError("camera offline")
+        yield b""  # pragma: no cover - unreachable; keeps this an async generator
+
+    cam = AsyncMock()
+    cam.stream_proxy = _gen
+    stream_app = create_app(_base_settings(), db=mock_db, watcher=mock_watcher, camera=cam)
+    async with _client(stream_app) as c:
+        r = await c.get("/stream")
+    assert r.status_code == 200
+    assert r.content == b""
+
+
 # ---------------------------------------------------------------------------
 # _age_seconds — invalid timestamp → None
 # ---------------------------------------------------------------------------
@@ -1231,7 +1287,70 @@ async def test_printer_api_endpoint(
     assert data["progress"] == 45.5
     assert data["remaining_seconds"] == 1800.0
     assert data["print_state"] == "printing"
+    assert data["printer_state"] == "Printing"
     assert data["camera_connected"] is True
+
+
+async def test_printer_api_print_state_empty_string_falls_back(
+    mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: AsyncMock
+) -> None:
+    """Regression: printer_api() must apply the same print_state="" fallback as
+    status_page() (via the shared _derive_print_state() helper). Previously
+    printer_api() reported print_state="" verbatim for a printing job whose
+    raw print_state was empty, and the dashboard's own JS (`data.print_state
+    || "offline"`) then disabled the Pause button on an actively-printing job.
+    """
+    from sentinel.printer.types import PrinterStatus
+
+    mock_watcher.last_printer_status = PrinterStatus(
+        printing=True,
+        elapsed_seconds=10.0,
+        current_layer=1,
+        total_layers=10,
+        filename="test.gcode",
+        print_state="",
+        camera_connected=True,
+    )
+
+    app_state = create_app(_base_settings(), db=mock_db, watcher=mock_watcher, camera=mock_camera)
+    async with _client(app_state) as c:
+        r = await c.get("/api/printer")
+
+    assert r.status_code == 200
+    data = r.json()
+    assert data["print_state"] == "printing"
+    assert data["printer_state"] == "Printing"
+
+
+async def test_printer_api_printer_state_matches_status_page_when_stale(
+    mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: AsyncMock
+) -> None:
+    """printer_api()'s printer_state field must exactly match status_page()'s
+    printer_state template variable for the same underlying PrinterStatus —
+    the whole point of factoring both through the same shared helpers."""
+    from sentinel.printer.types import PrinterStatus
+
+    mock_watcher.last_printer_status = PrinterStatus(
+        printing=True,
+        elapsed_seconds=10.0,
+        current_layer=1,
+        total_layers=10,
+        filename="test.gcode",
+        print_state="printing",
+        camera_connected=True,
+        stale=True,
+    )
+
+    app_state = create_app(
+        _base_settings(auth_enabled=False), db=mock_db, watcher=mock_watcher, camera=mock_camera
+    )
+    async with _client(app_state) as c:
+        api_r = await c.get("/api/printer")
+        page_r = await c.get("/")
+
+    assert api_r.json()["print_state"] == "offline (stale data)"
+    assert api_r.json()["printer_state"] == "Offline (Unreachable)"
+    assert "Offline (Unreachable)" in page_r.text
 
 
 async def test_printer_api_camera_connected_uses_sentinel_probe_not_printer_flag(
@@ -1341,6 +1460,69 @@ async def test_control_resume_success(
     assert mock_watcher.state == WatcherState.ARMED
 
 
+async def test_control_resume_uses_external_transition(
+    mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: AsyncMock
+) -> None:
+    """Regression: resume must go through watcher.external_transition() with
+    the atomic check-and-set contract, not a direct `watcher.state = ARMED`
+    assignment that could race and clobber a concurrent watchdog write."""
+    printer = AsyncMock()
+    mock_watcher.printer = printer
+    mock_watcher.external_transition = AsyncMock(return_value=True)
+
+    app_state = create_app(
+        _base_settings(auth_enabled=False), db=mock_db, watcher=mock_watcher, camera=mock_camera
+    )
+    async with _client(app_state) as c:
+        r = await c.post("/api/control/resume")
+
+    assert r.status_code == 200
+    mock_watcher.external_transition.assert_called_once_with(
+        WatcherState.ARMED, from_states=(WatcherState.PAUSED, WatcherState.STALLED)
+    )
+
+
+async def test_control_resume_from_stalled_transitions_to_armed(
+    mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: AsyncMock
+) -> None:
+    """STALLED must be an accepted resume source, not just PAUSED — a
+    concurrent heartbeat watchdog write can legitimately land the watcher in
+    STALLED between the pause and the user clicking Resume."""
+    printer = AsyncMock()
+    mock_watcher.printer = printer
+    mock_watcher.state = WatcherState.STALLED
+
+    app_state = create_app(
+        _base_settings(auth_enabled=False), db=mock_db, watcher=mock_watcher, camera=mock_camera
+    )
+    async with _client(app_state) as c:
+        r = await c.post("/api/control/resume")
+
+    assert r.status_code == 200
+    assert mock_watcher.state == WatcherState.ARMED
+
+
+async def test_control_resume_does_not_clobber_unexpected_state(
+    mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: AsyncMock
+) -> None:
+    """If the watcher is in a state outside (PAUSED, STALLED) when resume is
+    requested, external_transition() must leave it alone rather than forcing
+    ARMED — demonstrating the atomic check actually gates the write."""
+    printer = AsyncMock()
+    mock_watcher.printer = printer
+    mock_watcher.state = WatcherState.IDLE
+
+    app_state = create_app(
+        _base_settings(auth_enabled=False), db=mock_db, watcher=mock_watcher, camera=mock_camera
+    )
+    async with _client(app_state) as c:
+        r = await c.post("/api/control/resume")
+
+    assert r.status_code == 200
+    printer.resume.assert_called_once()
+    assert mock_watcher.state == WatcherState.IDLE
+
+
 async def test_control_stop_success(
     mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: AsyncMock
 ) -> None:
@@ -1392,6 +1574,47 @@ async def test_control_snooze_unparseable_seconds_returns_400(
     mock_watcher.snooze.assert_not_called()
 
 
+async def test_control_snooze_empty_body_uses_default(
+    mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: AsyncMock
+) -> None:
+    """POST /api/control/snooze with no body at all must succeed with the
+    600s default, not 400. json.JSONDecodeError raised by parsing an empty
+    body is itself a ValueError subclass, so it was previously caught by the
+    `except (ValueError, TypeError)` clause and turned into a hard 400 before
+    the "no body -> default" case ever got a chance to apply.
+    """
+    mock_watcher.snooze = AsyncMock()
+    app_state = create_app(
+        _base_settings(auth_enabled=False), db=mock_db, watcher=mock_watcher, camera=mock_camera
+    )
+    async with _client(app_state) as c:
+        r = await c.post("/api/control/snooze")
+
+    assert r.status_code == 200
+    assert r.json()["status"] == "ok"
+    mock_watcher.snooze.assert_called_once_with(600.0)
+
+
+async def test_control_snooze_malformed_nonempty_body_still_400(
+    mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: AsyncMock
+) -> None:
+    """A non-empty but invalid JSON body must still 400 — only a genuinely
+    empty body should fall back to the default."""
+    mock_watcher.snooze = AsyncMock()
+    app_state = create_app(
+        _base_settings(auth_enabled=False), db=mock_db, watcher=mock_watcher, camera=mock_camera
+    )
+    async with _client(app_state) as c:
+        r = await c.post(
+            "/api/control/snooze",
+            content=b"not-json",
+            headers={"Content-Type": "application/json"},
+        )
+
+    assert r.status_code == 400
+    mock_watcher.snooze.assert_not_called()
+
+
 async def test_status_page_renders_with_printer_status(
     mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: MagicMock
 ) -> None:
@@ -1421,6 +1644,34 @@ async def test_status_page_renders_with_printer_status(
     assert "test.gcode" in r.text
     assert "2m 0s" in r.text
     assert "10.0%" in r.text
+
+
+async def test_status_page_progress_100_for_complete_spelling_variant(
+    mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: MagicMock
+) -> None:
+    """The raw printer protocol has been observed reporting both "completed"
+    and "complete" as print_state — the same ambiguity the page's own JS
+    (updateLiveStats) already guards against. Progress must show 100% either
+    way, not just for the "completed" spelling."""
+    from sentinel.printer.types import PrinterStatus
+
+    mock_watcher.last_printer_status = PrinterStatus(
+        printing=False,
+        elapsed_seconds=120.0,
+        current_layer=20,
+        total_layers=20,
+        filename="test.gcode",
+        progress=57.0,
+        print_state="complete",
+        camera_connected=True,
+    )
+    app_state = create_app(
+        _base_settings(auth_enabled=False), db=mock_db, watcher=mock_watcher, camera=mock_camera
+    )
+    async with _client(app_state) as c:
+        r = await c.get("/")
+    assert r.status_code == 200
+    assert "100.0%" in r.text
 
 
 async def test_status_page_camera_badge_uses_sentinel_probe_not_printer_flag(
@@ -1455,6 +1706,105 @@ async def test_status_page_camera_badge_uses_sentinel_probe_not_printer_flag(
     assert r.status_code == 200
     assert "Camera Connected" in r.text
     assert 'class="camera-dot offline"' not in r.text
+
+
+async def test_status_page_camera_img_uses_addeventlistener_not_inline_onerror(
+    app: object,
+) -> None:
+    """Regression: an inline onerror="..." attribute on the camera <img> is
+    silently blocked by this app's strict CSP (script-src with a nonce, no
+    unsafe-inline/unsafe-hashes — a nonce does not authorize inline
+    event-handler attributes), so handleCameraError() never ran when /stream
+    failed to load. It must be wired via addEventListener like every other
+    interactive element in this template.
+    """
+    async with _client(app) as c:
+        r = await c.get("/")
+    assert r.status_code == 200
+    assert "onerror=" not in r.text
+    assert (
+        'document.getElementById("camera-feed-img")?.addEventListener("error", handleCameraError);'
+        in r.text
+    )
+
+
+async def test_status_page_js_printer_badge_uses_printer_state_field(
+    app: object,
+) -> None:
+    """Regression: updateLiveStats() must take the printer-state badge TEXT
+    from data.printer_state (the same source status_page()'s initial render
+    uses via the printer_state template variable), not re-derive it from
+    data.print_state — otherwise identical stale status wording changes 5s
+    after page load with no real state transition.
+    """
+    async with _client(app) as c:
+        r = await c.get("/")
+    assert r.status_code == 200
+    assert "cardPrinterBadge.textContent = data.printer_state;" in r.text
+    assert "data.print_state.charAt(0).toUpperCase()" not in r.text
+
+
+async def test_status_page_interrupted_job_gets_distinct_badge(
+    mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: MagicMock
+) -> None:
+    """Regression: a job closed as status='interrupted' by
+    Database.close_stale_jobs() (routine crash/redeploy recovery, not an
+    error) must render with a visually distinct badge, not fall through the
+    else-branch into the same blue badge used for an actively printing job.
+    """
+    mock_db.get_recent_jobs.return_value = [
+        {
+            "id": 1,
+            "filename": "crashed_job.gcode",
+            "started_at": "2026-01-01T00:00:00Z",
+            "ended_at": "2026-01-01T00:05:00Z",
+            "duration_seconds": 300,
+            "pauses_count": 0,
+            "status": "interrupted",
+        },
+    ]
+    app_state = create_app(
+        _base_settings(auth_enabled=False), db=mock_db, watcher=mock_watcher, camera=mock_camera
+    )
+    async with _client(app_state) as c:
+        r = await c.get("/")
+    assert r.status_code == 200
+    assert 'class="state-badge state-warmup">' in r.text
+    assert 'class="state-badge state-printing">' not in r.text
+
+
+async def test_status_page_extruder_and_bed_target_round_not_truncate(
+    mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: MagicMock
+) -> None:
+    """Regression: the initial Jinja render used `| int` (truncates toward
+    zero) while the JS poll path (updateLiveStats) uses Math.round() — for a
+    fractional target >= 0.5 the displayed target visibly changed by 1 degree
+    5s after page load with no real change. Both paths must round the same
+    way, so use `| round | int` on the server side too.
+    """
+    from sentinel.printer.types import PrinterStatus
+
+    mock_watcher.last_printer_status = PrinterStatus(
+        printing=True,
+        elapsed_seconds=10.0,
+        current_layer=1,
+        total_layers=10,
+        filename="test.gcode",
+        extruder_temp=200.0,
+        extruder_target=200.7,
+        bed_temp=60.0,
+        bed_target=59.6,
+        print_state="printing",
+        camera_connected=True,
+    )
+    app_state = create_app(
+        _base_settings(auth_enabled=False), db=mock_db, watcher=mock_watcher, camera=mock_camera
+    )
+    async with _client(app_state) as c:
+        r = await c.get("/")
+    assert r.status_code == 200
+    assert "/ 201°C" in r.text  # round(200.7) == 201, not int(200.7) == 200
+    assert "/ 60°C" in r.text  # round(59.6) == 60, not int(59.6) == 59
 
 
 async def test_control_pause_failure(
@@ -1709,6 +2059,36 @@ async def test_content_security_policy_header(app: object) -> None:
     assert "img-src 'self' data:" in csp
     assert "connect-src 'self'" in csp
     assert "frame-ancestors 'none'" in csp
+
+
+async def test_csp_header_present_on_auth_short_circuited_responses(auth_app: object) -> None:
+    """CSP must be the OUTERMOST middleware (registered after AuthMiddleware
+    in create_app()) so it still wraps responses AuthMiddleware sends
+    directly without calling further into the app. Regression test for a
+    middleware-ordering bug where CSP was registered before AuthMiddleware,
+    making AuthMiddleware the outer layer — so its short-circuited responses
+    (the login page, 401/403/429s, redirects) shipped with no CSP header.
+    """
+    async with _client(auth_app) as c:
+        # GET /login is handled entirely inside AuthMiddleware and never
+        # reaches the router — it's also the one pre-auth, always-reachable
+        # page that reflects a request-controlled `next` param into HTML, so
+        # it's the response that most needs a CSP header as defense-in-depth.
+        login_resp = await c.get("/login?next=/foo")
+        assert login_resp.status_code == 200
+        assert login_resp.headers.get("Content-Security-Policy") is not None
+
+        # GET / with no credentials -> 401 Basic challenge, also
+        # short-circuited by AuthMiddleware without calling further in.
+        unauth_resp = await c.get("/")
+        assert unauth_resp.status_code == 401
+        assert unauth_resp.headers.get("Content-Security-Policy") is not None
+
+        # GET / with an HTML Accept header and no credentials -> 302
+        # redirect to /login, another short-circuited response.
+        redirect_resp = await c.get("/", headers={"Accept": "text/html"}, follow_redirects=False)
+        assert redirect_resp.status_code == 302
+        assert redirect_resp.headers.get("Content-Security-Policy") is not None
 
 
 async def test_status_page_renders_notification_failures_banner(

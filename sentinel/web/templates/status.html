@@ -867,7 +867,7 @@ footer a {
         <dt>Extruder Temp</dt>
         <dd class="temp-text">
           <span id="extruder-temp-val">{% if extruder_temp is not none and extruder_temp > 0.5 %}{{ "%.1f"|format(extruder_temp) }}°C{% else %}—{% endif %}</span>
-          <span id="extruder-target-val" class="temp-target">{% if extruder_target is not none and extruder_target > 0.0 %}/ {{ extruder_target | int }}°C{% else %}{% endif %}</span>
+          <span id="extruder-target-val" class="temp-target">{% if extruder_target is not none and extruder_target > 0.0 %}/ {{ extruder_target | round | int }}°C{% else %}{% endif %}</span>
         </dd>
       </div>
     </div>
@@ -877,7 +877,7 @@ footer a {
         <dt>Bed Temp</dt>
         <dd class="temp-text">
           <span id="bed-temp-val">{% if bed_temp is not none and bed_temp > 0.5 %}{{ "%.1f"|format(bed_temp) }}°C{% else %}—{% endif %}</span>
-          <span id="bed-target-val" class="temp-target">{% if bed_target is not none and bed_target > 0.0 %}/ {{ bed_target | int }}°C{% else %}{% endif %}</span>
+          <span id="bed-target-val" class="temp-target">{% if bed_target is not none and bed_target > 0.0 %}/ {{ bed_target | round | int }}°C{% else %}{% endif %}</span>
         </dd>
       </div>
     </div>
@@ -935,7 +935,7 @@ footer a {
           <div class="placeholder-icon">📷❌</div>
           <div class="placeholder-text">Camera feed currently unavailable</div>
         </div>
-        <img id="camera-feed-img" src="/stream" alt="Current camera feed" style="display: {% if camera_connected %}block{% else %}none{% endif %};" onerror="handleCameraError()">
+        <img id="camera-feed-img" src="/stream" alt="Current camera feed" style="display: {% if camera_connected %}block{% else %}none{% endif %};">
       </div>
     </div>
     <div class="thumbnail-container" id="gcode-preview-container" style="display: {% if thumbnail_base64 %}flex{% else %}none{% endif %};">
@@ -1007,7 +1007,7 @@ footer a {
           <td class="job-duration" data-seconds="{{ j.duration_seconds or 0 }}">—</td>
           <td>{{ j.pauses_count }}</td>
           <td>
-            <span class="state-badge {% if j.status == 'completed' %}state-armed{% elif j.status == 'failed' %}state-camera_offline{% else %}state-printing{% endif %}">
+            <span class="state-badge {% if j.status == 'completed' %}state-armed{% elif j.status == 'failed' %}state-camera_offline{% elif j.status == 'interrupted' %}state-warmup{% else %}state-printing{% endif %}">
               {{ j.status }}
             </span>
           </td>
@@ -1426,7 +1426,7 @@ function updateLiveStats() {
           .replace(/[^a-z0-9-_]+/g, '-')
           .replace(/(^-|-$)/g, '');
         cardPrinterBadge.className = `state-badge state-${cleanStateClass}`;
-        cardPrinterBadge.textContent = data.print_state.charAt(0).toUpperCase() + data.print_state.slice(1);
+        cardPrinterBadge.textContent = data.printer_state;
       }
 
       // Update Active Job File
@@ -1588,6 +1588,8 @@ document.addEventListener("DOMContentLoaded", () => {
       if (tabId) switchTab(tabId);
     });
   });
+
+  document.getElementById("camera-feed-img")?.addEventListener("error", handleCameraError);
 
   document.getElementById("btn-pause")?.addEventListener("click", () => sendControl("pause"));
   document.getElementById("btn-resume")?.addEventListener("click", () => sendControl("resume"));

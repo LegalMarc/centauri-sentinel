@@ -84,10 +84,21 @@ def _make_handler(
     watcher.state = WatcherState.ARMED
     watcher.last_printer_status = None
 
-    async def get_fresh_status(force: bool = False) -> object:
+    async def _get_fresh_status_impl(force: bool = False) -> object:
         return watcher.last_printer_status
 
-    watcher.get_fresh_status = get_fresh_status
+    watcher.get_fresh_status = AsyncMock(side_effect=_get_fresh_status_impl)
+
+    async def _external_transition_impl(
+        new_state: WatcherState, *, from_states: tuple[WatcherState, ...]
+    ) -> bool:
+        # Mirrors WatcherLoop.external_transition's atomic check-and-set.
+        if watcher.state in from_states:
+            watcher.state = new_state
+            return True
+        return False
+
+    watcher.external_transition = AsyncMock(side_effect=_external_transition_impl)
 
     return BotCommandHandler(
         _settings(),
@@ -257,6 +268,40 @@ async def test_cmd_resume_calls_printer() -> None:
     assert "resumed" in update.message.reply_text.call_args[0][0].lower()
 
 
+async def test_cmd_resume_uses_external_transition() -> None:
+    """Resume must go through the atomic external_transition helper, not a direct
+    state assignment, so a concurrent watchdog write can't be silently clobbered."""
+    printer = AsyncMock()
+    handler = _make_handler(printer=printer)
+    handler._watcher.state = WatcherState.PAUSED
+    update = _make_update()
+    await handler.cmd_resume(update, None)
+    handler._watcher.external_transition.assert_called_once_with(
+        WatcherState.ARMED, from_states=(WatcherState.PAUSED, WatcherState.STALLED)
+    )
+    assert handler._watcher.state == WatcherState.ARMED
+
+
+async def test_cmd_resume_from_stalled_transitions_to_armed() -> None:
+    """external_transition's from_states includes STALLED, so a resume issued while
+    the watchdog had flagged STALLED still clears back to ARMED."""
+    printer = AsyncMock()
+    handler = _make_handler(printer=printer)
+    handler._watcher.state = WatcherState.STALLED
+    update = _make_update()
+    await handler.cmd_resume(update, None)
+    assert handler._watcher.state == WatcherState.ARMED
+
+
+async def test_cmd_resume_calls_get_fresh_status_forced() -> None:
+    printer = AsyncMock()
+    handler = _make_handler(printer=printer)
+    handler._watcher.state = WatcherState.PAUSED
+    update = _make_update()
+    await handler.cmd_resume(update, None)
+    handler._watcher.get_fresh_status.assert_called_once_with(force=True)
+
+
 async def test_cmd_pause_failure_replies_error() -> None:
     printer = AsyncMock()
     printer.pause.side_effect = RuntimeError("mqtt down")
@@ -373,6 +418,22 @@ async def test_callback_resume_calls_printer() -> None:
     assert handler._watcher.state == WatcherState.ARMED
     update.callback_query.edit_message_text.assert_called_once()
     assert "resumed" in update.callback_query.edit_message_text.call_args[0][0].lower()
+
+
+async def test_callback_resume_uses_external_transition_and_refreshes_status() -> None:
+    """The inline-keyboard resume branch must mirror cmd_resume: transition state
+    atomically via external_transition and force a fresh status fetch afterwards,
+    so a user polling /status or the dashboard right after pressing Resume doesn't
+    see stale cached data."""
+    printer = AsyncMock()
+    handler = _make_handler(printer=printer)
+    handler._watcher.state = WatcherState.PAUSED
+    update = _make_update(callback_data="resume")
+    await handler.handle_callback(update, None)
+    handler._watcher.external_transition.assert_called_once_with(
+        WatcherState.ARMED, from_states=(WatcherState.PAUSED, WatcherState.STALLED)
+    )
+    handler._watcher.get_fresh_status.assert_called_once_with(force=True)
 
 
 async def test_callback_stop_sets_pending() -> None:
@@ -519,6 +580,30 @@ async def test_cmd_pause_debounced_printer_not_paused() -> None:
     assert "suppressed" in reply or "debounce" in reply or "retry" in reply
 
 
+async def test_cmd_pause_debounced_message_does_not_overclaim_auto_retry() -> None:
+    """The debounce-suppressed reply must not claim an auto-retry mechanism exists —
+    only /stop has one (via _stop_pending in watcher/loop.py); a false claim here
+    would make a user trust the print is protected when it is not."""
+    printer = AsyncMock()
+    printer.pause.side_effect = PauseDebouncedError("debounced")
+    from sentinel.printer.types import PrinterStatus
+
+    printer.status.return_value = PrinterStatus(
+        printing=True,
+        elapsed_seconds=100.0,
+        current_layer=5,
+        total_layers=50,
+        filename="test.gcode",
+        print_state="printing",
+    )
+    handler = _make_handler(printer=printer)
+    update = _make_update()
+    await handler.cmd_pause(update, None)
+    reply = update.message.reply_text.call_args[0][0].lower()
+    assert "automatically" not in reply
+    assert "/pause" in reply
+
+
 async def test_cmd_resume_failure() -> None:
     printer = AsyncMock()
     printer.resume.side_effect = RuntimeError("resume fail")
@@ -586,6 +671,16 @@ async def test_handle_callback_confirm_stop_success() -> None:
     await handler.handle_callback(update, None)
     handler._printer.stop.assert_called_once()
     assert "cancelled" in update.callback_query.edit_message_text.call_args[0][0].lower()
+
+
+async def test_handle_callback_confirm_stop_refreshes_status() -> None:
+    """Mirrors cmd_confirm: force a fresh status fetch after a successful stop so
+    stale cached status isn't served to a user who immediately checks /status."""
+    handler = _make_handler()
+    handler._pending_stops[_AUTHORIZED_USER] = time.monotonic()
+    update = _make_update(callback_data="confirm_stop")
+    await handler.handle_callback(update, None)
+    handler._watcher.get_fresh_status.assert_called_once_with(force=True)
 
 
 async def test_handle_callback_confirm_stop_expired() -> None:

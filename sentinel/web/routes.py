@@ -22,6 +22,7 @@ if TYPE_CHECKING:
 
     from sentinel.config import Settings
     from sentinel.db.repo import Database
+    from sentinel.printer.types import PrinterStatus
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,36 @@ def format_duration(seconds: float) -> str:
         parts.append(f"{m}m")
     parts.append(f"{s}s")
     return " ".join(parts)
+
+
+def _derive_print_state(p_status: PrinterStatus | None) -> str:
+    """Derive the raw/internal print_state string from a printer status snapshot.
+
+    Shared by status_page() and printer_api() so the two views can never
+    diverge on what the current print state is for the same underlying
+    PrinterStatus — see docs/review_findings.md follow-up sweep (a previous
+    fix added the `print_state or (...)` fallback to status_page() only,
+    leaving printer_api() to report an empty string when the printer sends
+    print_state="" while printing).
+    """
+    if not p_status:
+        return "offline"
+    if p_status.stale:
+        return "offline (stale data)"
+    return p_status.print_state or ("printing" if p_status.printing else "idle")
+
+
+def _derive_printer_state(p_status: PrinterStatus | None, print_state: str) -> str:
+    """Derive the human-readable, capitalized printer state for display.
+
+    Must be called with the print_state returned by _derive_print_state() for
+    the same p_status, so the raw and display values never diverge.
+    """
+    if not p_status:
+        return "Offline"
+    if p_status.stale:
+        return "Offline (Unreachable)"
+    return print_state.capitalize()
 
 
 def make_router(
@@ -161,12 +192,8 @@ def make_router(
         is_paused = False
 
         if p_status:
-            print_state = p_status.print_state or ("printing" if p_status.printing else "idle")
-            if p_status.stale:
-                print_state = "offline (stale data)"
-                printer_state = "Offline (Unreachable)"
-            else:
-                printer_state = print_state.capitalize()
+            print_state = _derive_print_state(p_status)
+            printer_state = _derive_printer_state(p_status, print_state)
             is_printing = print_state == "printing"
             is_paused = print_state == "paused"
             is_active = p_status.printing or is_paused or print_state == "completed"
@@ -175,7 +202,7 @@ def make_router(
             extruder_target = p_status.extruder_target
             bed_temp = p_status.bed_temp
             bed_target = p_status.bed_target
-            progress = 100.0 if print_state == "completed" else p_status.progress
+            progress = 100.0 if print_state in ("completed", "complete") else p_status.progress
             remaining_seconds = p_status.remaining_seconds
             filename = p_status.filename or "—"
             current_layer = p_status.current_layer
@@ -248,6 +275,11 @@ def make_router(
         camera_connected = bool(camera.is_connected) if camera is not None else False
 
         p_status = await watcher.get_fresh_status()
+        # Derived via the same helpers status_page() uses, so the two views can
+        # never diverge on print_state/printer_state for the same status.
+        print_state = _derive_print_state(p_status)
+        data["print_state"] = print_state
+        data["printer_state"] = _derive_printer_state(p_status, print_state)
         if p_status:
             data.update(
                 {
@@ -262,9 +294,6 @@ def make_router(
                     "bed_target": p_status.bed_target,
                     "progress": p_status.progress,
                     "remaining_seconds": p_status.remaining_seconds,
-                    "print_state": (
-                        "offline (stale data)" if p_status.stale else p_status.print_state
-                    ),
                     "camera_connected": camera_connected,
                     "thumbnail_base64": p_status.thumbnail_base64,
                 }
@@ -283,7 +312,6 @@ def make_router(
                     "bed_target": None,
                     "progress": 0.0,
                     "remaining_seconds": 0.0,
-                    "print_state": "offline",
                     "camera_connected": camera_connected,
                     "thumbnail_base64": None,
                 }
@@ -340,8 +368,11 @@ def make_router(
             await watcher.printer.resume()
             from sentinel.watcher.state import WatcherState
 
-            if watcher.state == WatcherState.PAUSED:
-                watcher.state = WatcherState.ARMED
+            # Atomic check-and-set: avoids racing a concurrent watchdog/tick
+            # write that could otherwise silently clobber this resume action.
+            await watcher.external_transition(
+                WatcherState.ARMED, from_states=(WatcherState.PAUSED, WatcherState.STALLED)
+            )
             await watcher.get_fresh_status(force=True)
             return Response(
                 content='{"status": "ok", "message": "Print resumed"}',
@@ -374,26 +405,35 @@ def make_router(
             raise HTTPException(status_code=503, detail="Service not initialised")
 
         seconds = 600
-        try:
-            body = await request.json()
-            if isinstance(body, dict) and "seconds" in body:
-                seconds = int(body["seconds"])
-                if seconds < 0:
-                    raise HTTPException(
-                        status_code=400, detail="Snooze duration cannot be negative"
-                    )
-                if seconds > 3600:
-                    raise HTTPException(
-                        status_code=400,
-                        detail="Snooze duration cannot exceed 3600 seconds (1 hour). "
-                        "Use the disable endpoint for longer suppression.",
-                    )
-        except HTTPException:
-            raise
-        except (ValueError, TypeError) as exc:
-            raise HTTPException(status_code=400, detail=f"Invalid snooze duration: {exc}") from exc
-        except Exception:
-            pass
+        # Check for an empty/absent body BEFORE attempting to parse JSON: a
+        # missing body is the documented "use the 600s default" case, but
+        # json.JSONDecodeError (raised by parsing b"") is itself a ValueError,
+        # so it would otherwise be caught by the except (ValueError, TypeError)
+        # clause below and turned into a hard 400 instead of the default.
+        raw_body = await request.body()
+        if raw_body:
+            try:
+                body = json.loads(raw_body)
+                if isinstance(body, dict) and "seconds" in body:
+                    seconds = int(body["seconds"])
+                    if seconds < 0:
+                        raise HTTPException(
+                            status_code=400, detail="Snooze duration cannot be negative"
+                        )
+                    if seconds > 3600:
+                        raise HTTPException(
+                            status_code=400,
+                            detail="Snooze duration cannot exceed 3600 seconds (1 hour). "
+                            "Use the disable endpoint for longer suppression.",
+                        )
+            except HTTPException:
+                raise
+            except (ValueError, TypeError) as exc:
+                raise HTTPException(
+                    status_code=400, detail=f"Invalid snooze duration: {exc}"
+                ) from exc
+            except Exception:
+                pass
 
         await watcher.snooze(float(seconds))
 
@@ -552,13 +592,23 @@ def make_router(
             raise HTTPException(status_code=503, detail="Camera not available")
 
         async def _gen() -> AsyncIterator[bytes]:
-            from sentinel.camera.errors import CameraClosedError
+            from sentinel.camera.errors import (
+                CameraClosedError,
+                CameraOfflineError,
+                CameraReadError,
+            )
 
             try:
                 async for frame in camera.stream_proxy():
                     yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
             except CameraClosedError:
                 logger.info("Camera stream closed cleanly")
+            except (CameraReadError, CameraOfflineError) as exc:
+                # e.g. "Max concurrent stream proxies reached", or the camera
+                # going offline mid-stream. The 200/multipart headers are
+                # already flushed by this point, so just end the response
+                # cleanly instead of letting an unhandled exception propagate.
+                logger.warning("Camera stream ended: %s", exc)
 
         return StreamingResponse(
             _gen(),

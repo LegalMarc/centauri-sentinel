@@ -84,11 +84,13 @@ class WatcherLoop:
         self._current_filename: str | None = None
         self._paused_since: datetime | None = None
         self._paused_by_sentinel: bool = False
+        self._auto_stop_notified: bool = False
         self._alerted_new_print: bool = False
         self._last_heartbeat_time = 0.0
         self._last_heartbeat_state: WatcherState | None = None
         self._snooze_task: asyncio.Task[None] | None = None
         self._tick_lock = asyncio.Lock()
+        self._state_lock = asyncio.Lock()
         self._last_resume_time = 0.0
         self._ml_error_count = 0
 
@@ -177,6 +179,18 @@ class WatcherLoop:
     async def tick(self) -> None:
         """Run one iteration of the detection loop (useful for tests)."""
         await self._tick()
+
+    async def external_transition(
+        self, new_state: WatcherState, *, from_states: tuple[WatcherState, ...]
+    ) -> bool:
+        """Safely transition state from an external caller (web/bot), atomically
+        checking the current state against from_states before writing, to avoid
+        racing a concurrent watchdog/tick write. Returns True if applied."""
+        async with self._state_lock:
+            if self.state in from_states:
+                self.state = new_state
+                return True
+            return False
 
     async def snooze(self, seconds: float) -> None:
         """Snooze detection for the given number of seconds."""
@@ -319,16 +333,18 @@ class WatcherLoop:
                         auto_stop_timeout = 0
 
                     if auto_stop_timeout > 0 and pause_duration > auto_stop_timeout:
-                        logger.warning(
-                            "Auto-stop timeout reached (%.0f s) — "
-                            "dispatching notification and stopping printer",
-                            pause_duration,
-                        )
-                        text = (
-                            f"⚠️ Printer has been paused for over {auto_stop_timeout // 60} "
-                            "minutes. Initiating automatic stop."
-                        )
-                        self._dispatcher.dispatch_text(text)
+                        if not self._auto_stop_notified:
+                            logger.warning(
+                                "Auto-stop timeout reached (%.0f s) — "
+                                "dispatching notification and stopping printer",
+                                pause_duration,
+                            )
+                            text = (
+                                f"⚠️ Printer has been paused for over {auto_stop_timeout // 60} "
+                                "minutes. Initiating automatic stop."
+                            )
+                            self._dispatcher.dispatch_text(text)
+                            self._auto_stop_notified = True
 
                         try:
                             # Actually call stop to halt the printer
@@ -337,9 +353,14 @@ class WatcherLoop:
                             logger.exception(
                                 "Failed to automatically stop the printer after timeout"
                             )
-
-                        self._paused_since = None  # reset to prevent spamming
-                        self._paused_by_sentinel = False
+                        else:
+                            # Only clear once stop() actually succeeded — a failed
+                            # attempt must leave these set so the escalation stays
+                            # eligible to retry on a later tick instead of being
+                            # permanently disabled for the rest of this pause episode.
+                            self._paused_since = None  # reset to prevent spamming
+                            self._paused_by_sentinel = False
+                            self._auto_stop_notified = False
             elif self.state not in (
                 WatcherState.OFFLINE,
                 WatcherState.CAMERA_OFFLINE,
@@ -347,6 +368,7 @@ class WatcherLoop:
             ):
                 self._paused_since = None
                 self._paused_by_sentinel = False
+                self._auto_stop_notified = False
 
             if self.state in (WatcherState.ARMED, WatcherState.CAMERA_OFFLINE):
                 detection_enabled = await self._db.get_setting("detection_enabled", "true")
@@ -368,12 +390,14 @@ class WatcherLoop:
                     "Printer status is stale — transitioning OFFLINE and suspending detection"
                 )
                 self.state = WatcherState.OFFLINE
+                self._dispatcher.dispatch_text("⚠️ Printer is unreachable — detection suspended.")
             return
         if not status.printing:
             if self.state != WatcherState.IDLE:
                 logger.info("Printer idle — transitioning IDLE")
             self.state = WatcherState.IDLE
             self._confirm_count = 0
+            self._ml_error_count = 0
 
             # Record print end if a job was active
             if self._current_job_id is not None:
@@ -416,6 +440,7 @@ class WatcherLoop:
             self._current_filename = None
             self._paused_since = None
             self._paused_by_sentinel = False
+            self._auto_stop_notified = False
             self._alerted_new_print = False
             return
 
@@ -531,6 +556,7 @@ class WatcherLoop:
 
         if elapsed < warmup:
             self.state = WatcherState.WARMUP
+            self._confirm_count = 0
         else:
             if self.state in (WatcherState.IDLE, WatcherState.WARMUP):
                 logger.info("Printer armed for detection (elapsed=%.0fs)", elapsed)
@@ -589,19 +615,45 @@ class WatcherLoop:
                 self._dispatcher.dispatch_text(
                     "🚨 Sentinel ML service is failing continuously. Pausing printer for safety."
                 )
+                printer_paused = False
                 try:
                     await self._printer.pause()
-                    self.state = WatcherState.PAUSED
-                    self._paused_since = datetime.now(tz=UTC)
-                    self._confirm_count = 0
+                    printer_paused = True
                 except PauseDebouncedError:
+                    # No new pause was actually sent — the debounce window suppressed
+                    # it. Check live status: if the printer is already paused (e.g.
+                    # from a prior command), treat this as success; otherwise leave
+                    # _ml_error_count untouched so the next tick retries without
+                    # needing to rebuild the failure streak from scratch.
                     logger.warning(
                         "ML-failure pause suppressed by debounce — "
                         "printer may already be paused from a prior command"
                     )
+                    try:
+                        live_status = await self._printer.status()
+                        printer_paused = live_status.print_state == "paused"
+                    except Exception:
+                        logger.warning(
+                            "Could not fetch live printer status after debounced "
+                            "ML-failure pause; will retry on next tick"
+                        )
                 except Exception as e:
                     logger.error("Failed to pause printer on ML failure: %s", e)
-                self._ml_error_count = 0
+                    try:
+                        live_status = await self._printer.status()
+                        printer_paused = live_status.print_state == "paused"
+                    except Exception:
+                        logger.warning(
+                            "Could not fetch live printer status after failed "
+                            "ML-failure pause; will retry on next tick"
+                        )
+
+                if printer_paused:
+                    self.state = WatcherState.PAUSED
+                    self._paused_since = datetime.now(tz=UTC)
+                    self._paused_by_sentinel = True
+                    self._confirm_count = 0
+                    self._ml_error_count = 0
             return
 
         self._ml_error_count = 0
@@ -898,8 +950,9 @@ class WatcherLoop:
 
         if age > effective_stall and self.state != WatcherState.STALLED:
             logger.error("Heartbeat stale (age=%.0fs) — watcher stalled", age)
-            self.state = WatcherState.STALLED
-            self._dispatcher.dispatch_stall()
+            async with self._state_lock:
+                self.state = WatcherState.STALLED
+                self._dispatcher.dispatch_stall()
 
     async def _check_and_send_state_reminders(self) -> None:
         detection_enabled = await self._db.get_setting("detection_enabled", "true")

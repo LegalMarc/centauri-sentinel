@@ -330,3 +330,62 @@ async def test_bot_runner_supervisor_restart_and_alert() -> None:
 
         assert runner.crash_count >= 1
         await runner.stop()
+
+
+async def test_bot_runner_supervisor_recovery_alert_on_first_crash() -> None:
+    """Regression test: a recovery alert must fire after the bot's FIRST-EVER
+    crash+restart cycle (crash_count == 1), not just from the second crash onward.
+    """
+    import asyncio
+
+    handler = _make_handler()
+    app, builder = _make_ptb_app()
+    dispatcher = MagicMock()
+
+    app.updater.running = True
+
+    # Real PTB flips updater.running back on when polling (re)starts — mimic that
+    # so the simulated restart actually looks "recovered" to is_running().
+    async def start_polling_side_effect(*a: object, **kw: object) -> None:
+        app.updater.running = True
+
+    app.updater.start_polling = AsyncMock(side_effect=start_polling_side_effect)
+
+    original_sleep = asyncio.sleep
+
+    async def mock_sleep(delay: float) -> None:
+        await original_sleep(0)
+
+    with (
+        patch("telegram.ext.Application") as mock_app_class,
+        patch("telegram.ext.CommandHandler"),
+        patch("telegram.ext.CallbackQueryHandler"),
+        patch("asyncio.sleep", side_effect=mock_sleep),
+    ):
+        mock_app_class.builder.return_value = builder
+        runner = BotRunner(_SETTINGS_TG, handler, dispatcher)
+
+        await runner.start()
+        await asyncio.sleep(0.01)
+        assert runner.is_running() is True
+
+        # Simulate the bot's first-ever crash.
+        app.updater.running = False
+
+        # Give the supervisor loop enough ticks to detect the crash, back off,
+        # and successfully restart.
+        for _ in range(500):
+            await asyncio.sleep(0.001)
+            if runner.crash_count >= 1 and runner.is_running():
+                break
+
+        assert runner.crash_count == 1
+        assert runner.is_running() is True
+
+        await runner.stop()
+
+    messages = [call.args[0] for call in dispatcher.dispatch_text.call_args_list]
+    assert any("crashed" in m for m in messages), f"expected crash alert, got: {messages}"
+    assert any("recovered" in m for m in messages), (
+        f"expected recovery alert after first crash, got: {messages}"
+    )

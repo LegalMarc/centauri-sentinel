@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import ipaddress
 import logging
 import time
 from datetime import UTC, datetime
@@ -46,14 +47,26 @@ def _extract_jpeg(buf: bytes) -> bytes | None:
     return buf[start : end + 2]
 
 
+def _format_host_for_url(host: str) -> str:
+    """Bracket an IPv6 literal for embedding in a URL netloc (e.g. "::1" -> "[::1]").
+
+    Hostnames and IPv4 literals are returned unchanged.
+    """
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        return host
+    if isinstance(addr, ipaddress.IPv6Address):
+        return f"[{host}]"
+    return host
+
+
 class MjpegGrabber:
     """Grabs single JPEG frames from an MJPEG HTTP stream."""
 
     def __init__(self, settings: Settings) -> None:
-        url = (
-            f"http://{settings.printer_ip}:{settings.printer_mjpeg_port}"
-            f"{settings.printer_mjpeg_path}"
-        )
+        host = _format_host_for_url(settings.printer_ip)
+        url = f"http://{host}:{settings.printer_mjpeg_port}{settings.printer_mjpeg_path}"
         self._settings = settings
         self._url = url
         self._consecutive_failures = 0
@@ -96,12 +109,20 @@ class MjpegGrabber:
         try:
             async with asyncio.timeout(_READ_TIMEOUT):
                 while self._latest_frame is None and self._latest_exception is None:
-                    if self._broadcaster_task.done():
+                    # Capture into a local once per iteration: a concurrent close()/
+                    # reconfigure() can set self._broadcaster_task = None between
+                    # iterations (after the await below), so we must null-check the
+                    # freshly-read local rather than re-reading the attribute into
+                    # .done() directly.
+                    task = self._broadcaster_task
+                    if task is None or task.done():
                         # If the task failed/finished, check for exception
-                        try:
-                            task_exc = self._broadcaster_task.exception()
-                        except asyncio.CancelledError as exc:
-                            raise CameraReadError("Broadcaster task was cancelled") from exc
+                        task_exc: BaseException | None = None
+                        if task is not None:
+                            try:
+                                task_exc = task.exception()
+                            except asyncio.CancelledError as exc:
+                                raise CameraReadError("Broadcaster task was cancelled") from exc
                         if task_exc:
                             raise CameraReadError(f"Stream failed: {task_exc}") from task_exc
                         raise CameraReadError("Stream ended before first frame")
@@ -114,10 +135,13 @@ class MjpegGrabber:
                 ) from exc
             raise CameraReadError("Timeout waiting for camera frame") from exc
 
-        # Check if the broadcaster task has failed recently
-        if self._broadcaster_task.done():
+        # Check if the broadcaster task has failed recently. Re-read into a local
+        # and null-check it — close()/reconfigure() may have concurrently cleared
+        # self._broadcaster_task while we were awaiting above.
+        task = self._broadcaster_task
+        if task is not None and task.done():
             try:
-                task_exc = self._broadcaster_task.exception()
+                task_exc = task.exception()
             except asyncio.CancelledError as exc:
                 raise CameraReadError("Broadcaster task was cancelled") from exc
             if task_exc:
@@ -163,9 +187,9 @@ class MjpegGrabber:
                 parsed = urllib.parse.urlparse(self._url)
                 if parsed.hostname:
                     resolved_ip = await resolve_and_validate_printer_ip(parsed.hostname)
-                    netloc = resolved_ip
+                    netloc = _format_host_for_url(resolved_ip)
                     if parsed.port is not None:
-                        netloc = f"{resolved_ip}:{parsed.port}"
+                        netloc = f"{netloc}:{parsed.port}"
                     url_to_fetch = urllib.parse.urlunparse(
                         (
                             parsed.scheme,
@@ -218,6 +242,25 @@ class MjpegGrabber:
                             frame_start_time = time.monotonic()
                     self._latest_frame = None
                     raise ConnectionError("Stream ended prematurely")
+            except CameraReadError as exc:
+                # A single-grab error raised locally (e.g. the buffer-overflow guard
+                # above) — mirror the bookkeeping of the block below (so repeated
+                # failures still trip the offline threshold) but re-raise immediately
+                # instead of retrying internally, since the caller (grab()/
+                # stream_proxy()) should see each such failure as it happens.
+                self._consecutive_failures += 1
+                self._latest_exception = exc
+                self._latest_frame = None
+                logger.warning(
+                    "Stream proxy connection failed: %s (consecutive=%d)",
+                    exc,
+                    self._consecutive_failures,
+                )
+                if self._consecutive_failures >= _OFFLINE_THRESHOLD:
+                    raise CameraOfflineError(
+                        f"Camera offline after {self._consecutive_failures} consecutive failures"
+                    ) from exc
+                raise
             except (TimeoutError, httpx.HTTPError, OSError, ValueError) as exc:
                 self._consecutive_failures += 1
                 self._latest_exception = exc
@@ -252,6 +295,13 @@ class MjpegGrabber:
                         with contextlib.suppress(asyncio.QueueFull):
                             q.put_nowait(frame)
 
+                    # Yield to the event loop so listener consumer tasks get a chance
+                    # to drain their queue before the next frame in a burst arrives —
+                    # otherwise a buffer containing several complete frames back-to-back
+                    # would push them all in before any consumer is scheduled, and the
+                    # maxsize=2 "drop oldest" logic would evict frames unnecessarily.
+                    await asyncio.sleep(0)
+
                     # Idle check: if no grabs or stream proxy listeners for 30s, shut down stream
                     if not self._listeners and (time.monotonic() - self._last_grab_time > 30.0):
                         logger.info("Camera stream idle for 30s — shutting down connection")
@@ -280,6 +330,10 @@ class MjpegGrabber:
         q: asyncio.Queue[bytes | Exception] = asyncio.Queue(maxsize=2)
         self._listeners.add(q)
         if self._broadcaster_task is None or self._broadcaster_task.done():
+            # Mirror grab()'s restart handling: clear stale state so a concurrent
+            # grab() doesn't see a leftover frame/exception from the dead task.
+            self._latest_frame = None
+            self._latest_exception = None
             self._broadcaster_task = asyncio.create_task(self._broadcast_loop())
 
         try:

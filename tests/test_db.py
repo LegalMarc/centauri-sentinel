@@ -342,6 +342,55 @@ async def test_print_jobs_crud_and_analytics(db: Database) -> None:
     assert summary["avg_duration_seconds"] == 600.0
 
 
+async def test_get_analytics_summary_uses_single_atomic_query(
+    db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The totals and avg_duration must come from one SELECT, not two sequential
+    reads — two separate reads could straddle a concurrent write (e.g. a print
+    job completing mid-request) and return a mismatched summary."""
+    await db.record_print_start("benchy.gcode", "2026-05-26T23:00:00Z")
+    await db.record_print_end(1, "2026-05-26T23:10:00Z", 600, 15.5, "completed")
+
+    orig_execute = db._conn.execute
+    query_count = 0
+
+    def counting_execute(sql: str, *args: object, **kwargs: object) -> object:
+        nonlocal query_count
+        if "FROM print_jobs" in sql:
+            query_count += 1
+        return orig_execute(sql, *args, **kwargs)
+
+    monkeypatch.setattr(db._conn, "execute", counting_execute)
+
+    summary = await db.get_analytics_summary()
+
+    assert query_count == 1, f"expected a single atomic query, got {query_count}"
+    assert summary["total_prints"] == 1
+    assert summary["avg_duration_seconds"] == 600.0
+
+
+async def test_get_analytics_summary_avg_excludes_null_duration(db: Database) -> None:
+    """A completed job with a NULL duration must not break/skew avg_duration_seconds,
+    but must still be counted toward total_prints/success_rate_percent."""
+    await db.record_print_start("a.gcode", "2026-05-26T23:00:00Z")
+    await db.record_print_end(1, "2026-05-26T23:10:00Z", 600, 10.0, "completed")
+
+    # Insert a second completed job with no duration recorded, bypassing
+    # record_print_end (which always supplies one) to exercise the edge case.
+    async with db._write(clear_analytics_cache=True) as conn:
+        await conn.execute(
+            "INSERT INTO print_jobs (filename, started_at, status, duration_seconds,"
+            " filament_used_g, pauses_count) VALUES (?, ?, 'completed', NULL, 5.0, 0)",
+            ("b.gcode", "2026-05-26T23:20:00Z"),
+        )
+
+    summary = await db.get_analytics_summary()
+    assert summary["total_prints"] == 2
+    assert summary["success_rate_percent"] == 100.0
+    # avg must be computed only over the row with a non-NULL duration.
+    assert summary["avg_duration_seconds"] == 600.0
+
+
 async def test_write_exception_rolls_back(db: Database) -> None:
     try:
         async with db._write() as conn:

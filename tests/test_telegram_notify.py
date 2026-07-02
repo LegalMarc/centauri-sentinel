@@ -140,6 +140,24 @@ async def test_send_detection_alert_with_photo_calls_bot() -> None:
     assert "reply_markup" in call_kwargs.kwargs
 
 
+async def test_send_detection_alert_with_photo_fallback() -> None:
+    """A non-network send_photo failure (e.g. BadRequest on a bad image) must
+    fall back to send_message instead of propagating and dropping the alert.
+    """
+    from telegram.error import BadRequest
+
+    notifier, mock_bot = _make_notifier_enabled()
+    mock_bot.send_photo.side_effect = BadRequest("IMAGE_PROCESS_FAILED")
+
+    await notifier.send_detection_alert(score=0.85, jpeg=b"fake_jpeg")
+
+    mock_bot.send_photo.assert_called_once()
+    mock_bot.send_message.assert_called_once()
+    call_kwargs = mock_bot.send_message.call_args
+    assert "85%" in call_kwargs.kwargs.get("text", "")
+    assert "reply_markup" in call_kwargs.kwargs
+
+
 async def test_send_stall_alert_calls_bot() -> None:
     notifier, mock_bot = _make_notifier_enabled()
     await notifier.send_stall_alert()
@@ -191,6 +209,64 @@ async def test_retry_exhausted_reraises() -> None:
 
     with pytest.raises(NetworkError, match="always fails"):
         await notifier.send_text("hello")
+
+
+async def test_retry_after_honors_server_wait_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    """RetryAfter(retry_after=30) must wait ~30s, not the ~8s exponential cap."""
+    from telegram.error import RetryAfter
+
+    call_count = 0
+
+    async def _flaky_send(**kwargs: object) -> None:
+        nonlocal call_count
+        call_count += 1
+        if call_count < 2:
+            raise RetryAfter(30)
+
+    notifier, mock_bot = _make_notifier_enabled()
+    mock_bot.send_message.side_effect = _flaky_send
+
+    sleep_calls: list[float] = []
+
+    async def _fake_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+
+    monkeypatch.setattr("asyncio.sleep", _fake_sleep)
+
+    await notifier.send_text("hello")
+
+    assert call_count == 2
+    assert sleep_calls == [30.0]
+
+
+async def test_retry_after_falls_back_to_exponential_for_other_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-RetryAfter transient errors still use the small exponential backoff."""
+    from telegram.error import NetworkError
+
+    call_count = 0
+
+    async def _flaky_send(**kwargs: object) -> None:
+        nonlocal call_count
+        call_count += 1
+        if call_count < 2:
+            raise NetworkError("network blip")
+
+    notifier, mock_bot = _make_notifier_enabled()
+    mock_bot.send_message.side_effect = _flaky_send
+
+    sleep_calls: list[float] = []
+
+    async def _fake_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+
+    monkeypatch.setattr("asyncio.sleep", _fake_sleep)
+
+    await notifier.send_text("hello")
+
+    assert call_count == 2
+    assert sleep_calls == [0.5]
 
 
 # ---------------------------------------------------------------------------

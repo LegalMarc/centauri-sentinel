@@ -170,6 +170,19 @@ async def test_warmup_during_warmup_period() -> None:
     assert watcher.state == WatcherState.WARMUP
 
 
+async def test_confirm_count_resets_on_warmup_transition() -> None:
+    """Entering WARMUP must reset _confirm_count, mirroring IDLE/CAMERA_OFFLINE, so a
+    live warmup-seconds increase mid-print can't resume a stale partial streak."""
+    watcher, *_ = await _make_watcher(printer_status=_warmup_status())
+    watcher.state = WatcherState.ARMED
+    watcher._confirm_count = 2
+
+    await watcher.tick()
+
+    assert watcher.state == WatcherState.WARMUP
+    assert watcher._confirm_count == 0
+
+
 # ---------------------------------------------------------------------------
 # State: ARMED
 # ---------------------------------------------------------------------------
@@ -222,6 +235,19 @@ async def test_confirm_counter_resets_on_idle() -> None:
     printer.status = AsyncMock(return_value=_idle_status())
     await watcher.tick()
     assert watcher._confirm_count == 0
+
+
+async def test_ml_error_count_resets_on_idle() -> None:
+    """The IDLE transition must also reset _ml_error_count (not just _confirm_count),
+    mirroring the back-to-back job transition's reset of both counters."""
+    watcher, printer, *_ = await _make_watcher(printer_status=_printing_status())
+    watcher._ml_error_count = 5
+
+    printer.status = AsyncMock(return_value=_idle_status())
+    await watcher.tick()
+
+    assert watcher.state == WatcherState.IDLE
+    assert watcher._ml_error_count == 0
 
 
 # ---------------------------------------------------------------------------
@@ -900,6 +926,155 @@ async def test_fail_closed_error_count_resets_on_success() -> None:
     printer.pause.assert_not_called()
 
 
+async def test_fail_closed_sets_paused_by_sentinel_on_success() -> None:
+    """The fail-closed pause path must set _paused_by_sentinel, mirroring
+    _on_confirmed_detection, so the auto-stop-timeout escalation stays eligible."""
+    settings = Settings(
+        printer_ip="10.0.0.1",
+        printer_access_code="test",
+        detection_warmup_seconds=0,
+        ml_consecutive_failure_threshold=3,
+        ml_confirm_count=3,
+        ml_score_threshold=0.4,
+        ml_poll_interval_seconds=10,
+        watcher_stall_seconds=60,
+        resume_cooldown_seconds=0,
+    )
+    watcher, printer, _camera, ml, _db = await _make_watcher(
+        settings=settings,
+        printer_status=_printing_status(),
+    )
+    ml.detect = AsyncMock(return_value=MlResult(score=0.0, error=True))
+
+    await watcher.tick()
+    await watcher.tick()
+    await watcher.tick()
+
+    assert watcher.state == WatcherState.PAUSED
+    printer.pause.assert_called_once()
+    assert watcher._paused_by_sentinel is True
+
+
+async def test_fail_closed_pause_debounced_confirmed_paused_resets_error_count() -> None:
+    """PauseDebouncedError + live status confirms paused: treat as success —
+    transition to PAUSED, set _paused_by_sentinel, and reset _ml_error_count."""
+    settings = Settings(
+        printer_ip="10.0.0.1",
+        printer_access_code="test",
+        detection_warmup_seconds=0,
+        ml_consecutive_failure_threshold=3,
+        ml_confirm_count=3,
+        ml_score_threshold=0.4,
+        ml_poll_interval_seconds=10,
+        watcher_stall_seconds=60,
+        resume_cooldown_seconds=0,
+    )
+    watcher, printer, _camera, ml, _db = await _make_watcher(
+        settings=settings,
+        printer_status=_printing_status(),
+    )
+    watcher.state = WatcherState.ARMED
+    watcher._ml_error_count = 2  # one more failure reaches threshold=3
+    ml.detect = AsyncMock(return_value=MlResult(score=0.0, error=True))
+    printer.pause = AsyncMock(side_effect=PauseDebouncedError("debounced"))
+    printer.status = AsyncMock(
+        return_value=PrinterStatus(
+            printing=True,
+            elapsed_seconds=400.0,
+            current_layer=10,
+            total_layers=100,
+            filename="test.gcode",
+            print_state="paused",
+        )
+    )
+
+    await watcher._check_frame(WatcherState.ARMED)
+
+    assert watcher.state == WatcherState.PAUSED
+    assert watcher._paused_by_sentinel is True
+    assert watcher._ml_error_count == 0
+
+
+async def test_fail_closed_pause_debounced_not_paused_preserves_error_count() -> None:
+    """PauseDebouncedError + live status says still printing: the pause never took
+    effect, so _ml_error_count must be preserved (not reset) for an immediate retry."""
+    settings = Settings(
+        printer_ip="10.0.0.1",
+        printer_access_code="test",
+        detection_warmup_seconds=0,
+        ml_consecutive_failure_threshold=3,
+        ml_confirm_count=3,
+        ml_score_threshold=0.4,
+        ml_poll_interval_seconds=10,
+        watcher_stall_seconds=60,
+        resume_cooldown_seconds=0,
+    )
+    watcher, printer, _camera, ml, _db = await _make_watcher(
+        settings=settings,
+        printer_status=_printing_status(),
+    )
+    watcher.state = WatcherState.ARMED
+    watcher._ml_error_count = 2  # one more failure reaches threshold=3
+    ml.detect = AsyncMock(return_value=MlResult(score=0.0, error=True))
+    printer.pause = AsyncMock(side_effect=PauseDebouncedError("debounced"))
+    printer.status = AsyncMock(
+        return_value=PrinterStatus(
+            printing=True,
+            elapsed_seconds=400.0,
+            current_layer=10,
+            total_layers=100,
+            filename="test.gcode",
+            print_state="printing",
+        )
+    )
+
+    await watcher._check_frame(WatcherState.ARMED)
+
+    assert watcher.state != WatcherState.PAUSED
+    assert watcher._paused_by_sentinel is False
+    assert watcher._ml_error_count == 3  # preserved, not reset to 0
+
+
+async def test_fail_closed_pause_generic_exception_confirmed_paused_resets_error_count() -> None:
+    """A generic pause() Exception (not just PauseDebouncedError) must also fall back
+    to a live status check, and reset _ml_error_count only if actually paused."""
+    settings = Settings(
+        printer_ip="10.0.0.1",
+        printer_access_code="test",
+        detection_warmup_seconds=0,
+        ml_consecutive_failure_threshold=3,
+        ml_confirm_count=3,
+        ml_score_threshold=0.4,
+        ml_poll_interval_seconds=10,
+        watcher_stall_seconds=60,
+        resume_cooldown_seconds=0,
+    )
+    watcher, printer, _camera, ml, _db = await _make_watcher(
+        settings=settings,
+        printer_status=_printing_status(),
+    )
+    watcher.state = WatcherState.ARMED
+    watcher._ml_error_count = 2  # one more failure reaches threshold=3
+    ml.detect = AsyncMock(return_value=MlResult(score=0.0, error=True))
+    printer.pause = AsyncMock(side_effect=Exception("mqtt publish failed"))
+    printer.status = AsyncMock(
+        return_value=PrinterStatus(
+            printing=True,
+            elapsed_seconds=400.0,
+            current_layer=10,
+            total_layers=100,
+            filename="test.gcode",
+            print_state="paused",
+        )
+    )
+
+    await watcher._check_frame(WatcherState.ARMED)
+
+    assert watcher.state == WatcherState.PAUSED
+    assert watcher._paused_by_sentinel is True
+    assert watcher._ml_error_count == 0
+
+
 async def test_paused_externally_transitions_to_paused_state() -> None:
     """If print_state is 'paused', the watcher transitions to PAUSED and doesn't run detection."""
     watcher, printer, camera, ml, _ = await _make_watcher(printer_status=_printing_status())
@@ -1229,6 +1404,57 @@ async def test_watchdog_auto_stop_disabled_by_default(monkeypatch) -> None:
 
     await watcher._tick()
     printer.stop.assert_not_called()
+
+
+async def test_watchdog_auto_stop_retries_after_failed_stop(monkeypatch) -> None:
+    """A failed stop() attempt must NOT permanently disable the escalation — it must
+    remain eligible to retry on a later tick, and the notification must not be
+    re-dispatched on every retry."""
+    settings = Settings(
+        printer_ip="10.0.0.1",
+        printer_access_code="test",
+        auto_stop_timeout_seconds=60,
+        resume_cooldown_seconds=0,
+    )
+    watcher, printer, _camera, _ml, db = await _make_watcher(settings=settings)
+    db.get_setting = AsyncMock(return_value="true")
+
+    watcher.state = WatcherState.PAUSED
+    watcher._paused_since = datetime.now(tz=UTC) - timedelta(seconds=120)
+    watcher._paused_by_sentinel = True
+
+    paused_status = PrinterStatus(
+        printing=True,
+        elapsed_seconds=400.0,
+        current_layer=10,
+        total_layers=100,
+        filename="test.gcode",
+        print_state="paused",
+    )
+    printer.status = AsyncMock(return_value=paused_status)
+    printer.stop = AsyncMock(side_effect=Exception("mqtt timeout"))
+
+    # First tick: stop() fails — escalation must stay armed for a retry.
+    await watcher._tick()
+    printer.stop.assert_called_once()
+    watcher._dispatcher.dispatch_text.assert_called_once()
+    assert watcher._paused_since is not None
+    assert watcher._paused_by_sentinel is True
+
+    # Second tick: stop() still fails — must retry, but not re-dispatch the alert.
+    await watcher._tick()
+    assert printer.stop.call_count == 2
+    watcher._dispatcher.dispatch_text.assert_called_once()
+
+    # Third tick: stop() finally succeeds — fields clear for a fresh episode.
+    printer.stop = AsyncMock()
+    await watcher._tick()
+    assert printer.stop.call_count == 1
+    assert watcher._paused_since is None
+    assert watcher._paused_by_sentinel is False
+    assert watcher._auto_stop_notified is False
+    # The notification was still only ever dispatched the one time.
+    watcher._dispatcher.dispatch_text.assert_called_once()
 
 
 async def test_poll_interval_fallback(monkeypatch) -> None:
@@ -1583,6 +1809,31 @@ async def test_stale_printer_status_transitions_to_offline() -> None:
 
     await watcher.tick()
     assert watcher.state == WatcherState.OFFLINE
+
+
+async def test_offline_transition_dispatches_alert_once() -> None:
+    """Transitioning to OFFLINE on a stale status must dispatch a user-facing alert
+    exactly once — not on every subsequent tick that the status stays stale."""
+    import dataclasses
+
+    dispatcher = _make_dispatcher()
+    watcher, printer, _, _, _ = await _make_watcher(
+        printer_status=_printing_status(), dispatcher=dispatcher
+    )
+    watcher.state = WatcherState.ARMED
+
+    status = _printing_status()
+    stale_status = dataclasses.replace(status, stale=True)
+    printer.status = AsyncMock(return_value=stale_status)
+
+    await watcher.tick()
+    assert watcher.state == WatcherState.OFFLINE
+    assert dispatcher.dispatch_text.call_count == 1
+
+    # Still stale on the next tick — must not dispatch again.
+    await watcher.tick()
+    assert watcher.state == WatcherState.OFFLINE
+    assert dispatcher.dispatch_text.call_count == 1
 
 
 async def test_liveness_watchdog_fires_in_offline_state() -> None:
@@ -2013,3 +2264,69 @@ async def test_debounced_pause_does_not_set_paused_when_printer_still_printing()
     # Must warn via dispatcher
     dispatcher.dispatch_text.assert_called_once()
     assert "debounce" in dispatcher.dispatch_text.call_args[0][0].lower()
+
+
+# ---------------------------------------------------------------------------
+# external_transition — compare-and-swap state writes for external callers
+# ---------------------------------------------------------------------------
+
+
+async def test_external_transition_applies_when_state_matches() -> None:
+    """external_transition writes the new state and returns True when the current
+    state is one of from_states (the compare-and-swap succeeds)."""
+    watcher, *_ = await _make_watcher()
+    watcher.state = WatcherState.PAUSED
+
+    applied = await watcher.external_transition(
+        WatcherState.ARMED, from_states=(WatcherState.PAUSED, WatcherState.STALLED)
+    )
+
+    assert applied is True
+    assert watcher.state == WatcherState.ARMED
+
+
+async def test_external_transition_noop_when_state_does_not_match() -> None:
+    """external_transition leaves state untouched and returns False when the current
+    state is not in from_states (e.g. a concurrent watchdog write raced it)."""
+    watcher, *_ = await _make_watcher()
+    watcher.state = WatcherState.IDLE
+
+    applied = await watcher.external_transition(
+        WatcherState.ARMED, from_states=(WatcherState.PAUSED, WatcherState.STALLED)
+    )
+
+    assert applied is False
+    assert watcher.state == WatcherState.IDLE
+
+
+async def test_external_transition_from_stalled_matches() -> None:
+    """The from_states tuple supports multiple source states, e.g. resuming from
+    either PAUSED or a watchdog-forced STALLED."""
+    watcher, *_ = await _make_watcher()
+    watcher.state = WatcherState.STALLED
+
+    applied = await watcher.external_transition(
+        WatcherState.ARMED, from_states=(WatcherState.PAUSED, WatcherState.STALLED)
+    )
+
+    assert applied is True
+    assert watcher.state == WatcherState.ARMED
+
+
+async def test_watchdog_stall_write_uses_state_lock() -> None:
+    """_watchdog_tick's STALLED write must go through the same _state_lock used by
+    external_transition, so the two can never interleave/tear a state read-modify-write."""
+    dispatcher = _make_dispatcher()
+    watcher, _, _, _, db = await _make_watcher(dispatcher=dispatcher)
+    watcher.state = WatcherState.PAUSED
+
+    stale_ts = (datetime.now(tz=UTC) - timedelta(seconds=120)).isoformat()
+    await db.update_heartbeat(stale_ts, "PAUSED")
+
+    assert not watcher._state_lock.locked()
+    await watcher._watchdog_tick(db)
+
+    assert watcher.state == WatcherState.STALLED
+    dispatcher.dispatch_stall.assert_called_once()
+    # Lock must be released again after the tick completes.
+    assert not watcher._state_lock.locked()

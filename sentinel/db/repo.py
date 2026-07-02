@@ -348,6 +348,11 @@ class Database:
         if self._analytics_cache is not None:
             return self._analytics_cache
 
+        # Both the completed/failed totals and the average duration are computed
+        # by one query so the whole summary reflects a single atomic snapshot —
+        # two sequential queries could otherwise straddle a concurrent write
+        # (e.g. a print job completing mid-request) and return a summary where
+        # avg_duration_seconds reflects a different set of rows than total_jobs.
         async with (
             self._read() as db,
             db.execute(
@@ -356,7 +361,8 @@ class Database:
                 " SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed_jobs,"
                 " SUM(duration_seconds) as total_duration_seconds,"
                 " SUM(filament_used_g) as total_filament_g,"
-                " SUM(pauses_count) as total_pauses"
+                " SUM(pauses_count) as total_pauses,"
+                " AVG(CASE WHEN status = 'completed' THEN duration_seconds END) as avg_duration"
                 " FROM print_jobs WHERE status IN ('completed', 'failed')"
             ) as cur,
         ):
@@ -366,19 +372,8 @@ class Database:
         total = res.get("total_jobs") or 0
         completed = res.get("completed_jobs") or 0
         success_rate = (completed / total * 100) if total > 0 else 0.0
-
-        # Average duration of completed prints
-        async with (
-            self._read() as db,
-            db.execute(
-                "SELECT AVG(duration_seconds) as avg_duration FROM print_jobs"
-                " WHERE status = 'completed' AND duration_seconds IS NOT NULL"
-            ) as cur_avg,
-        ):
-            row_avg = await cur_avg.fetchone()
-            avg_duration = (
-                row_avg["avg_duration"] if row_avg and row_avg["avg_duration"] is not None else 0.0
-            )
+        avg_duration_raw = res.get("avg_duration")
+        avg_duration = avg_duration_raw if avg_duration_raw is not None else 0.0
 
         summary = {
             "total_prints": total,

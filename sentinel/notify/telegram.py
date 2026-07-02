@@ -101,36 +101,38 @@ class TelegramNotifier:
             f"currently {self._settings.ml_score_threshold})"
         )
 
-        if photo_bytes and self._settings.telegram_send_snapshots:
+        async def _send() -> None:
+            nonlocal photo_bytes
+            if photo_bytes and self._settings.telegram_send_snapshots:
+                try:
+                    await self._bot.send_photo(
+                        chat_id=self._chat_id,
+                        photo=photo_bytes,
+                        caption=caption,
+                        reply_markup=keyboard,
+                        read_timeout=_TIMEOUT,
+                        write_timeout=_TIMEOUT,
+                        connect_timeout=_TIMEOUT,
+                    )
+                    return
+                except Exception:
+                    logger.exception("Telegram photo send failed for detection alert")
+                    photo_bytes = None
 
-            async def _attempt_photo() -> None:
-                await self._bot.send_photo(
-                    chat_id=self._chat_id,
-                    photo=photo_bytes,
-                    caption=caption,
-                    reply_markup=keyboard,
-                    read_timeout=_TIMEOUT,
-                    write_timeout=_TIMEOUT,
-                    connect_timeout=_TIMEOUT,
-                )
-
-            await self._send_with_retry_fn(_attempt_photo)
-        else:
             text_to_send = caption
             if self._settings.telegram_send_snapshots:
                 text_to_send += "\n(Snapshot not available)"
 
-            async def _attempt_msg() -> None:
-                await self._bot.send_message(
-                    chat_id=self._chat_id,
-                    text=text_to_send,
-                    reply_markup=keyboard,
-                    read_timeout=_TIMEOUT,
-                    write_timeout=_TIMEOUT,
-                    connect_timeout=_TIMEOUT,
-                )
+            await self._bot.send_message(
+                chat_id=self._chat_id,
+                text=text_to_send,
+                reply_markup=keyboard,
+                read_timeout=_TIMEOUT,
+                write_timeout=_TIMEOUT,
+                connect_timeout=_TIMEOUT,
+            )
 
-            await self._send_with_retry_fn(_attempt_msg)
+        await self._send_with_retry_fn(_send)
 
     async def send_stall_alert(self) -> None:
         if not self._enabled:
@@ -178,7 +180,23 @@ class TelegramNotifier:
         await self._send_with_retry_fn(_send)
 
     async def _send_with_retry_fn(self, fn: Callable[[], Awaitable[None]]) -> None:
+        from datetime import timedelta
+
         from telegram.error import NetworkError, RetryAfter, TimedOut
+
+        _default_wait = tenacity.wait_exponential(multiplier=0.5, min=0.5, max=8)
+
+        def _wait_for_retry_after(retry_state: tenacity.RetryCallState) -> float:
+            # Telegram's flood-control error carries a server-mandated
+            # retry_after; honor it instead of our own backoff schedule so we
+            # don't re-hit the rate limit before Telegram is ready for us.
+            exc = retry_state.outcome.exception() if retry_state.outcome else None
+            if isinstance(exc, RetryAfter) and exc.retry_after:
+                retry_after = exc.retry_after
+                if isinstance(retry_after, timedelta):
+                    return retry_after.total_seconds()
+                return float(retry_after)
+            return _default_wait(retry_state)
 
         # Only retry on transient network-level errors.
         # Permanent failures (invalid token, chat not found, etc.) are not
@@ -186,7 +204,7 @@ class TelegramNotifier:
         # them without spending 3x the send time on certain failures.
         retryer = tenacity.AsyncRetrying(
             stop=tenacity.stop_after_attempt(_RETRIES),
-            wait=tenacity.wait_exponential(multiplier=0.5, min=0.5, max=8),
+            wait=_wait_for_retry_after,
             retry=tenacity.retry_if_exception_type((NetworkError, TimedOut, RetryAfter)),
             reraise=True,
         )

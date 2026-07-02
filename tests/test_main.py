@@ -67,6 +67,41 @@ async def test_main_cli_overrides() -> None:
         get_settings.cache_clear()
 
 
+@pytest.mark.asyncio
+async def test_main_checkpoints_and_closes_db_when_client_construction_raises() -> None:
+    """A ValueError raised while constructing a client (e.g. a misconfigured
+    ML_API_URL) happens after db.connect() but used to happen before the
+    try/finally guarding db.checkpoint()/db.close(), so cleanup was skipped.
+    The whole startup sequence must now be wrapped so cleanup still runs."""
+    args = argparse.Namespace(host=None, port=None)
+
+    mock_db = AsyncMock()
+    mock_db.get_auth_secret.return_value = b"fake_secret"
+    mock_db.get_setting.return_value = "true"
+
+    orig_env = dict(os.environ)
+    try:
+        with (
+            patch("sentinel.db.repo.Database", return_value=mock_db),
+            patch("sentinel.camera.mjpeg.MjpegGrabber"),
+            patch("sentinel.printer.client.PrinterClient"),
+            patch("sentinel.ml.client.MlClient", side_effect=ValueError("bad ML config")),
+            patch("sentinel.safety.check_external_bind"),
+        ):
+            with pytest.raises(ValueError, match="bad ML config"):
+                await _run(args)
+
+            mock_db.connect.assert_awaited_once()
+            mock_db.checkpoint.assert_awaited_once()
+            mock_db.close.assert_awaited_once()
+    finally:
+        os.environ.clear()
+        os.environ.update(orig_env)
+        from sentinel.config import get_settings
+
+        get_settings.cache_clear()
+
+
 # ---------------------------------------------------------------------------
 # hash-password CLI command (Pattern 3)
 # ---------------------------------------------------------------------------

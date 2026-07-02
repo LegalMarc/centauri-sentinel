@@ -56,6 +56,3 @@ def test_error_message_includes_host_and_port() -> None:
     s = Settings(bind_host="192.168.1.5", bind_port=9000, external_bind_allowed=False)
     with pytest.raises(RuntimeError, match=r"192\.168\.1\.5:9000"):
         check_external_bind(s)
-
-
-

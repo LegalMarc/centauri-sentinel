@@ -93,6 +93,131 @@ async def test_concurrent_tasks_limit():
     await asyncio.sleep(0.01)
 
 
+async def test_with_retry_predicate_matches_httpx_transport_error() -> None:
+    """Regression test: the outer safety-net retry must actually retry when a
+    notifier raises httpx.* exceptions (as ntfy.py does), not just bare
+    OSError/TimeoutError/ConnectionError. Before the fix this predicate never
+    matched httpx exceptions, so the "retry" loop gave up after one attempt.
+    """
+    import httpx
+    import tenacity
+
+    notifier = MagicMock()
+    notifier.send_stall_alert = AsyncMock(side_effect=httpx.ConnectError("boom"))
+    dispatcher = NotificationDispatcher([notifier])
+
+    orig_retry = tenacity.AsyncRetrying
+
+    def mock_retry(*args: object, **kwargs: object) -> object:
+        # Keep the real predicate under test, just make retries instant/short.
+        kwargs["wait"] = tenacity.wait_fixed(0)
+        kwargs["stop"] = tenacity.stop_after_attempt(3)
+        return orig_retry(*args, **kwargs)
+
+    from unittest.mock import patch
+
+    with patch("tenacity.AsyncRetrying", mock_retry):
+        dispatcher.dispatch_stall()
+        await asyncio.sleep(0.05)
+
+    assert notifier.send_stall_alert.call_count == 3
+    assert "MagicMock" in dispatcher.failed_channels
+
+
+async def test_with_retry_predicate_matches_telegram_network_error() -> None:
+    """Regression test: telegram.error.NetworkError (and its subclass
+    TimedOut, raised by telegram.py once its own retries are exhausted) must
+    also be retried by the outer safety net.
+    """
+    import tenacity
+    from telegram.error import TimedOut
+
+    notifier = MagicMock()
+    notifier.send_camera_offline_alert = AsyncMock(side_effect=TimedOut())
+    dispatcher = NotificationDispatcher([notifier])
+
+    orig_retry = tenacity.AsyncRetrying
+
+    def mock_retry(*args: object, **kwargs: object) -> object:
+        kwargs["wait"] = tenacity.wait_fixed(0)
+        kwargs["stop"] = tenacity.stop_after_attempt(3)
+        return orig_retry(*args, **kwargs)
+
+    from unittest.mock import patch
+
+    with patch("tenacity.AsyncRetrying", mock_retry):
+        dispatcher.dispatch_camera_offline()
+        await asyncio.sleep(0.05)
+
+    assert notifier.send_camera_offline_alert.call_count == 3
+    assert "MagicMock" in dispatcher.failed_channels
+
+
+async def test_with_retry_predicate_excludes_out_of_scope_exceptions() -> None:
+    """httpx.HTTPStatusError and telegram.error.RetryAfter are handled (or
+    intentionally left unretried) at the inner notifier layer. The outer
+    safety net must NOT additionally retry them — only a single attempt.
+    """
+    import httpx
+    from telegram.error import RetryAfter
+
+    request = httpx.Request("POST", "https://example.com")
+    response = httpx.Response(500, request=request)
+
+    notifier = MagicMock()
+    notifier.send_text = AsyncMock(
+        side_effect=httpx.HTTPStatusError("server error", request=request, response=response)
+    )
+    dispatcher = NotificationDispatcher([notifier])
+    dispatcher.dispatch_text("hi")
+    await asyncio.sleep(0.05)
+    assert notifier.send_text.call_count == 1
+
+    notifier2 = MagicMock()
+    notifier2.send_text = AsyncMock(side_effect=RetryAfter(1))
+    dispatcher2 = NotificationDispatcher([notifier2])
+    dispatcher2.dispatch_text("hi")
+    await asyncio.sleep(0.05)
+    assert notifier2.send_text.call_count == 1
+
+
+async def test_failed_channels_recorded_for_alerts_without_snapshot_id() -> None:
+    """Regression test: only dispatch_detection passes a snapshot_id. Before
+    the fix, the other six dispatch_* methods (stall, camera_offline, text,
+    print_started, print_completed, external_pause) never recorded a failure
+    in failed_channels because of an `if snapshot_id:` gate, so a total
+    outage of those alert types never surfaced on the dashboard. Now failures
+    must be recorded uniformly, with None standing in for "no snapshot".
+    """
+    from unittest.mock import patch
+
+    import tenacity
+
+    notifier = MagicMock()
+    notifier.send_stall_alert = AsyncMock(side_effect=OSError("boom"))
+    dispatcher = NotificationDispatcher([notifier])
+
+    orig_retry = tenacity.AsyncRetrying
+
+    def mock_retry(*args: object, **kwargs: object) -> object:
+        kwargs["stop"] = tenacity.stop_after_attempt(1)
+        kwargs["wait"] = tenacity.wait_fixed(0)
+        return orig_retry(*args, **kwargs)
+
+    with patch("tenacity.AsyncRetrying", mock_retry):
+        dispatcher.dispatch_stall()
+        await asyncio.sleep(0.05)
+
+    assert "MagicMock" in dispatcher.failed_channels
+    assert dispatcher.failed_channels["MagicMock"] is None
+
+    # A subsequent successful send of any type still clears the entry.
+    notifier.send_stall_alert = AsyncMock()
+    dispatcher.dispatch_stall()
+    await asyncio.sleep(0.05)
+    assert "MagicMock" not in dispatcher.failed_channels
+
+
 async def test_dispatcher_errors_and_cleanup() -> None:
     from unittest.mock import patch
 

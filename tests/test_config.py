@@ -364,6 +364,30 @@ def test_resume_cooldown_seconds_invalid() -> None:
         Settings(resume_cooldown_seconds=-1)
 
 
+def test_detection_warmup_seconds_valid() -> None:
+    s = Settings(detection_warmup_seconds=0)
+    assert s.detection_warmup_seconds == 0
+    s = Settings(detection_warmup_seconds=10)
+    assert s.detection_warmup_seconds == 10
+
+
+def test_detection_warmup_seconds_invalid() -> None:
+    with pytest.raises(ValueError, match="DETECTION_WARMUP_SECONDS must be at least 0"):
+        Settings(detection_warmup_seconds=-5)
+
+
+def test_watcher_stall_seconds_valid() -> None:
+    s = Settings(watcher_stall_seconds=0)
+    assert s.watcher_stall_seconds == 0
+    s = Settings(watcher_stall_seconds=10)
+    assert s.watcher_stall_seconds == 10
+
+
+def test_watcher_stall_seconds_invalid() -> None:
+    with pytest.raises(ValueError, match="WATCHER_STALL_SECONDS must be at least 0"):
+        Settings(watcher_stall_seconds=-1)
+
+
 def test_log_format_default() -> None:
     s = Settings()
     assert s.log_format == "text"

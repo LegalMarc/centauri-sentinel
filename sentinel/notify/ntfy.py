@@ -21,6 +21,20 @@ _TIMEOUT = 10.0
 _RETRIES = 3
 
 
+def _should_retry(exc: BaseException) -> bool:
+    """Retry on transient network errors and 5xx responses only.
+
+    Permanent failures (invalid/revoked token, 400, 404, 413, ...) are 4xx
+    HTTPStatusErrors and must NOT be retried — they cannot recover on their
+    own, and retrying just holds JPEG bytes in memory for minutes. Mirrors
+    the retry philosophy in telegram.py's _send_with_retry_fn and the outer
+    retry in dispatcher.py's _with_retry.
+    """
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code >= 500
+    return isinstance(exc, httpx.RequestError)
+
+
 class NtfyNotifier:
     """Sends ntfy push notifications; no-op when ntfy_enabled=False."""
 
@@ -185,7 +199,7 @@ class NtfyNotifier:
         retryer = tenacity.AsyncRetrying(
             stop=tenacity.stop_after_attempt(_RETRIES),
             wait=tenacity.wait_exponential(multiplier=0.5, min=0.5, max=8),
-            retry=tenacity.retry_if_exception_type((httpx.RequestError, httpx.HTTPStatusError)),
+            retry=tenacity.retry_if_exception(_should_retry),
             reraise=True,
         )
         async for attempt in retryer:
