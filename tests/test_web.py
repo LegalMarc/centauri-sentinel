@@ -1234,6 +1234,75 @@ async def test_printer_api_endpoint(
     assert data["camera_connected"] is True
 
 
+async def test_printer_api_camera_connected_uses_sentinel_probe_not_printer_flag(
+    mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: AsyncMock
+) -> None:
+    """The printer's self-reported MQTT camera flag must not gate the badge.
+
+    The MQTT status channel and the MJPEG HTTP stream are independent
+    connections, so the printer can report external_device.camera=False
+    (e.g. before it has registered any viewer) even while Sentinel's own
+    stream proxy is perfectly reachable. Sentinel's own probe must win.
+    """
+    from sentinel.printer.types import PrinterStatus
+
+    mock_watcher.last_printer_status = PrinterStatus(
+        printing=True,
+        elapsed_seconds=10.0,
+        current_layer=1,
+        total_layers=10,
+        filename="test.gcode",
+        print_state="printing",
+        camera_connected=False,
+    )
+    mock_camera.is_connected = True
+
+    app_state = create_app(_base_settings(), db=mock_db, watcher=mock_watcher, camera=mock_camera)
+    async with _client(app_state) as c:
+        r = await c.get("/api/printer")
+
+    assert r.json()["camera_connected"] is True
+
+
+async def test_printer_api_camera_connected_false_when_sentinel_probe_fails(
+    mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: AsyncMock
+) -> None:
+    """Inverse of the above: printer over-reports while Sentinel's own probe has failed."""
+    from sentinel.printer.types import PrinterStatus
+
+    mock_watcher.last_printer_status = PrinterStatus(
+        printing=True,
+        elapsed_seconds=10.0,
+        current_layer=1,
+        total_layers=10,
+        filename="test.gcode",
+        print_state="printing",
+        camera_connected=True,
+    )
+    mock_camera.is_connected = False
+
+    app_state = create_app(_base_settings(), db=mock_db, watcher=mock_watcher, camera=mock_camera)
+    async with _client(app_state) as c:
+        r = await c.get("/api/printer")
+
+    assert r.json()["camera_connected"] is False
+
+
+async def test_printer_api_camera_connected_true_with_no_printer_status(
+    mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: AsyncMock
+) -> None:
+    """Camera state must not collapse to False just because MQTT telemetry is absent —
+    the camera stream is an independent HTTP connection to the printer."""
+    mock_watcher.last_printer_status = None
+    mock_camera.is_connected = True
+
+    app_state = create_app(_base_settings(), db=mock_db, watcher=mock_watcher, camera=mock_camera)
+    async with _client(app_state) as c:
+        r = await c.get("/api/printer")
+
+    assert r.json()["camera_connected"] is True
+
+
 async def test_control_pause_success(
     mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: AsyncMock
 ) -> None:
@@ -1352,6 +1421,40 @@ async def test_status_page_renders_with_printer_status(
     assert "test.gcode" in r.text
     assert "2m 0s" in r.text
     assert "10.0%" in r.text
+
+
+async def test_status_page_camera_badge_uses_sentinel_probe_not_printer_flag(
+    mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: MagicMock
+) -> None:
+    """Regression test for the dashboard showing 'Camera feed currently unavailable'
+    while a working feed exists elsewhere (e.g. in the printer's own slicer app).
+
+    The printer can report external_device.camera=False over MQTT independently
+    of whether Sentinel's own MJPEG stream proxy is reachable — the badge/img
+    must follow Sentinel's own probe (camera.is_connected), not that flag.
+    """
+    from sentinel.printer.types import PrinterStatus
+
+    mock_watcher.last_printer_status = PrinterStatus(
+        printing=True,
+        elapsed_seconds=120.0,
+        current_layer=2,
+        total_layers=20,
+        filename="test.gcode",
+        print_state="printing",
+        camera_connected=False,
+    )
+    mock_camera.is_connected = True
+
+    app_state = create_app(
+        _base_settings(auth_enabled=False), db=mock_db, watcher=mock_watcher, camera=mock_camera
+    )
+    async with _client(app_state) as c:
+        r = await c.get("/")
+
+    assert r.status_code == 200
+    assert "Camera Connected" in r.text
+    assert 'class="camera-dot offline"' not in r.text
 
 
 async def test_control_pause_failure(

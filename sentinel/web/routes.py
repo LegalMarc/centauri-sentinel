@@ -148,7 +148,11 @@ def make_router(
         progress = 0.0
         remaining_seconds = 0.0
         print_state = "offline"
-        camera_connected = False
+        # Sentinel's own MJPEG probe (same signal /readyz uses), not the printer's
+        # self-reported MQTT flag — the two connections are independent, so the
+        # printer can under-report camera availability while Sentinel's own stream
+        # proxy is perfectly reachable (and vice versa).
+        camera_connected = bool(camera.is_connected) if camera is not None else False
         filename = "—"
         current_layer = 0
         total_layers = 0
@@ -173,7 +177,6 @@ def make_router(
             bed_target = p_status.bed_target
             progress = 100.0 if print_state == "completed" else p_status.progress
             remaining_seconds = p_status.remaining_seconds
-            camera_connected = p_status.camera_connected
             filename = p_status.filename or "—"
             current_layer = p_status.current_layer
             total_layers = p_status.total_layers
@@ -240,6 +243,10 @@ def make_router(
             "tick_age_stale": age is not None and age > stall_seconds,
         }
 
+        # Sentinel's own MJPEG probe (same signal /readyz uses), not the printer's
+        # self-reported MQTT flag — see status_page() above for why these differ.
+        camera_connected = bool(camera.is_connected) if camera is not None else False
+
         p_status = await watcher.get_fresh_status()
         if p_status:
             data.update(
@@ -258,7 +265,7 @@ def make_router(
                     "print_state": (
                         "offline (stale data)" if p_status.stale else p_status.print_state
                     ),
-                    "camera_connected": p_status.camera_connected,
+                    "camera_connected": camera_connected,
                     "thumbnail_base64": p_status.thumbnail_base64,
                 }
             )
@@ -277,7 +284,7 @@ def make_router(
                     "progress": 0.0,
                     "remaining_seconds": 0.0,
                     "print_state": "offline",
-                    "camera_connected": False,
+                    "camera_connected": camera_connected,
                     "thumbnail_base64": None,
                 }
             )

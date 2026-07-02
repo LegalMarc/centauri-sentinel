@@ -121,6 +121,13 @@ The watcher resumes from the last known state in the database.
 
 **Fix:** See [MJPEG camera unreachable](#mjpeg-camera-unreachable) above.
 
+**Note:** The "Camera Connected/Offline" badge reflects Sentinel's own MJPEG probe
+(the same check `/readyz` uses), not the printer's self-reported MQTT
+`external_device.camera` flag. MQTT status and the MJPEG HTTP stream are separate
+connections, so it's possible for one to work while the other doesn't — e.g. a
+third-party viewer (like the Elegoo slicer) can show a live feed even while the
+printer hasn't (yet) reported a camera client to Sentinel over MQTT, or vice versa.
+
 ---
 
 ## `EXTERNAL_BIND_ALLOWED` safety guard fires
