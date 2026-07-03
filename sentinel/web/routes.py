@@ -27,15 +27,21 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _age_seconds(heartbeat: str | None) -> float | None:
-    """Return seconds since the last heartbeat, or None if no heartbeat recorded."""
-    if not heartbeat:
+def _age_seconds(last: datetime | str | None) -> float | None:
+    """Return seconds since `last` (a datetime or ISO string), or None if unknown."""
+    if not last:
         return None
-    try:
-        last = datetime.fromisoformat(heartbeat.replace("Z", "+00:00"))
-        return (datetime.now(UTC) - last).total_seconds()
-    except ValueError:
-        return None
+    if isinstance(last, str):
+        try:
+            last = datetime.fromisoformat(last.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    return (datetime.now(UTC) - last).total_seconds()
+
+
+def _format_age(seconds: float | None) -> str:
+    """Format an age in seconds as 'Ns ago', or 'never' if unknown."""
+    return f"{seconds:.0f}s ago" if seconds is not None else "never"
 
 
 def format_duration(seconds: float) -> str:
@@ -209,6 +215,14 @@ def make_router(
             total_layers = p_status.total_layers
             thumbnail_base64 = p_status.thumbnail_base64
 
+        observation = watcher.last_ml_observation
+        last_ml_score = observation.score if observation else None
+        last_ml_score_age_s = _age_seconds(observation.ts if observation else None)
+        last_ml_score_age = _format_age(last_ml_score_age_s)
+        last_ml_score_stale = (
+            last_ml_score_age_s is not None and last_ml_score_age_s > stall_seconds
+        )
+
         notification_failures = None
         if watcher is not None and watcher.dispatcher is not None:
             failures = watcher.dispatcher.failed_channels
@@ -222,7 +236,7 @@ def make_router(
             "status.html",
             {
                 "watcher_state": watcher.state.name,
-                "tick_age": f"{age:.0f}s ago" if age is not None else "never",
+                "tick_age": _format_age(age),
                 "tick_age_stale": age is not None and age > stall_seconds,
                 "notification_failures": notification_failures,
                 "detections": detections,
@@ -249,6 +263,9 @@ def make_router(
                 "printer_ip": printer_ip,
                 "ml_confirm_count": ml_confirm_count,
                 "ml_score_threshold": ml_score_threshold,
+                "last_ml_score": last_ml_score,
+                "last_ml_score_age": last_ml_score_age,
+                "last_ml_score_stale": last_ml_score_stale,
                 "ml_poll_interval_seconds": ml_poll_interval_seconds,
                 "detection_warmup_seconds": detection_warmup_seconds,
                 "version": __version__,
@@ -264,10 +281,17 @@ def make_router(
         last_tick_utc = heartbeat.get("last_tick_utc") if heartbeat else None
         age = _age_seconds(last_tick_utc)
 
+        observation = watcher.last_ml_observation
+        last_ml_score_age_s = _age_seconds(observation.ts if observation else None)
+
         data: dict[str, Any] = {
             "watcher_state": watcher.state.name,
-            "tick_age": f"{age:.0f}s ago" if age is not None else "never",
+            "tick_age": _format_age(age),
             "tick_age_stale": age is not None and age > stall_seconds,
+            "last_ml_score": observation.score if observation else None,
+            "last_ml_score_age": _format_age(last_ml_score_age_s),
+            "last_ml_score_stale": last_ml_score_age_s is not None
+            and last_ml_score_age_s > stall_seconds,
         }
 
         # Sentinel's own MJPEG probe (same signal /readyz uses), not the printer's

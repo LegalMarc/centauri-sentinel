@@ -980,6 +980,14 @@ footer a {
         <dd id="avg-duration">—</dd>
       </div>
     </div>
+    <div class="card">
+      <div class="card-icon">🎯</div>
+      <div class="card-content">
+        <dt>Last ML Score <span class="temp-target">(threshold {{ "%.2f"|format(ml_score_threshold) }})</span></dt>
+        <dd id="card-last-ml-score">{% if last_ml_score is not none %}{{ "%.3f"|format(last_ml_score) }}{% else %}—{% endif %}</dd>
+        <div id="card-last-ml-score-age" class="temp-target{% if last_ml_score_stale %} stale{% endif %}">{{ last_ml_score_age }}</div>
+      </div>
+    </div>
   </div>
 
   <h2>📋 Recent Print Jobs</h2>
@@ -1532,6 +1540,17 @@ function updateLiveStats() {
             cameraPlaceholder.style.display = "flex";
           }
         }
+      }
+
+      // Update Last ML Score
+      const cardLastMlScore = document.getElementById("card-last-ml-score");
+      const cardLastMlScoreAge = document.getElementById("card-last-ml-score-age");
+      if (cardLastMlScore && cardLastMlScoreAge) {
+        cardLastMlScore.textContent = (typeof data.last_ml_score === "number" && Number.isFinite(data.last_ml_score))
+          ? data.last_ml_score.toFixed(3)
+          : "—";
+        cardLastMlScoreAge.textContent = data.last_ml_score_age || "never";
+        cardLastMlScoreAge.classList.toggle("stale", !!data.last_ml_score_stale);
       }
 
       // Update Control Buttons state

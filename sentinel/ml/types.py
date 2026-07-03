@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from datetime import datetime
 
 
 @dataclass(frozen=True)
@@ -17,3 +21,11 @@ class MlResult:
 
     error: bool = False
     """True if the detection failed due to a network or parsing error."""
+
+
+@dataclass(frozen=True)
+class LastMlObservation:
+    """The most recent ML score the watcher observed, independent of threshold outcome."""
+
+    score: float
+    ts: datetime

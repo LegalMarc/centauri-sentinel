@@ -96,6 +96,7 @@ def mock_watcher() -> MagicMock:
     w = MagicMock()
     w.state = WatcherState.ARMED
     w.last_printer_status = None
+    w.last_ml_observation = None
     w.printer = MagicMock()
     w.printer.is_connected = True
 
@@ -1320,6 +1321,60 @@ async def test_printer_api_print_state_empty_string_falls_back(
     data = r.json()
     assert data["print_state"] == "printing"
     assert data["printer_state"] == "Printing"
+
+
+async def test_printer_api_last_ml_score_zero_is_not_falsy(
+    mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: AsyncMock
+) -> None:
+    """A genuine 0.0 confidence score must render as 0.0, not be treated as absent."""
+    from sentinel.ml.types import LastMlObservation
+
+    mock_watcher.last_ml_observation = LastMlObservation(score=0.0, ts=datetime.now(UTC))
+
+    app_state = create_app(_base_settings(), db=mock_db, watcher=mock_watcher, camera=mock_camera)
+    async with _client(app_state) as c:
+        r = await c.get("/api/printer")
+
+    assert r.status_code == 200
+    data = r.json()
+    assert data["last_ml_score"] == 0.0
+    assert data["last_ml_score_age"] != "never"
+    assert data["last_ml_score_stale"] is False
+
+
+async def test_status_page_renders_nonzero_last_ml_score(
+    mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: AsyncMock
+) -> None:
+    """The History & Analytics card must show the actual score, not '—', once one exists."""
+    from sentinel.ml.types import LastMlObservation
+
+    mock_watcher.last_ml_observation = LastMlObservation(score=0.412, ts=datetime.now(UTC))
+
+    app_state = create_app(_base_settings(), db=mock_db, watcher=mock_watcher, camera=mock_camera)
+    async with _client(app_state) as c:
+        r = await c.get("/")
+
+    assert r.status_code == 200
+    assert "0.412" in r.text
+
+
+async def test_printer_api_last_ml_score_stale(
+    mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: AsyncMock
+) -> None:
+    """A score older than the stall threshold must be flagged stale, not shown as fresh."""
+    from sentinel.ml.types import LastMlObservation
+
+    mock_watcher.last_ml_observation = LastMlObservation(
+        score=0.5, ts=datetime.now(UTC) - timedelta(seconds=120)
+    )
+
+    app_state = create_app(_base_settings(), db=mock_db, watcher=mock_watcher, camera=mock_camera)
+    async with _client(app_state) as c:
+        r = await c.get("/api/printer")
+
+    assert r.status_code == 200
+    data = r.json()
+    assert data["last_ml_score_stale"] is True
 
 
 async def test_printer_api_printer_state_matches_status_page_when_stale(

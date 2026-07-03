@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
 from sentinel.camera.errors import CameraOfflineError
+from sentinel.ml.types import LastMlObservation
 from sentinel.printer.errors import PauseDebouncedError
 from sentinel.watcher.state import WatcherState
 
@@ -93,6 +94,7 @@ class WatcherLoop:
         self._state_lock = asyncio.Lock()
         self._last_resume_time = 0.0
         self._ml_error_count = 0
+        self.last_ml_observation: LastMlObservation | None = None
 
     @property
     def state(self) -> WatcherState:
@@ -144,6 +146,19 @@ class WatcherLoop:
                         self._snooze_task = asyncio.create_task(
                             self._re_enable_after(snooze_until - now)
                         )
+        except (ValueError, TypeError):
+            pass
+
+        # Restore the last observed ML score across restarts so the dashboard
+        # doesn't falsely read "never" right after a deploy/crash-recovery.
+        try:
+            last_score_str = await self._db.get_setting("last_ml_score")
+            last_score_ts_str = await self._db.get_setting("last_ml_score_ts")
+            if last_score_str is not None and last_score_ts_str is not None:
+                self.last_ml_observation = LastMlObservation(
+                    score=float(last_score_str),
+                    ts=datetime.fromisoformat(last_score_ts_str),
+                )
         except (ValueError, TypeError):
             pass
 
@@ -657,6 +672,9 @@ class WatcherLoop:
             return
 
         self._ml_error_count = 0
+        self.last_ml_observation = LastMlObservation(score=result.score, ts=datetime.now(tz=UTC))
+        await self._db.set_setting("last_ml_score", str(self.last_ml_observation.score))
+        await self._db.set_setting("last_ml_score_ts", self.last_ml_observation.ts.isoformat())
 
         score_threshold_str = await self._db.get_setting(
             "ml_score_threshold",

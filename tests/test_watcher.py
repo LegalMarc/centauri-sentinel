@@ -2134,6 +2134,49 @@ async def test_disable_after_snooze_survives_restart() -> None:
     await db.close()
 
 
+async def test_last_ml_observation_persists_and_restores_across_restart() -> None:
+    """The last observed ML score must survive a process restart.
+
+    Without persistence, the "Last ML Score" dashboard card would read
+    "never" immediately after every restart even though the ML pipeline
+    was scoring frames seconds earlier.
+    """
+    watcher, _printer, _camera, _ml, db = await _make_watcher(
+        printer_status=_printing_status(), ml_score=0.42
+    )
+    await watcher.tick()
+
+    assert watcher.last_ml_observation is not None
+    assert watcher.last_ml_observation.score == 0.42
+    assert (await db.get_setting("last_ml_score")) == "0.42"
+    assert (await db.get_setting("last_ml_score_ts")) is not None
+
+    # Simulate a restart: a fresh WatcherLoop sharing the same db starts
+    # with no observation, then restores one from persisted settings.
+    printer2 = MagicMock()
+    printer2.status = AsyncMock(return_value=_idle_status())
+    camera2 = MagicMock()
+    ml2 = MagicMock()
+    watcher2 = WatcherLoop(
+        settings=_FAST_SETTINGS,
+        printer=printer2,
+        camera=camera2,
+        ml=ml2,
+        db=db,
+        dispatcher=_make_dispatcher(),
+    )
+    assert watcher2.last_ml_observation is None
+
+    task = asyncio.create_task(watcher2.run_forever())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert watcher2.last_ml_observation is not None
+    assert watcher2.last_ml_observation.score == 0.42
+
+
 async def test_snooze_write_order_is_crash_safe() -> None:
     """snooze() must write snooze_until_utc before detection_enabled=false.
 
