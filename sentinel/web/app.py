@@ -129,6 +129,7 @@ def create_app(
         """Single-use JPEG endpoint for the Obico ML API URL-fetch flow."""
         if internal_token is not None:
             t = request.query_params.get("t") or ""
+            # Use constant-time comparison to prevent timing side-channel attack
             if not t or not hmac.compare_digest(t, internal_token):
                 raise HTTPException(status_code=403, detail="Forbidden: Invalid internal token")
 
