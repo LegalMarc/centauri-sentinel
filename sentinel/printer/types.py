@@ -57,3 +57,29 @@ class PrinterStatus:
 
 # MQTT method codes (verified from spike, method 6000 = status push)
 METHOD_STATUS_PUSH = 6000
+
+# ---------------------------------------------------------------------------
+# CC2 print-control command codes.
+#
+# Verified against the working reference implementation
+# danielcherubini/elegoo-homeassistant (custom_components/elegoo_printer/cc2/
+# const.py) and cross-checked against the community CC2_PROTOCOL.md. These are
+# the codes the Centauri Carbon 2 firmware honours.
+#
+# NOTE: the previous values (pause=1001, resume=1002, stop=1003) were WRONG:
+# 1001 is GET_ATTRIBUTES and 1002 is GET_STATUS — read-only queries — so the
+# old "pause" command silently queried attributes and never paused. See
+# docs/verified-assumptions.md.
+# ---------------------------------------------------------------------------
+CC2_CMD_PAUSE_PRINT = 1021
+CC2_CMD_STOP_PRINT = 1022
+CC2_CMD_RESUME_PRINT = 1023
+
+# Command-response ack: result.error_code == 0 means the printer accepted it.
+CC2_ACK_OK = 0
+
+# Registration handshake (required on firmware 02.x before api_request commands
+# are honoured — the printer silently ignores unregistered command clients).
+CC2_REG_OK = "ok"
+CC2_REG_TOO_MANY_CLIENTS = "too many clients"
+CC2_REGISTRATION_TIMEOUT_S = 3.0

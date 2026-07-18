@@ -113,6 +113,42 @@ Known method codes (from elegoo-link source + live observation):
 - Resume: maps to `MethodType::RESUME_PRINT`
 - Stop: maps to `MethodType::STOP_PRINT`
 
+### ⚠️ CORRECTION (2026-07-18): control-command codes + firmware-02.x registration
+
+The numeric command codes were previously **wrong** in the client (pause=1001,
+resume=1002, stop=1003). Those are actually *read* queries — `1001` =
+GET_ATTRIBUTES, `1002` = GET_STATUS — so "pause" silently queried attributes and
+the printer never paused. Verified correct CC2 codes (source:
+[danielcherubini/elegoo-homeassistant `cc2/const.py`](https://github.com/danielcherubini/elegoo-homeassistant),
+cross-checked against the community `CC2_PROTOCOL.md`):
+
+| Operation | Method code |
+|---|---|
+| Start print | 1020 |
+| **Pause** | **1021** |
+| **Stop** | **1022** |
+| **Resume** | **1023** |
+
+Command envelope: `{"id": <int>, "method": <code>, "params": {}}` (all three
+fields; `id` is echoed in the ack for matching).
+
+**Firmware 02.x requires a registration handshake before any `api_request`
+command is honoured.** Status pushes on `elegoo/<sn>/api_status` are broadcast
+and need no registration (which is why detection kept working while pausing was
+silently dropped). The command path must, on the same MQTT session:
+
+1. Subscribe to `elegoo/<sn>/<request_id>/register_response` and
+   `elegoo/<sn>/<client_id>/api_response`.
+2. Publish `{"client_id", "request_id"}` to `elegoo/<sn>/api_register`.
+3. Wait for `{"error": "ok"}` on the register_response topic (3 s timeout;
+   `"too many clients"` / `"fail"` are rejections).
+4. Only then publish the command to `elegoo/<sn>/<client_id>/api_request` and
+   confirm the matching-id ack on `api_response`.
+
+`client_id` (`0cli<ts><rand>`, 10 chars) and `request_id` (16-hex + ts) formats
+mirror the Elegoo web interface; the firmware is picky about their shape.
+See `sentinel/printer/client.py::_send_command` and `_generate_cc2_ids`.
+
 ### pycentauri status (0.4.2)
 
 pycentauri explicitly notes: *"The newer Centauri Carbon 2 uses a different JSON-RPC probe and is not supported here."* (discovery.py docstring). The `Printer.connect()` hardcodes port 3030 which is closed on the Carbon 2.

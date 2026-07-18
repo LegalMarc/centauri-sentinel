@@ -16,6 +16,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import secrets
 import time
 import uuid
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -24,8 +25,24 @@ import aiomqtt
 import tenacity
 
 from sentinel.network import resolve_and_validate_printer_ip
-from sentinel.printer.errors import PauseDebouncedError, PrinterProtocolError, PrinterTimeoutError
-from sentinel.printer.types import METHOD_STATUS_PUSH, PrinterStatus
+from sentinel.printer.errors import (
+    PauseDebouncedError,
+    PrinterCommandError,
+    PrinterProtocolError,
+    PrinterRegistrationError,
+    PrinterTimeoutError,
+)
+from sentinel.printer.types import (
+    CC2_ACK_OK,
+    CC2_CMD_PAUSE_PRINT,
+    CC2_CMD_RESUME_PRINT,
+    CC2_CMD_STOP_PRINT,
+    CC2_REG_OK,
+    CC2_REG_TOO_MANY_CLIENTS,
+    CC2_REGISTRATION_TIMEOUT_S,
+    METHOD_STATUS_PUSH,
+    PrinterStatus,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -40,6 +57,27 @@ _TIMEOUT_S = 5.0
 _RETRY_ATTEMPTS = 3
 _RETRY_WAIT = tenacity.wait_exponential(multiplier=0.5, min=0.5, max=4)
 _PAUSE_DEBOUNCE_S = 30.0  # minimum seconds between successive pause() publishes
+
+
+def _generate_cc2_ids() -> tuple[str, str]:
+    """Generate a (client_id, request_id) pair for the CC2 registration handshake.
+
+    Formats mirror the Elegoo web interface / reference implementation
+    (danielcherubini/elegoo-homeassistant) because the firmware is known to be
+    picky about the shape of these identifiers:
+
+    - client_id:  ``0cli`` + last 5 hex of the ms timestamp + a few random hex,
+      truncated to 10 chars.
+    - request_id: a 16-char UUID-like hex string + the ms timestamp in hex.
+    """
+    ms = int(time.time() * 1000)
+    client_id = f"0cli{format(ms, 'x')[-5:]}{format(secrets.randbelow(4096), 'x')}"[:10]
+    uuid_part = "".join(
+        format(secrets.randbelow(16) if c == "x" else secrets.randbelow(4) + 8, "x")
+        for c in "xxxxxxxxxxxxxxxx"
+    )
+    request_id = f"{uuid_part}{format(ms, 'x')}"
+    return client_id, request_id
 
 
 def _deep_merge(target: dict[str, Any], source: dict[str, Any], max_keys: int = 1000) -> None:
@@ -229,6 +267,13 @@ class PrinterClient:
         self._file_layers_cache: dict[str, int] = {}
         self._status_client_id = f"{self._client_id}-status"
         self._cmd_client_id = f"{self._client_id}-cmd"
+        # Monotonic per-command id used to match api_response acks to requests.
+        self._request_counter: int = 0
+
+    def _next_request_id(self) -> int:
+        """Return the next command id (monotonic, for ack matching)."""
+        self._request_counter += 1
+        return self._request_counter
 
     @property
     def is_connected(self) -> bool:
@@ -283,7 +328,7 @@ class PrinterClient:
             )
         self._last_pause_at = now
         try:
-            await self._with_retry(lambda: self._send_command({"method": 1001}))
+            await self._with_retry(lambda: self._send_command(CC2_CMD_PAUSE_PRINT))
         except BaseException:
             # BaseException (not Exception) so a mid-publish asyncio.CancelledError
             # also rolls back the anchor — it's a BaseException in Python 3.8+, and
@@ -303,7 +348,7 @@ class PrinterClient:
 
     async def resume(self) -> None:
         """Send resume command and clear the pause debounce anchor."""
-        await self._with_retry(lambda: self._send_command({"method": 1002}))
+        await self._with_retry(lambda: self._send_command(CC2_CMD_RESUME_PRINT))
         self.clear_pause_debounce()
 
     async def stop(self) -> None:
@@ -314,7 +359,7 @@ class PrinterClient:
         """
         self._stop_pending = True
         try:
-            await self._with_retry(lambda: self._send_command({"method": 1003}))
+            await self._with_retry(lambda: self._send_command(CC2_CMD_STOP_PRINT))
         except Exception:
             logger.exception("Stop command failed, flag remains pending")
             raise
@@ -506,45 +551,147 @@ class PrinterClient:
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, 30.0)
 
-    async def _send_command(self, msg: dict[str, Any]) -> None:
-        """Publish a command and return; does not wait for an ack.
+    async def _send_command(
+        self, method: int, params: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """Register, publish a control command, and confirm the printer's ack.
 
-        Raises PrinterProtocolError if the printer serial number is not yet
-        known (i.e. no status message has been received since startup or last
-        close/reconfigure).  Publishing to a guessed topic would be a silent
-        no-op because the printer only subscribes to its own serial-keyed topic.
+        Firmware 02.x silently drops ``api_request`` commands from a client that
+        has not completed the ``api_register`` handshake, so every command opens
+        a short-lived MQTT session that (1) registers, (2) publishes the command
+        with the correct ``{"id", "method", "params"}`` envelope, and (3) waits
+        for the matching ``api_response`` ack. A missing ack or a non-zero
+        ``error_code`` raises rather than returning silently — a command the
+        printer ignores must surface as a real failure, not a false success.
 
-        The serial is re-checked again right before the topic is built,
-        after IP resolution and the MQTT connect handshake have both
-        awaited: a concurrent close()/reconfigure() can null it out in that
-        window, and publishing under the stale value would silently target
-        a topic nobody subscribes to.
+        Fresh per-command ``client_id``/``request_id`` are used so a closed
+        session never leaves a stale registration occupying a client slot.
+
+        Raises:
+            PrinterProtocolError: serial unknown / malformed response.
+            PrinterRegistrationError: registration rejected or timed out.
+            PrinterCommandError: command acknowledged with a non-zero error_code.
+            PrinterTimeoutError: no registration or command ack in time.
+
+        Returns the decoded command-response payload on success.
         """
         if self._serial_number is None:
             raise PrinterProtocolError(
                 "serial unknown — no status received yet; cannot publish command"
             )
+        resolved_ip = await resolve_and_validate_printer_ip(self._host)
+        client_id, request_id = _generate_cc2_ids()
+        cmd_id = self._next_request_id()
         try:
-            resolved_ip = await resolve_and_validate_printer_ip(self._host)
-            client_id = self._cmd_client_id
-            async with asyncio.timeout(_TIMEOUT_S):
-                async with aiomqtt.Client(
-                    hostname=resolved_ip,
-                    port=self._port,
-                    username="elegoo",
-                    password=self._access_code,
-                    identifier=client_id,
-                    keepalive=60,
-                ) as client:
-                    if self._serial_number is None:
-                        raise PrinterProtocolError(
-                            "serial became unknown mid-connect (printer was "
-                            "closed/reconfigured); aborting command publish"
-                        )
-                    topic = f"elegoo/{self._serial_number}/{self._client_id}/api_request"
-                    await client.publish(topic, json.dumps(msg))
+            async with aiomqtt.Client(
+                hostname=resolved_ip,
+                port=self._port,
+                username="elegoo",
+                password=self._access_code,
+                identifier=client_id,
+                keepalive=60,
+                timeout=_TIMEOUT_S,
+            ) as client:
+                sn = self._serial_number
+                if sn is None:
+                    raise PrinterProtocolError(
+                        "serial became unknown mid-connect (printer was "
+                        "closed/reconfigured); aborting command publish"
+                    )
+                register_topic = f"elegoo/{sn}/api_register"
+                register_resp_topic = f"elegoo/{sn}/{request_id}/register_response"
+                request_topic = f"elegoo/{sn}/{client_id}/api_request"
+                response_topic = f"elegoo/{sn}/{client_id}/api_response"
+
+                # Subscribe to both reply topics BEFORE publishing anything so no
+                # fast response can race ahead of the subscription.
+                await client.subscribe(register_resp_topic)
+                await client.subscribe(response_topic)
+                messages = aiter(client.messages)
+
+                # 1) Registration handshake (required on firmware 02.x).
+                await client.publish(
+                    register_topic,
+                    json.dumps({"client_id": client_id, "request_id": request_id}),
+                )
+                await self._await_registration(messages, register_resp_topic)
+
+                # 2) The actual command, confirmed by its ack.
+                await client.publish(
+                    request_topic,
+                    json.dumps({"id": cmd_id, "method": method, "params": params or {}}),
+                )
+                return await self._await_command_ack(messages, response_topic, cmd_id)
         except TimeoutError as exc:
-            raise PrinterTimeoutError("Command publish timed out") from exc
+            raise PrinterTimeoutError("Command timed out (registration or ack)") from exc
+
+    async def _read_json_on_topic(
+        self, messages: Any, topic: str, timeout_s: float, what: str
+    ) -> dict[str, Any]:
+        """Read from the shared message iterator until a dict arrives on ``topic``.
+
+        Messages on other topics are skipped. Raises PrinterTimeoutError on
+        timeout and PrinterProtocolError if the connection closes first or the
+        payload is not a JSON object.
+        """
+        try:
+            async with asyncio.timeout(timeout_s):
+                while True:
+                    message = await anext(messages)
+                    if str(message.topic) != topic:
+                        continue
+                    try:
+                        payload = json.loads(message.payload)
+                    except json.JSONDecodeError as exc:
+                        raise PrinterProtocolError(f"malformed {what} response: {exc}") from exc
+                    if not isinstance(payload, dict):
+                        raise PrinterProtocolError(
+                            f"unexpected {what} response type: {type(payload).__name__}"
+                        )
+                    return payload
+        except TimeoutError as exc:
+            raise PrinterTimeoutError(f"timed out waiting for {what}") from exc
+        except StopAsyncIteration as exc:
+            raise PrinterProtocolError(f"connection closed while waiting for {what}") from exc
+
+    async def _await_registration(self, messages: Any, register_resp_topic: str) -> None:
+        """Wait for a successful registration response or raise."""
+        payload = await self._read_json_on_topic(
+            messages, register_resp_topic, CC2_REGISTRATION_TIMEOUT_S, "registration"
+        )
+        error = payload.get("error", "")
+        if error == CC2_REG_OK:
+            logger.debug("CC2 registration accepted (client_id in topic %s)", register_resp_topic)
+            return
+        if error == CC2_REG_TOO_MANY_CLIENTS:
+            raise PrinterRegistrationError(
+                "registration rejected: too many clients connected to the printer"
+            )
+        raise PrinterRegistrationError(f"registration rejected by printer: error={error!r}")
+
+    async def _await_command_ack(
+        self, messages: Any, response_topic: str, cmd_id: int
+    ) -> dict[str, Any]:
+        """Wait for the ack matching ``cmd_id`` and verify error_code == 0."""
+        while True:
+            payload = await self._read_json_on_topic(
+                messages, response_topic, _TIMEOUT_S, "command ack"
+            )
+            # Ignore acks for a different in-flight id (shouldn't happen on a
+            # dedicated per-command session, but be defensive).
+            if payload.get("id") != cmd_id:
+                continue
+            # Receiving the matching-id ack is itself the success signal (this is
+            # what the reference client relies on). Only an *explicit* non-zero
+            # error_code is a rejection — a missing field is not treated as one,
+            # so we never turn a genuinely-accepted command into a false failure.
+            result = payload.get("result")
+            error_code = result.get("error_code") if isinstance(result, dict) else None
+            if error_code in (None, CC2_ACK_OK):
+                return payload
+            raise PrinterCommandError(
+                f"printer rejected command id={cmd_id}: error_code={error_code!r}"
+            )
 
     async def _with_retry(self, fn: Callable[[], Awaitable[_T]]) -> _T:
         retryer = tenacity.AsyncRetrying(

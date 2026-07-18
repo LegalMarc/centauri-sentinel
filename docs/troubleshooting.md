@@ -81,6 +81,34 @@ The `token-init` container will regenerate the token on the next deploy.
 
 ---
 
+## Pause/resume/stop do nothing (status + detection still work)
+
+**Symptom:** Detection fires and notifications are sent, but the printer never
+actually pauses — neither the UI **Pause** button nor auto-pause on detection.
+Logs show a tight loop of `CONFIRMED DETECTION … pausing printer` immediately
+followed by `Printer resumed externally — transitioning ARMED`, with the printer
+never reaching a `paused` state.
+
+**Cause:** On **firmware 02.x**, the printer only honours `api_request` commands
+from a client that has completed the `api_register` handshake; unregistered
+commands are silently dropped. Status pushes (`api_status`) are broadcast and
+need no registration, so detection keeps working while every pause is a no-op.
+(A second, older bug used the wrong command codes entirely — `1001/1002/1003`
+are read queries, not pause/resume/stop.)
+
+**Fix:** Handled in code as of 2026-07-18 — the command path now registers,
+sends the correct codes (pause `1021`, stop `1022`, resume `1023`) with the
+`{"id","method","params"}` envelope, and confirms the printer's ack. A command
+the printer does not acknowledge now raises (surfaced as a UI 500 / a
+"pause failed" notification) instead of silently succeeding. See
+`docs/verified-assumptions.md` and `sentinel/printer/client.py`.
+
+If it recurs after a future firmware update, capture the real exchange by
+subscribing to `elegoo/#` on the printer's LAN while pausing from the official
+Elegoo app, and compare the command envelope / method codes.
+
+---
+
 ## Watcher appears stalled (`WATCHER_STALL_SECONDS` alert fires)
 
 **Symptom:** You receive a "watcher stalled" notification. Watcher state is not updating.
@@ -175,4 +203,3 @@ docker volume create <stack_prefix>_sentinel-data
 - Ensure that `NTFY_SEND_SNAPSHOTS` is set to `true` (or `true` equivalent).
 - Ensure your ntfy server version supports attachments and HTTP headers (standard in all recent versions).
 - Check that the client has a working internet connection to the ntfy server to upload the image directly.
-

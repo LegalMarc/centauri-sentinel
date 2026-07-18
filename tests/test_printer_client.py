@@ -16,8 +16,19 @@ import pytest
 
 from sentinel.config import Settings
 from sentinel.printer.client import PrinterClient, _parse_status
-from sentinel.printer.errors import PauseDebouncedError, PrinterProtocolError, PrinterTimeoutError
-from sentinel.printer.types import PrinterStatus
+from sentinel.printer.errors import (
+    PauseDebouncedError,
+    PrinterCommandError,
+    PrinterProtocolError,
+    PrinterRegistrationError,
+    PrinterTimeoutError,
+)
+from sentinel.printer.types import (
+    CC2_CMD_PAUSE_PRINT,
+    CC2_CMD_RESUME_PRINT,
+    CC2_CMD_STOP_PRINT,
+    PrinterStatus,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -306,31 +317,227 @@ async def _make_publish_client() -> tuple[Any, Any]:
     return cm, client_mock
 
 
+def _make_message_with_topic(topic: str, payload: dict[str, Any]) -> MagicMock:
+    msg = MagicMock()
+    msg.topic = topic
+    msg.payload = json.dumps(payload).encode()
+    return msg
+
+
+class _FakeCommandClient:
+    """Simulates the CC2 register→command→ack MQTT exchange over one session.
+
+    Publishing to ``.../api_register`` enqueues a ``register_response``; publishing
+    a command to ``.../api_request`` enqueues an ``api_response`` ack echoing the
+    request id. Response error strings / ack error_codes are configurable, and
+    either response can be dropped to exercise timeouts.
+    """
+
+    def __init__(
+        self,
+        *,
+        register_error: str = "ok",
+        ack_error_code: int | None = 0,
+        omit_error_code: bool = False,
+        drop_register: bool = False,
+        drop_ack: bool = False,
+    ) -> None:
+        self.subscribed: list[str] = []
+        self.published: list[tuple[str, dict[str, Any]]] = []
+        self._register_error = register_error
+        self._ack_error_code = ack_error_code
+        self._omit_error_code = omit_error_code
+        self._drop_register = drop_register
+        self._drop_ack = drop_ack
+        self._queue: list[MagicMock] = []
+
+    @property
+    def command_publishes(self) -> list[dict[str, Any]]:
+        """Payloads published to api_request that carry a command (have 'method')."""
+        return [p for t, p in self.published if t.endswith("/api_request") and "method" in p]
+
+    async def subscribe(self, topic: str) -> None:
+        self.subscribed.append(topic)
+
+    async def publish(self, topic: str, payload_str: str) -> None:
+        payload = json.loads(payload_str)
+        self.published.append((topic, payload))
+        parts = topic.split("/")
+        if topic.endswith("/api_register") and not self._drop_register:
+            sn, request_id = parts[1], payload["request_id"]
+            self._queue.append(
+                _make_message_with_topic(
+                    f"elegoo/{sn}/{request_id}/register_response",
+                    {"client_id": payload["client_id"], "error": self._register_error},
+                )
+            )
+        elif topic.endswith("/api_request") and "method" in payload and not self._drop_ack:
+            sn, client_id = parts[1], parts[2]
+            result: dict[str, Any] = {}
+            if not self._omit_error_code:
+                result["error_code"] = self._ack_error_code
+            self._queue.append(
+                _make_message_with_topic(
+                    f"elegoo/{sn}/{client_id}/api_response",
+                    {"id": payload["id"], "method": payload["method"], "result": result},
+                )
+            )
+
+    @property
+    def messages(self) -> _FakeCommandClient:
+        return self
+
+    def __aiter__(self) -> _FakeCommandClient:
+        return self
+
+    async def __anext__(self) -> MagicMock:
+        # The client always publishes before reading, so the expected response is
+        # already queued on the happy path. When a response was dropped, yield to
+        # the event loop so the caller's asyncio.timeout can fire.
+        while not self._queue:
+            await asyncio.sleep(0.005)
+        return self._queue.pop(0)
+
+
+def _make_command_client(**kwargs: Any) -> tuple[Any, _FakeCommandClient]:
+    fake = _FakeCommandClient(**kwargs)
+    cm = AsyncMock()
+    cm.__aenter__ = AsyncMock(return_value=fake)
+    cm.__aexit__ = AsyncMock(return_value=False)
+    return cm, fake
+
+
 async def test_pause_publishes_command() -> None:
-    cm, mock_client = await _make_publish_client()
+    cm, fake = _make_command_client()
     with patch("sentinel.printer.client.aiomqtt.Client", return_value=cm):
         client = PrinterClient(_SETTINGS)
         client._serial_number = "TESTSERIAL"
         await client.pause()
-    mock_client.publish.assert_called_once()
+    assert [p["method"] for p in fake.command_publishes] == [CC2_CMD_PAUSE_PRINT]
 
 
 async def test_resume_publishes_command() -> None:
-    cm, mock_client = await _make_publish_client()
+    cm, fake = _make_command_client()
     with patch("sentinel.printer.client.aiomqtt.Client", return_value=cm):
         client = PrinterClient(_SETTINGS)
         client._serial_number = "TESTSERIAL"
         await client.resume()
-    mock_client.publish.assert_called_once()
+    assert [p["method"] for p in fake.command_publishes] == [CC2_CMD_RESUME_PRINT]
 
 
 async def test_stop_publishes_command() -> None:
-    cm, mock_client = await _make_publish_client()
+    cm, fake = _make_command_client()
     with patch("sentinel.printer.client.aiomqtt.Client", return_value=cm):
         client = PrinterClient(_SETTINGS)
         client._serial_number = "TESTSERIAL"
         await client.stop()
-    mock_client.publish.assert_called_once()
+    assert [p["method"] for p in fake.command_publishes] == [CC2_CMD_STOP_PRINT]
+
+
+# ---------------------------------------------------------------------------
+# Registration handshake + ack verification (firmware 02.x)
+# ---------------------------------------------------------------------------
+
+
+async def test_send_command_registers_before_publishing_command() -> None:
+    """The client must complete the api_register handshake before api_request."""
+    cm, fake = _make_command_client()
+    with patch("sentinel.printer.client.aiomqtt.Client", return_value=cm):
+        client = PrinterClient(_SETTINGS)
+        client._serial_number = "SN1"
+        await client._send_command(CC2_CMD_PAUSE_PRINT)
+    topics = [t for t, _ in fake.published]
+    register_idx = next(i for i, t in enumerate(topics) if t.endswith("/api_register"))
+    request_idx = next(i for i, t in enumerate(topics) if t.endswith("/api_request"))
+    assert register_idx < request_idx, "registration must precede the command publish"
+    # Registration payload carries client_id + request_id.
+    reg_payload = fake.published[register_idx][1]
+    assert set(reg_payload) == {"client_id", "request_id"}
+
+
+async def test_send_command_envelope_has_id_method_params() -> None:
+    """Commands must use the {'id','method','params'} envelope the firmware expects."""
+    cm, fake = _make_command_client()
+    with patch("sentinel.printer.client.aiomqtt.Client", return_value=cm):
+        client = PrinterClient(_SETTINGS)
+        client._serial_number = "SN1"
+        await client._send_command(CC2_CMD_PAUSE_PRINT)
+    cmd = fake.command_publishes[0]
+    assert cmd["method"] == CC2_CMD_PAUSE_PRINT
+    assert cmd["params"] == {}
+    assert isinstance(cmd["id"], int)
+
+
+async def test_send_command_registration_rejected_raises() -> None:
+    cm, _ = _make_command_client(register_error="fail")
+    with (
+        patch("sentinel.printer.client.aiomqtt.Client", return_value=cm),
+        pytest.raises(PrinterRegistrationError),
+    ):
+        client = PrinterClient(_SETTINGS)
+        client._serial_number = "SN1"
+        await client._send_command(CC2_CMD_PAUSE_PRINT)
+
+
+async def test_send_command_too_many_clients_raises_registration_error() -> None:
+    cm, fake = _make_command_client(register_error="too many clients")
+    with (
+        patch("sentinel.printer.client.aiomqtt.Client", return_value=cm),
+        pytest.raises(PrinterRegistrationError, match="too many clients"),
+    ):
+        client = PrinterClient(_SETTINGS)
+        client._serial_number = "SN1"
+        await client._send_command(CC2_CMD_PAUSE_PRINT)
+    # The command itself must NOT be published if registration failed.
+    assert fake.command_publishes == []
+
+
+async def test_send_command_nonzero_ack_raises_command_error() -> None:
+    """A command the printer rejects (error_code != 0) must raise, not succeed."""
+    cm, _ = _make_command_client(ack_error_code=1010)  # NOT_PRINTING
+    with (
+        patch("sentinel.printer.client.aiomqtt.Client", return_value=cm),
+        pytest.raises(PrinterCommandError, match="error_code=1010"),
+    ):
+        client = PrinterClient(_SETTINGS)
+        client._serial_number = "SN1"
+        await client._send_command(CC2_CMD_PAUSE_PRINT)
+
+
+async def test_send_command_ack_without_error_code_is_success() -> None:
+    """A matching-id ack that omits error_code must count as success, not a failure."""
+    cm, _fake = _make_command_client(omit_error_code=True)
+    with patch("sentinel.printer.client.aiomqtt.Client", return_value=cm):
+        client = PrinterClient(_SETTINGS)
+        client._serial_number = "SN1"
+        result = await client._send_command(CC2_CMD_PAUSE_PRINT)  # must not raise
+    assert result["method"] == CC2_CMD_PAUSE_PRINT
+
+
+async def test_send_command_registration_timeout_raises_timeout() -> None:
+    cm, _ = _make_command_client(drop_register=True)
+    with (
+        patch("sentinel.printer.client.CC2_REGISTRATION_TIMEOUT_S", 0.05),
+        patch("sentinel.printer.client.aiomqtt.Client", return_value=cm),
+        pytest.raises(PrinterTimeoutError, match="registration"),
+    ):
+        client = PrinterClient(_SETTINGS)
+        client._serial_number = "SN1"
+        await client._send_command(CC2_CMD_PAUSE_PRINT)
+
+
+async def test_send_command_ack_timeout_raises_timeout() -> None:
+    cm, fake = _make_command_client(drop_ack=True)
+    with (
+        patch("sentinel.printer.client._TIMEOUT_S", 0.05),
+        patch("sentinel.printer.client.aiomqtt.Client", return_value=cm),
+        pytest.raises(PrinterTimeoutError, match="command ack"),
+    ):
+        client = PrinterClient(_SETTINGS)
+        client._serial_number = "SN1"
+        await client._send_command(CC2_CMD_PAUSE_PRINT)
+    # Registration still happened and the command was published; only the ack was lost.
+    assert fake.command_publishes and fake.command_publishes[0]["method"] == CC2_CMD_PAUSE_PRINT
 
 
 # ---------------------------------------------------------------------------
@@ -348,7 +555,7 @@ async def test_send_command_serial_unknown_raises_protocol_error() -> None:
     client = PrinterClient(_SETTINGS)
     assert client._serial_number is None
     with pytest.raises(PrinterProtocolError, match="serial unknown"):
-        await client._send_command({"method": 1001})
+        await client._send_command(CC2_CMD_PAUSE_PRINT)
 
 
 async def test_pause_serial_unknown_raises_protocol_error() -> None:
@@ -376,16 +583,15 @@ async def test_stop_serial_unknown_raises_protocol_error() -> None:
 
 
 async def test_send_command_with_known_serial_uses_serial_topic() -> None:
-    """_send_command must use serial-keyed topic when serial is known."""
-    cm, mock_client = await _make_publish_client()
+    """_send_command must use serial-keyed topics when serial is known."""
+    cm, fake = _make_command_client()
     with patch("sentinel.printer.client.aiomqtt.Client", return_value=cm):
         client = PrinterClient(_SETTINGS)
         client._serial_number = "SN999"
-        await client._send_command({"method": 1001})
-    mock_client.publish.assert_called_once()
-    topic = mock_client.publish.call_args[0][0]
-    assert topic.startswith("elegoo/SN999/")
-    assert not topic.startswith(f"elegoo/{_SETTINGS.printer_ip}/")
+        await client._send_command(CC2_CMD_PAUSE_PRINT)
+    request_topics = [t for t, _ in fake.published]
+    assert any(t.startswith("elegoo/SN999/") and t.endswith("/api_request") for t in request_topics)
+    assert all(not t.startswith(f"elegoo/{_SETTINGS.printer_ip}/") for t in request_topics)
 
 
 async def test_send_command_serial_cleared_mid_connect_raises_and_does_not_publish() -> None:
@@ -403,7 +609,7 @@ async def test_send_command_serial_cleared_mid_connect_raises_and_does_not_publi
         client._serial_number = None  # simulates a concurrent close()/reconfigure()
         return "10.0.0.1"
 
-    cm, mock_client = await _make_publish_client()
+    cm, fake = _make_command_client()
     with (
         patch(
             "sentinel.printer.client.resolve_and_validate_printer_ip",
@@ -412,9 +618,9 @@ async def test_send_command_serial_cleared_mid_connect_raises_and_does_not_publi
         patch("sentinel.printer.client.aiomqtt.Client", return_value=cm),
         pytest.raises(PrinterProtocolError, match="serial became unknown"),
     ):
-        await client._send_command({"method": 1001})
+        await client._send_command(CC2_CMD_PAUSE_PRINT)
 
-    mock_client.publish.assert_not_called()
+    assert fake.published == []
 
 
 # ---------------------------------------------------------------------------
@@ -423,7 +629,7 @@ async def test_send_command_serial_cleared_mid_connect_raises_and_does_not_publi
 
 
 async def test_pause_succeeds_first_call() -> None:
-    cm, _ = await _make_publish_client()
+    cm, _ = _make_command_client()
     with patch("sentinel.printer.client.aiomqtt.Client", return_value=cm):
         client = PrinterClient(_SETTINGS)
         client._serial_number = "TESTSERIAL"
@@ -431,21 +637,21 @@ async def test_pause_succeeds_first_call() -> None:
 
 
 async def test_pause_raises_debounced_within_debounce_window() -> None:
-    cm, mock_client = await _make_publish_client()
+    cm, fake = _make_command_client()
     with patch("sentinel.printer.client.aiomqtt.Client", return_value=cm):
         client = PrinterClient(_SETTINGS)
         client._serial_number = "TESTSERIAL"
         await client.pause()
         with pytest.raises(PauseDebouncedError):
             await client.pause()
-    assert mock_client.publish.call_count == 1  # only one actual publish
+    assert len(fake.command_publishes) == 1  # only one actual command published
 
 
 async def test_pause_failure_does_not_lock_debounce() -> None:
     """A failed publish must not set _last_pause_at; next call should retry."""
     client = PrinterClient(_SETTINGS)
 
-    async def _always_fail(msg: dict[str, Any]) -> None:
+    async def _always_fail(method: int, params: dict[str, Any] | None = None) -> None:
         raise PrinterTimeoutError("mqtt down")
 
     with (
@@ -467,7 +673,7 @@ async def test_pause_cancelled_resets_debounce_anchor() -> None:
     """
     client = PrinterClient(_SETTINGS)
 
-    async def _cancelled(msg: dict[str, Any]) -> None:
+    async def _cancelled(method: int, params: dict[str, Any] | None = None) -> None:
         raise asyncio.CancelledError()
 
     with (
@@ -484,7 +690,7 @@ async def test_pause_concurrent_calls_debounced() -> None:
     client = PrinterClient(_SETTINGS)
     publishes = 0
 
-    async def _slow_publish(msg: dict[str, Any]) -> None:
+    async def _slow_publish(method: int, params: dict[str, Any] | None = None) -> None:
         nonlocal publishes
         publishes += 1
         await asyncio.sleep(0.05)
@@ -501,19 +707,22 @@ async def test_pause_concurrent_calls_debounced() -> None:
 
 async def test_clear_pause_debounce_allows_immediate_repause() -> None:
     """clear_pause_debounce() resets the anchor so a subsequent pause() publishes."""
-    cm, mock_client = await _make_publish_client()
+    cm, fake = _make_command_client()
     with patch("sentinel.printer.client.aiomqtt.Client", return_value=cm):
         client = PrinterClient(_SETTINGS)
         client._serial_number = "TESTSERIAL"
         await client.pause()
         client.clear_pause_debounce()
         await client.pause()  # must not raise; debounce was cleared
-    assert mock_client.publish.call_count == 2
+    assert [p["method"] for p in fake.command_publishes] == [
+        CC2_CMD_PAUSE_PRINT,
+        CC2_CMD_PAUSE_PRINT,
+    ]
 
 
 async def test_resume_clears_pause_debounce() -> None:
     """resume() must clear the pause debounce so re-detection publishes a real pause."""
-    cm, mock_client = await _make_publish_client()
+    cm, fake = _make_command_client()
     with patch("sentinel.printer.client.aiomqtt.Client", return_value=cm):
         client = PrinterClient(_SETTINGS)
         client._serial_number = "TESTSERIAL"
@@ -522,7 +731,11 @@ async def test_resume_clears_pause_debounce() -> None:
         await client.resume()
         assert client._last_pause_at == pytest.approx(0.0)
         await client.pause()  # must not raise after resume
-    assert mock_client.publish.call_count == 3  # pause + resume + pause
+    assert [p["method"] for p in fake.command_publishes] == [
+        CC2_CMD_PAUSE_PRINT,
+        CC2_CMD_RESUME_PRINT,
+        CC2_CMD_PAUSE_PRINT,
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -555,7 +768,7 @@ async def test_send_command_timeout_raises_printer_timeout_error() -> None:
         patch("sentinel.printer.client.aiomqtt.Client", return_value=cm),
         pytest.raises(PrinterTimeoutError),
     ):
-        await client._send_command({"method": 1001})
+        await client._send_command(CC2_CMD_PAUSE_PRINT)
 
 
 # ---------------------------------------------------------------------------
@@ -617,23 +830,16 @@ async def test_serial_number_extraction_and_usage() -> None:
     # Assert serial number got extracted
     assert client._serial_number == "SERIAL123"
 
-    # Mock client publish for sending command
-    client_mock_cmd = AsyncMock()
-    client_mock_cmd.publish = AsyncMock()
-
-    cm_cmd = AsyncMock()
-    cm_cmd.__aenter__ = AsyncMock(return_value=client_mock_cmd)
-    cm_cmd.__aexit__ = AsyncMock(return_value=False)
+    # Mock client for sending command (register + ack flow)
+    cm_cmd, fake_cmd = _make_command_client()
 
     with patch("sentinel.printer.client.aiomqtt.Client", return_value=cm_cmd):
         await client.pause()
 
-    # Assert that it published to the topic containing the serial number instead of IP
-    client_mock_cmd.publish.assert_called_once()
-    call_args = client_mock_cmd.publish.call_args
-    topic_published = call_args[0][0]
-    assert topic_published.startswith("elegoo/SERIAL123/")
-    assert topic_published.endswith("/api_request")
+    # Assert it published the command to the serial-keyed api_request topic, not the IP.
+    request_topics = [t for t, _ in fake_cmd.published if t.endswith("/api_request")]
+    assert request_topics
+    assert all(t.startswith("elegoo/SERIAL123/") for t in request_topics)
 
 
 async def test_close_resets_connection_state() -> None:
