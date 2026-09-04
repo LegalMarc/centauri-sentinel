@@ -12,6 +12,7 @@ import shutil
 import tempfile
 import time
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -2373,3 +2374,165 @@ async def test_watchdog_stall_write_uses_state_lock() -> None:
     dispatcher.dispatch_stall.assert_called_once()
     # Lock must be released again after the tick completes.
     assert not watcher._state_lock.locked()
+
+
+# ---------------------------------------------------------------------------
+# Failed-pause retry episodes alert once, retry the pause every tick
+# ---------------------------------------------------------------------------
+
+
+def _one_confirm_settings() -> Settings:
+    return Settings(
+        printer_ip="10.0.0.1",
+        printer_access_code="test",
+        detection_warmup_seconds=0,
+        ml_confirm_count=1,
+        ml_score_threshold=0.4,
+        ml_poll_interval_seconds=10,
+        watcher_stall_seconds=60,
+    )
+
+
+async def test_repeated_pause_failures_alert_once_but_retry_pause_each_tick() -> None:
+    dispatcher = _make_dispatcher()
+    watcher, printer, _camera, _ml, db = await _make_watcher(
+        printer_status=_printing_status(), ml_score=0.9, dispatcher=dispatcher
+    )
+    watcher._settings = _one_confirm_settings()
+    printer.pause = AsyncMock(side_effect=Exception("MQTT down"))
+
+    for _ in range(4):
+        await watcher.tick()
+
+    assert watcher.state == WatcherState.ARMED
+    assert printer.pause.await_count == 4, "pause must be retried on every tick"
+    dispatcher.dispatch_detection.assert_called_once()
+    dispatcher.dispatch_text.assert_called_once()
+    # One detection row + snapshot for the episode, but every pause attempt audited.
+    assert len(await db.get_recent_detections(limit=10)) == 1
+    assert len(await db.get_recent_pauses(limit=10)) == 4
+    snapshots_dir = Path(db._path).parent / "snapshots"
+    assert len(list(snapshots_dir.glob("*.jpg"))) == 1
+
+
+async def test_pause_failure_episode_ends_when_score_drops() -> None:
+    dispatcher = _make_dispatcher()
+    watcher, printer, _camera, ml, _db = await _make_watcher(
+        printer_status=_printing_status(), ml_score=0.9, dispatcher=dispatcher
+    )
+    watcher._settings = _one_confirm_settings()
+    printer.pause = AsyncMock(side_effect=Exception("MQTT down"))
+
+    await watcher.tick()  # fails, alerts
+    await watcher.tick()  # retries silently
+    ml.detect = AsyncMock(return_value=MlResult(score=0.1))
+    await watcher.tick()  # score drops → episode over
+    assert watcher._pause_failure_alerted is False
+    ml.detect = AsyncMock(return_value=MlResult(score=0.9))
+    await watcher.tick()  # new episode → alert again
+
+    assert dispatcher.dispatch_detection.call_count == 2
+    assert dispatcher.dispatch_text.call_count == 2
+
+
+async def test_pause_success_after_failed_retry_clears_episode() -> None:
+    dispatcher = _make_dispatcher()
+    watcher, printer, _camera, _ml, _db = await _make_watcher(
+        printer_status=_printing_status(), ml_score=0.9, dispatcher=dispatcher
+    )
+    watcher._settings = _one_confirm_settings()
+    printer.pause = AsyncMock(side_effect=[Exception("MQTT down"), None])
+
+    await watcher.tick()
+    assert watcher.state == WatcherState.ARMED
+    await watcher.tick()
+    assert watcher.state == WatcherState.PAUSED
+    assert watcher._pause_failure_alerted is False
+    dispatcher.dispatch_detection.assert_called_once()
+
+
+async def test_ml_failure_fail_closed_alerts_once_while_pause_keeps_failing() -> None:
+    dispatcher = _make_dispatcher()
+    watcher, printer, _camera, ml, _db = await _make_watcher(
+        printer_status=_printing_status(), dispatcher=dispatcher
+    )
+    watcher._settings = Settings(
+        printer_ip="10.0.0.1",
+        printer_access_code="test",
+        detection_warmup_seconds=0,
+        ml_consecutive_failure_threshold=1,
+        watcher_stall_seconds=60,
+    )
+    ml.detect = AsyncMock(return_value=MlResult(score=0.0, error=True))
+    printer.pause = AsyncMock(side_effect=Exception("MQTT down"))
+
+    for _ in range(3):
+        await watcher.tick()
+
+    assert printer.pause.await_count == 3
+    alerts = [
+        c.args[0] for c in dispatcher.dispatch_text.call_args_list if "ML service" in c.args[0]
+    ]
+    assert len(alerts) == 1
+
+
+# ---------------------------------------------------------------------------
+# Final job status: Klipper reports "complete", and the terminal state can be
+# missed between polls entirely.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "terminal_state,last_progress,expected",
+    [
+        ("complete", 50.0, "completed"),
+        ("completed", 50.0, "completed"),
+        ("cancelled", 100.0, "failed"),
+        ("error", 100.0, "failed"),
+        ("standby", 100.0, "completed"),
+        ("idle", 100.0, "completed"),
+        ("standby", 97.0, "failed"),
+        ("", 0.0, "failed"),
+        (None, 100.0, "completed"),
+    ],
+)
+async def test_final_job_status_mapping(
+    terminal_state: str | None, last_progress: float, expected: str
+) -> None:
+    watcher, _printer, _camera, _ml, _db = await _make_watcher()
+    watcher._current_filename = "test.gcode"
+    last = _printing_status()
+    last.progress = last_progress
+    watcher.last_printed_status = last
+    assert watcher._final_job_status(terminal_state) == expected
+
+
+async def test_final_job_status_ignores_progress_of_a_different_file() -> None:
+    watcher, _printer, _camera, _ml, _db = await _make_watcher()
+    watcher._current_filename = "b.gcode"
+    last = _printing_status()
+    last.filename = "a.gcode"
+    last.progress = 100.0
+    watcher.last_printed_status = last
+    assert watcher._final_job_status("standby") == "failed"
+
+
+async def test_print_finishing_with_klipper_complete_state_records_completed() -> None:
+    watcher, printer, _camera, _ml, db = await _make_watcher(printer_status=_printing_status())
+    watcher._settings = _one_confirm_settings()
+    await watcher.tick()
+    assert watcher._current_job_id is not None
+
+    done = PrinterStatus(
+        printing=False,
+        elapsed_seconds=0,
+        current_layer=0,
+        total_layers=0,
+        filename="test.gcode",
+        print_state="complete",
+    )
+    printer.status = AsyncMock(return_value=done)
+    await watcher.tick()
+
+    jobs = await db.get_recent_jobs(limit=1)
+    assert jobs[0]["status"] == "completed"

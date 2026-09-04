@@ -2254,3 +2254,46 @@ async def test_auth_middleware_edge_cases() -> None:
         await mw_evict(scope_evict, AsyncMock(), AsyncMock())
 
     assert len(mw_evict._auth_attempts) <= 1000
+
+
+# ---------------------------------------------------------------------------
+# /login body cap — the auth middleware is outside LimitUploadSizeMiddleware,
+# so it must bound the login form body itself.
+# ---------------------------------------------------------------------------
+
+
+async def test_login_post_oversized_body_rejected_413(auth_app: object) -> None:
+    from sentinel.web.auth import _MAX_LOGIN_BODY_BYTES
+
+    body = b"username=admin&password=" + b"x" * (_MAX_LOGIN_BODY_BYTES + 1)
+    async with _client(auth_app) as c:
+        r = await c.post("/login", content=body)
+    assert r.status_code == 413
+
+
+async def test_login_post_normal_body_still_accepted(auth_app: object) -> None:
+    async with _client(auth_app) as c:
+        r = await c.post(
+            "/login",
+            data={"username": "admin", "password": "testpass", "next": "/"},
+            follow_redirects=False,
+        )
+    assert r.status_code == 302
+    assert "sentinel_session=" in r.headers.get("set-cookie", "")
+
+
+async def test_post_settings_ipv6_printer_ip_brackets_camera_url(
+    mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: AsyncMock
+) -> None:
+    printer = AsyncMock()
+    mock_watcher.printer = printer
+    app_state = create_app(
+        _base_settings(auth_enabled=False), db=mock_db, watcher=mock_watcher, camera=mock_camera
+    )
+    async with _client(app_state) as c:
+        r = await c.post("/api/settings", json={"printer_ip": "fd00::10"})
+
+    assert r.status_code == 200
+    mock_db.set_setting.assert_any_call("printer_ip", "fd00::10")
+    printer.reconfigure.assert_called_once_with("fd00::10")
+    mock_camera.reconfigure.assert_called_once_with("http://[fd00::10]:8080/mjpeg")

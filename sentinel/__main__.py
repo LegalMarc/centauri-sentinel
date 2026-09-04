@@ -62,6 +62,25 @@ def main() -> None:
         help="bcrypt cost factor (default: 12)",
     )
 
+    cmd_parser = subparsers.add_parser(
+        "printer-cmd",
+        help=(
+            "Hardware check of the MQTT control path: register with the printer, send one "
+            "command, confirm the ack, then watch print_status.state for the effect"
+        ),
+    )
+    cmd_parser.add_argument(
+        "action",
+        choices=("status", "pause", "resume"),
+        help="status = read one status push; pause/resume = send the command and verify",
+    )
+    cmd_parser.add_argument(
+        "--watch-seconds",
+        type=float,
+        default=20.0,
+        help="How long to poll status after the command for the expected state (default: 20)",
+    )
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -72,6 +91,65 @@ def main() -> None:
         asyncio.run(_run(args))
     elif args.command == "hash-password":
         _hash_password(args)
+    elif args.command == "printer-cmd":
+        sys.exit(asyncio.run(_printer_cmd(args)))
+
+
+async def _printer_cmd(args: argparse.Namespace) -> int:
+    """Supervised end-to-end check of register → command → ack → state change.
+
+    The unit tests prove the client speaks the documented protocol; only this
+    talks to a real printer. Returns 0 when the printer both acks the command
+    and reports the expected state within --watch-seconds, 1 otherwise. Stop is
+    deliberately not offered here: it cancels the print irrecoverably.
+    """
+    import time
+
+    from sentinel.config import get_settings
+    from sentinel.printer.client import PrinterClient
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+    settings = get_settings()
+    printer = PrinterClient(settings)
+    expected = {"pause": "paused", "resume": "printing"}.get(args.action)
+    try:
+        status = await printer.status()
+        print(
+            f"status: state={status.print_state!r} printing={status.printing} "
+            f"file={status.filename!r} elapsed={status.elapsed_seconds:.0f}s "
+            f"serial={printer._serial_number}"
+        )
+        if expected is None:
+            return 0
+        if not status.printing:
+            print(f"refusing to send {args.action}: printer is not printing")
+            return 1
+
+        t0 = time.monotonic()
+        if args.action == "pause":
+            await printer.pause()
+        else:
+            await printer.resume()
+        print(f"{args.action}: registered, sent, ack received in {time.monotonic() - t0:.2f}s")
+
+        deadline = time.monotonic() + args.watch_seconds
+        while time.monotonic() < deadline:
+            await asyncio.sleep(1.0)
+            status = await printer.status()
+            print(f"  t+{time.monotonic() - t0:4.1f}s state={status.print_state!r}")
+            if status.print_state == expected:
+                print(f"OK: printer reports {expected!r}")
+                return 0
+        print(
+            f"FAIL: ack received but printer never reported {expected!r} within "
+            f"{args.watch_seconds:.0f}s — the command is accepted but not honoured"
+        )
+        return 1
+    except Exception as exc:
+        print(f"FAIL: {type(exc).__name__}: {exc}")
+        return 1
+    finally:
+        await printer.close()
 
 
 def _hash_password(args: argparse.Namespace) -> None:

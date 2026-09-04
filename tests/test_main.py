@@ -165,3 +165,81 @@ def test_hash_password_empty_exits(capsys: pytest.CaptureFixture[str]) -> None:
         _hash_password(args)
     assert exc.value.code == 1
     assert "empty" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# printer-cmd hardware check
+# ---------------------------------------------------------------------------
+
+
+def _fake_printer_for_cmd(states: list[str]) -> MagicMock:
+    from sentinel.printer.types import PrinterStatus
+
+    statuses = [
+        PrinterStatus(
+            printing=s in ("printing", "paused"),
+            elapsed_seconds=100.0,
+            current_layer=1,
+            total_layers=2,
+            filename="x.gcode",
+            print_state=s,
+        )
+        for s in states
+    ]
+    printer = MagicMock()
+    printer._serial_number = "SN1"
+    printer.status = AsyncMock(side_effect=statuses)
+    printer.pause = AsyncMock()
+    printer.resume = AsyncMock()
+    printer.close = AsyncMock()
+    return printer
+
+
+@pytest.mark.asyncio
+async def test_printer_cmd_pause_reports_ok_when_state_changes(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from sentinel.__main__ import _printer_cmd
+
+    printer = _fake_printer_for_cmd(["printing", "printing", "paused"])
+    with (
+        patch("sentinel.printer.client.PrinterClient", return_value=printer),
+        patch("sentinel.config.get_settings", return_value=MagicMock()),
+        patch("asyncio.sleep", new=AsyncMock()),
+    ):
+        rc = await _printer_cmd(argparse.Namespace(action="pause", watch_seconds=5.0))
+    assert rc == 0
+    printer.pause.assert_awaited_once()
+    assert "OK: printer reports 'paused'" in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+async def test_printer_cmd_pause_fails_when_ack_but_no_state_change(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from sentinel.__main__ import _printer_cmd
+
+    printer = _fake_printer_for_cmd(["printing"] * 5)
+    with (
+        patch("sentinel.printer.client.PrinterClient", return_value=printer),
+        patch("sentinel.config.get_settings", return_value=MagicMock()),
+    ):
+        # Real 1 s sleep: the watch window admits exactly one status poll.
+        rc = await _printer_cmd(argparse.Namespace(action="pause", watch_seconds=0.1))
+    assert rc == 1
+    assert "accepted but not honoured" in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+async def test_printer_cmd_refuses_pause_when_idle(capsys: pytest.CaptureFixture[str]) -> None:
+    from sentinel.__main__ import _printer_cmd
+
+    printer = _fake_printer_for_cmd(["standby"])
+    with (
+        patch("sentinel.printer.client.PrinterClient", return_value=printer),
+        patch("sentinel.config.get_settings", return_value=MagicMock()),
+    ):
+        rc = await _printer_cmd(argparse.Namespace(action="pause", watch_seconds=1.0))
+    assert rc == 1
+    printer.pause.assert_not_awaited()
+    printer.close.assert_awaited_once()

@@ -73,6 +73,20 @@ async def resolve_and_validate_printer_ip(v: str) -> str:
     return str(ip)
 
 
+def format_host_for_url(host: str) -> str:
+    """Bracket an IPv6 literal for embedding in a URL netloc (e.g. "::1" -> "[::1]").
+
+    Hostnames and IPv4 literals are returned unchanged.
+    """
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        return host
+    if isinstance(addr, ipaddress.IPv6Address):
+        return f"[{host}]"
+    return host
+
+
 def validate_https(url: str) -> str:
     """Enforce HTTPS for external webhooks/URLs to prevent credential exposure."""
     import urllib.parse

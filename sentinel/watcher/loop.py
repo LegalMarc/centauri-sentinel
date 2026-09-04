@@ -38,6 +38,13 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Klipper print_status.state values the CC2 firmware publishes at the end of a
+# job (docs/CC2_PROTOCOL.md in danielcherubini/elegoo-homeassistant lists
+# standby | printing | paused | complete | cancelled | error). "completed" is kept
+# for the legacy/mock format and older tests.
+_COMPLETED_PRINT_STATES = frozenset({"complete", "completed"})
+_FAILED_PRINT_STATES = frozenset({"cancelled", "canceled", "error", "stopped"})
+
 
 class Camera(Protocol):
     async def grab(self) -> bytes: ...
@@ -95,6 +102,11 @@ class WatcherLoop:
         self._last_resume_time = 0.0
         self._ml_error_count = 0
         self.last_ml_observation: LastMlObservation | None = None
+        # Alert-once guards for the two "pause keeps failing" retry loops. The
+        # pause itself is retried on every tick (safety first); the operator
+        # alert, snapshot file and detection row are emitted once per episode.
+        self._pause_failure_alerted = False
+        self._ml_failure_alerted = False
 
     @property
     def state(self) -> WatcherState:
@@ -398,6 +410,25 @@ class WatcherLoop:
 
             self.last_printer_status = copy.copy(printer_status)
 
+    def _final_job_status(self, terminal_print_state: str | None) -> str:
+        """Map the state observed when a job ended to 'completed' or 'failed'.
+
+        The watcher polls every ML_POLL_INTERVAL_SECONDS while the printer
+        pushes status at ~1 Hz, so the terminal state ("complete", "cancelled")
+        can be missed entirely and the first post-job status already reads
+        "standby"/"idle". In that case fall back to the last progress observed
+        while printing: a job seen at (or past) 100 % is treated as completed.
+        """
+        state = (terminal_print_state or "").lower()
+        if state in _COMPLETED_PRINT_STATES:
+            return "completed"
+        if state in _FAILED_PRINT_STATES:
+            return "failed"
+        last = self.last_printed_status
+        if last is not None and last.filename == self._current_filename and last.progress >= 100.0:
+            return "completed"
+        return "failed"
+
     async def _update_state(self, status: PrinterStatus) -> None:
         if getattr(status, "stale", False):
             if self.state not in (WatcherState.STALLED, WatcherState.OFFLINE, WatcherState.IDLE):
@@ -434,7 +465,7 @@ class WatcherLoop:
                     wall_duration = int((datetime.now(tz=UTC) - self._print_start).total_seconds())
                 duration = max(0, elapsed_duration, wall_duration)
 
-                final_status = "completed" if status.print_state == "completed" else "failed"
+                final_status = self._final_job_status(status.print_state)
                 await self._db.record_print_end(
                     self._current_job_id,
                     ended_at,
@@ -457,6 +488,8 @@ class WatcherLoop:
             self._paused_by_sentinel = False
             self._auto_stop_notified = False
             self._alerted_new_print = False
+            self._pause_failure_alerted = False
+            self._ml_failure_alerted = False
             return
 
         # Printer is printing
@@ -488,7 +521,7 @@ class WatcherLoop:
             if self._print_start is not None:
                 wall_duration = int((datetime.now(tz=UTC) - self._print_start).total_seconds())
             duration = max(0, elapsed_duration, wall_duration)
-            final_status = "completed" if self._prev_print_state == "completed" else "failed"
+            final_status = self._final_job_status(self._prev_print_state)
             await self._db.record_print_end(
                 self._current_job_id,
                 ended_at,
@@ -627,9 +660,12 @@ class WatcherLoop:
             logger.warning("ML detection failed (%d consecutive times)", self._ml_error_count)
             if self._ml_error_count >= self._settings.ml_consecutive_failure_threshold:
                 logger.error("Too many ML failures — failing CLOSED by pausing printer")
-                self._dispatcher.dispatch_text(
-                    "🚨 Sentinel ML service is failing continuously. Pausing printer for safety."
-                )
+                if not self._ml_failure_alerted:
+                    self._ml_failure_alerted = True
+                    self._dispatcher.dispatch_text(
+                        "🚨 Sentinel ML service is failing continuously. "
+                        "Pausing printer for safety."
+                    )
                 printer_paused = False
                 try:
                     await self._printer.pause()
@@ -669,9 +705,11 @@ class WatcherLoop:
                     self._paused_by_sentinel = True
                     self._confirm_count = 0
                     self._ml_error_count = 0
+                    self._ml_failure_alerted = False
             return
 
         self._ml_error_count = 0
+        self._ml_failure_alerted = False
         self.last_ml_observation = LastMlObservation(score=result.score, ts=datetime.now(tz=UTC))
         await self._db.set_setting("last_ml_score", str(self.last_ml_observation.score))
         await self._db.set_setting("last_ml_score_ts", self.last_ml_observation.ts.isoformat())
@@ -712,24 +750,37 @@ class WatcherLoop:
             if self._confirm_count > 0:
                 logger.debug("Score below threshold — resetting confirm counter")
             self._confirm_count = 0
+            # Score dropped: a failed-pause retry episode (if any) is over.
+            self._pause_failure_alerted = False
 
     async def _on_confirmed_detection(self, result: MlResult, jpeg: bytes) -> None:
-        logger.warning("CONFIRMED DETECTION score=%.2f — pausing printer", result.score)
+        # A retry is a confirmed detection on the tick right after a pause
+        # failure: _confirm_count was restored so the pause is re-attempted
+        # immediately, but the operator has already been alerted (and a
+        # snapshot + detection row recorded) for this episode. Retries publish
+        # the pause and log; they do not re-alert, re-snapshot or re-record.
+        is_retry = self._pause_failure_alerted
+        if is_retry:
+            logger.warning("CONFIRMED DETECTION score=%.2f — retrying printer pause", result.score)
+        else:
+            logger.warning("CONFIRMED DETECTION score=%.2f — pausing printer", result.score)
         consecutive_count = self._confirm_count
         self._confirm_count = 0
-        snapshot_id: str | None = uuid.uuid4().hex
+        snapshot_id: str | None = None
+        snapshot_path: str | None = None
 
-        snapshots_dir = Path(self._db._path).parent / "snapshots"
-        snapshot_path = None
-        try:
-            await asyncio.to_thread(snapshots_dir.mkdir, parents=True, exist_ok=True)
-            p = snapshots_dir / f"{snapshot_id}.jpg"
-            await asyncio.to_thread(p.write_bytes, jpeg)
-            snapshot_path = str(p)
-        except Exception:
-            logger.exception("Failed to save snapshot file to disk")
-            snapshot_id = None
-            snapshot_path = None
+        if not is_retry:
+            snapshot_id = uuid.uuid4().hex
+            snapshots_dir = Path(self._db._path).parent / "snapshots"
+            try:
+                await asyncio.to_thread(snapshots_dir.mkdir, parents=True, exist_ok=True)
+                p = snapshots_dir / f"{snapshot_id}.jpg"
+                await asyncio.to_thread(p.write_bytes, jpeg)
+                snapshot_path = str(p)
+            except Exception:
+                logger.exception("Failed to save snapshot file to disk")
+                snapshot_id = None
+                snapshot_path = None
 
         # Shield the pause publish so that a task cancellation arriving mid-call
         # still lets the MQTT command complete before propagating CancelledError.
@@ -786,21 +837,31 @@ class WatcherLoop:
                 logger.warning(
                     "Debounced pause: printer still printing — staying ARMED, will retry next tick"
                 )
+                # Restore the streak so the next high-score tick retries the
+                # pause immediately instead of waiting for N more frames.
                 self._confirm_count = consecutive_count
-                self._dispatcher.dispatch_text(
-                    "⚠️ Pause suppressed by debounce window but printer is still printing. "
-                    "Sentinel remains armed and will retry if failure is still detected."
-                )
+                if not is_retry:
+                    self._dispatcher.dispatch_text(
+                        "⚠️ Pause suppressed by debounce window but printer is still printing. "
+                        "Sentinel remains armed and will retry if failure is still detected."
+                    )
         except Exception:
             logger.exception("Printer pause failed — notifying anyway")
-            # if the failure is still detected, instead of waiting for N more frames.
             self._confirm_count = consecutive_count
-            self._dispatcher.dispatch_text(
-                "⚠️ Printer pause command failed during failure detection! G-code is still running. "
-                "The watcher remains armed and will retry if failure is still detected."
-            )
+            if not is_retry:
+                self._dispatcher.dispatch_text(
+                    "⚠️ Printer pause command failed during failure detection! "
+                    "G-code is still running. The watcher remains armed and will retry "
+                    "if failure is still detected."
+                )
 
-        self._dispatcher.dispatch_detection(result.score, snapshot_id, jpeg)
+        if pause_ok:
+            self._pause_failure_alerted = False
+        else:
+            self._pause_failure_alerted = True
+
+        if not is_retry:
+            self._dispatcher.dispatch_detection(result.score, snapshot_id, jpeg)
 
         try:
             pause_id = await self._db.record_pause(
@@ -808,18 +869,19 @@ class WatcherLoop:
                 result="ok" if pause_ok else "error",
                 error_message=None if pause_ok else "Printer pause failed",
             )
-            await self._db.record_detection(
-                score=result.score,
-                consecutive=consecutive_count,
-                confirmed=1,
-                snapshot_path=snapshot_path,
-            )
+            if not is_retry:
+                await self._db.record_detection(
+                    score=result.score,
+                    consecutive=consecutive_count,
+                    confirmed=1,
+                    snapshot_path=snapshot_path,
+                )
         except Exception:
             logger.exception("DB write failed after detection — notification already dispatched")
             pause_id = None
 
-        # Cleanup old snapshots
-        await self.cleanup_old_snapshots()
+        if not is_retry:
+            await self.cleanup_old_snapshots()
 
         # pause_id is available for future audit-log / resume-wiring use.
         del pause_id

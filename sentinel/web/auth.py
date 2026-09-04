@@ -46,6 +46,16 @@ if TYPE_CHECKING:
 
 _COOKIE_NAME = "sentinel_session"
 _TTL = 3600  # 1 hour
+# Hard cap on the /login form body. This middleware wraps LimitUploadSizeMiddleware
+# (it is registered later, so it is the outer layer) and handles /login itself,
+# so the 1 MB app-level limit never sees the login body. A real login form is a
+# few hundred bytes; anything larger is an unauthenticated memory-exhaustion attempt.
+_MAX_LOGIN_BODY_BYTES = 64 * 1024
+
+
+class _BodyTooLargeError(Exception):
+    """Raised by _read_body when the request body exceeds _MAX_LOGIN_BODY_BYTES."""
+
 
 # Dummy bcrypt hash used when username is wrong so we always spend bcrypt time
 # regardless of whether the username exists (prevents timing oracle).
@@ -195,7 +205,12 @@ class AuthMiddleware:
                 await response(scope, receive, send)
                 return
             if method == "POST":
-                body = await self._read_body(receive)
+                try:
+                    body = await self._read_body(receive)
+                except _BodyTooLargeError:
+                    response = Response(status_code=413, content="Payload Too Large")
+                    await response(scope, receive, send)
+                    return
                 form = parse_qs(body.decode("utf-8", errors="replace"))
                 username = form.get("username", [""])[0]
                 password = form.get("password", [""])[0]
@@ -400,15 +415,24 @@ class AuthMiddleware:
 
     @staticmethod
     async def _read_body(receive: Receive) -> bytes:
-        body = b""
+        """Read the request body, bounded by _MAX_LOGIN_BODY_BYTES.
+
+        Stops consuming the stream as soon as the cap is exceeded so a large
+        upload is never buffered in memory; raises _BodyTooLargeError.
+        """
+        chunks: list[bytes] = []
+        size = 0
         while True:
             message = await receive()
             chunk = message.get("body")
             if isinstance(chunk, bytes):
-                body += chunk
+                size += len(chunk)
+                if size > _MAX_LOGIN_BODY_BYTES:
+                    raise _BodyTooLargeError
+                chunks.append(chunk)
             if not message.get("more_body", False):
                 break
-        return body
+        return b"".join(chunks)
 
     async def _check_credentials(self, username: str, password: str) -> bool:
         # Constant-time username comparison prevents user-enumeration via timing.

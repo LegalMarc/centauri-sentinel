@@ -103,9 +103,27 @@ the printer does not acknowledge now raises (surfaced as a UI 500 / a
 "pause failed" notification) instead of silently succeeding. See
 `docs/verified-assumptions.md` and `sentinel/printer/client.py`.
 
+**Verify on the hardware** (from any host on the printer's LAN, with the
+same `.env`) while a print is running:
+
+```bash
+python -m sentinel printer-cmd pause
+```
+
+Exit 0 means register → command → ack → printer reports `paused` all worked;
+run `printer-cmd resume` afterwards. Exit 1 with `FAIL: PrinterTimeoutError`
+means no registration/ack (wrong access code, wrong IP, or the printer's
+client slots are full). Exit 1 with "accepted but not honoured" means the
+firmware acked but ignored the command.
+
 If it recurs after a future firmware update, capture the real exchange by
 subscribing to `elegoo/#` on the printer's LAN while pausing from the official
 Elegoo app, and compare the command envelope / method codes.
+
+Note that a failed auto-pause now alerts once per detection episode and then
+retries the pause silently on every poll tick (the `pause_history` table
+records every attempt); alerts resume when the score drops and a new
+detection is confirmed.
 
 ---
 

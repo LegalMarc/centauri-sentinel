@@ -1342,3 +1342,10 @@ async def test_listen_loop_does_not_clear_on_repeated_idle_pushes() -> None:
     status = _parse_status(client._accumulated_data)
     assert status.filename is None
     assert status.progress == 99.0
+
+
+def test_command_ack_timeout_matches_reference_implementation() -> None:
+    """CC2_COMMAND_TIMEOUT in danielcherubini/elegoo-homeassistant is 10 s."""
+    from sentinel.printer.client import _COMMAND_ACK_TIMEOUT_S
+
+    assert _COMMAND_ACK_TIMEOUT_S == 10.0

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import ipaddress
 import logging
 import time
 from datetime import UTC, datetime
@@ -18,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from sentinel.camera.errors import CameraOfflineError, CameraReadError
+from sentinel.network import format_host_for_url
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -47,18 +47,9 @@ def _extract_jpeg(buf: bytes) -> bytes | None:
     return buf[start : end + 2]
 
 
-def _format_host_for_url(host: str) -> str:
-    """Bracket an IPv6 literal for embedding in a URL netloc (e.g. "::1" -> "[::1]").
-
-    Hostnames and IPv4 literals are returned unchanged.
-    """
-    try:
-        addr = ipaddress.ip_address(host)
-    except ValueError:
-        return host
-    if isinstance(addr, ipaddress.IPv6Address):
-        return f"[{host}]"
-    return host
+# Shared with web/routes.py so a runtime printer_ip change builds the same URL
+# shape as startup does.
+_format_host_for_url = format_host_for_url
 
 
 class MjpegGrabber:

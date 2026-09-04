@@ -149,6 +149,50 @@ silently dropped). The command path must, on the same MQTT session:
 mirror the Elegoo web interface; the firmware is picky about their shape.
 See `sentinel/printer/client.py::_send_command` and `_generate_cc2_ids`.
 
+### Re-verification (2026-09-04) against the reference client, field by field
+
+Checked `sentinel/printer/client.py` line by line against a fresh clone of
+danielcherubini/elegoo-homeassistant (`cc2/client.py`, `cc2/const.py`,
+`docs/CC2_PROTOCOL.md`). Every wire-level detail matches:
+
+| Item | Sentinel | Reference | Match |
+|---|---|---|---|
+| MQTT username / password | `elegoo` / access code | `CC2_MQTT_USERNAME` / access code | yes |
+| MQTT identifier | `client_id` (`0cli…`, 10 chars) | same generator (`w7e()` port) | yes |
+| keepalive | 60 | `CC2_MQTT_KEEPALIVE = 60` | yes |
+| Subscribe before register | `register_response` + `api_response` | same order | yes |
+| Register payload / topic | `{"client_id","request_id"}` → `elegoo/<sn>/api_register` | same | yes |
+| Register success check | `error == "ok"` (3 s) | `CC2_REG_OK`, `CC2_REGISTRATION_TIMEOUT = 3` | yes |
+| Command envelope | `{"id": int, "method": int, "params": {}}` | same | yes |
+| Command topic / ack topic | `elegoo/<sn>/<client_id>/api_request` / `…/api_response` | same | yes |
+| Ack matching | `payload["id"] == cmd_id` | `_response_events[request_id]` | yes |
+| Codes | pause 1021, stop 1022, resume 1023 | same | yes |
+| Ack timeout | **5 s → now 10 s** | `CC2_COMMAND_TIMEOUT = 10` | fixed |
+
+Two things the reference does that Sentinel deliberately does not need: a
+10 s `{"type":"PING"}` heartbeat (registrations expire after minutes of
+silence; Sentinel opens a fresh registered session per command) and a
+subscription to `api_status` on the command session (Sentinel's separate
+status listener covers it).
+
+**Terminal print states.** `print_status.state` is Klipper's string:
+`standby | printing | paused | complete | cancelled | error`. The value is
+`complete`, not `completed`; the watcher now accepts both and falls back to
+the last observed progress when the terminal state is missed between polls.
+
+**Still not hardware-validated from this machine.** Run the supervised check
+against the real printer while a print is running:
+
+```bash
+python -m sentinel printer-cmd pause
+```
+
+It registers, sends the command, requires the ack, then polls status for up
+to 20 s and exits 0 only when the printer itself reports `paused`. Follow with
+`printer-cmd resume`. Exit 1 with "accepted but not honoured" means the
+firmware acks but ignores the command, which is the next thing to capture
+with an `elegoo/#` subscription during a pause from the official app.
+
 ### pycentauri status (0.4.2)
 
 pycentauri explicitly notes: *"The newer Centauri Carbon 2 uses a different JSON-RPC probe and is not supported here."* (discovery.py docstring). The `Printer.connect()` hardcodes port 3030 which is closed on the Carbon 2.

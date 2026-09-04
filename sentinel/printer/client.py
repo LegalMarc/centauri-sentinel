@@ -54,6 +54,10 @@ _T = TypeVar("_T")
 logger = logging.getLogger(__name__)
 
 _TIMEOUT_S = 5.0
+# Wait for a command ack. Matches the reference implementation's
+# CC2_COMMAND_TIMEOUT (danielcherubini/elegoo-homeassistant cc2/const.py); a
+# pause on a busy printer can take longer than the 5 s connect/status timeout.
+_COMMAND_ACK_TIMEOUT_S = 10.0
 _RETRY_ATTEMPTS = 3
 _RETRY_WAIT = tenacity.wait_exponential(multiplier=0.5, min=0.5, max=4)
 _PAUSE_DEBOUNCE_S = 30.0  # minimum seconds between successive pause() publishes
@@ -675,7 +679,7 @@ class PrinterClient:
         """Wait for the ack matching ``cmd_id`` and verify error_code == 0."""
         while True:
             payload = await self._read_json_on_topic(
-                messages, response_topic, _TIMEOUT_S, "command ack"
+                messages, response_topic, _COMMAND_ACK_TIMEOUT_S, "command ack"
             )
             # Ignore acks for a different in-flight id (shouldn't happen on a
             # dedicated per-command session, but be defensive).

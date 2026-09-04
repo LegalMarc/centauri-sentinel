@@ -482,7 +482,7 @@ def make_router(
 
             if printer_ip is not None:
                 try:
-                    from sentinel.network import validate_printer_ip
+                    from sentinel.network import format_host_for_url, validate_printer_ip
 
                     printer_ip = await asyncio.to_thread(validate_printer_ip, printer_ip)
                 except ValueError as exc:
@@ -492,7 +492,12 @@ def make_router(
                     ) from exc
 
                 await db.set_setting("printer_ip", printer_ip)
-                new_camera_url = f"http://{printer_ip}:{settings.printer_mjpeg_port}{settings.printer_mjpeg_path}"
+                # Bracket IPv6 literals exactly as MjpegGrabber does at startup;
+                # a bare "fd00::10:8080" netloc is unparseable by urlparse.
+                new_camera_url = (
+                    f"http://{format_host_for_url(printer_ip)}:"
+                    f"{settings.printer_mjpeg_port}{settings.printer_mjpeg_path}"
+                )
                 if hasattr(camera, "reconfigure"):
                     await camera.reconfigure(new_camera_url)
                 if hasattr(watcher.printer, "reconfigure"):
