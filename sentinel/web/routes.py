@@ -65,7 +65,7 @@ def _derive_print_state(p_status: PrinterStatus | None) -> str:
 
     Shared by status_page() and printer_api() so the two views can never
     diverge on what the current print state is for the same underlying
-    PrinterStatus — see docs/review_findings.md follow-up sweep (a previous
+    PrinterStatus — see docs/reports/review_findings.md follow-up sweep (a previous
     fix added the `print_state or (...)` fallback to status_page() only,
     leaving printer_api() to report an empty string when the printer sends
     print_state="" while printing).

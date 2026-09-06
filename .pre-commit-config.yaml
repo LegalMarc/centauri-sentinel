@@ -29,3 +29,9 @@ repos:
         entry: uv run mypy --strict sentinel/
         language: system
         pass_filenames: false
+      - id: docs-sync-guard
+        name: docs-sync (warn when code changes touch documented areas)
+        entry: python3 tools/docs_guard.py
+        language: system
+        pass_filenames: false
+        verbose: true
