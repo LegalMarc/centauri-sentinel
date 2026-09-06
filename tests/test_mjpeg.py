@@ -294,13 +294,23 @@ async def test_stream_proxy_backs_off_on_read_error() -> None:
 # ---------------------------------------------------------------------------
 
 
+# The buffer guard is patched down to 64 KiB for these two tests. Pushing a real
+# 10 MB through the parser took ~3 s on a fast dev machine but exceeded grab()'s
+# 10 s _READ_TIMEOUT on a loaded CI runner, so the tests intermittently saw a
+# timeout instead of the buffer error. Shrinking the limit exercises the identical
+# code path in milliseconds and makes the result independent of machine speed.
+_SMALL_BUF_LIMIT = 64 * 1024
+_OVER_LIMIT_CHUNKS = [b"a" * 8192] * 10  # 80 KiB > 64 KiB, with no JPEG markers
+
+
 async def test_grab_exceeds_max_buf_bytes_raises_error() -> None:
-    # 11 MB of garbage bytes (1300 * 8192 bytes = 10.6 MB)
-    chunks = [b"a" * 8192] * 1350
-    resp = _make_stream_response(chunks)
+    resp = _make_stream_response(list(_OVER_LIMIT_CHUNKS))
     mock_client = _make_httpx_client(resp)
 
-    with patch("sentinel.camera.mjpeg.httpx.AsyncClient", return_value=mock_client):
+    with (
+        patch("sentinel.camera.mjpeg.httpx.AsyncClient", return_value=mock_client),
+        patch("sentinel.camera.mjpeg._MAX_BUF_BYTES", _SMALL_BUF_LIMIT),
+    ):
         grabber = MjpegGrabber(_SETTINGS)
         with pytest.raises(CameraReadError) as exc_info:
             await grabber.grab()
@@ -308,12 +318,13 @@ async def test_grab_exceeds_max_buf_bytes_raises_error() -> None:
 
 
 async def test_stream_proxy_exceeds_max_buf_bytes_raises_error() -> None:
-    # 11 MB of garbage bytes
-    chunks = [b"a" * 8192] * 1350
-    resp = _make_stream_response(chunks)
+    resp = _make_stream_response(list(_OVER_LIMIT_CHUNKS))
     mock_client = _make_httpx_client(resp)
 
-    with patch("sentinel.camera.mjpeg.httpx.AsyncClient", return_value=mock_client):
+    with (
+        patch("sentinel.camera.mjpeg.httpx.AsyncClient", return_value=mock_client),
+        patch("sentinel.camera.mjpeg._MAX_BUF_BYTES", _SMALL_BUF_LIMIT),
+    ):
         grabber = MjpegGrabber(_SETTINGS)
         with pytest.raises(CameraReadError) as exc_info:
             async for _ in grabber.stream_proxy():
@@ -491,11 +502,13 @@ async def test_close_full_queue_delivers_sentinel() -> None:
 
 
 async def test_grab_buffer_overflow_increments_consecutive_failures() -> None:
-    chunks = [b"a" * 8192] * 1350
-    resp = _make_stream_response(chunks)
+    resp = _make_stream_response(list(_OVER_LIMIT_CHUNKS))
     mock_client = _make_httpx_client(resp)
 
-    with patch("sentinel.camera.mjpeg.httpx.AsyncClient", return_value=mock_client):
+    with (
+        patch("sentinel.camera.mjpeg.httpx.AsyncClient", return_value=mock_client),
+        patch("sentinel.camera.mjpeg._MAX_BUF_BYTES", _SMALL_BUF_LIMIT),
+    ):
         grabber = MjpegGrabber(_SETTINGS)
         with pytest.raises(CameraReadError) as exc_info:
             await grabber.grab()
@@ -505,11 +518,13 @@ async def test_grab_buffer_overflow_increments_consecutive_failures() -> None:
 
 
 async def test_grab_buffer_overflow_reaches_offline_after_threshold() -> None:
-    chunks = [b"a" * 8192] * 1350
-    resp = _make_stream_response(chunks)
+    resp = _make_stream_response(list(_OVER_LIMIT_CHUNKS))
     mock_client = _make_httpx_client(resp)
 
-    with patch("sentinel.camera.mjpeg.httpx.AsyncClient", return_value=mock_client):
+    with (
+        patch("sentinel.camera.mjpeg.httpx.AsyncClient", return_value=mock_client),
+        patch("sentinel.camera.mjpeg._MAX_BUF_BYTES", _SMALL_BUF_LIMIT),
+    ):
         grabber = MjpegGrabber(_SETTINGS)
         grabber._consecutive_failures = 2  # one more buffer-overflow hits the threshold
 

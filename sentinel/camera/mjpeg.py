@@ -213,7 +213,9 @@ class MjpegGrabber:
 
                         buf += chunk
                         if len(buf) > _MAX_BUF_BYTES:
-                            raise CameraReadError("Buffer size limit exceeded 10 MB")
+                            raise CameraReadError(
+                                f"Buffer size limit exceeded ({_MAX_BUF_BYTES // (1024 * 1024)} MB)"
+                            )
                         while True:
                             start = buf.find(_SOI)
                             if start == -1:
