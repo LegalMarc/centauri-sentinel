@@ -915,6 +915,27 @@ footer a {
       </div>
     </div>
     <div class="card">
+      <div class="card-icon">🧵</div>
+      <div class="card-content">
+        <dt>Material</dt>
+        <dd id="card-material">—</dd>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-icon">⚖️</div>
+      <div class="card-content">
+        <dt>Filament Used</dt>
+        <dd id="card-filament">—</dd>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-icon">💾</div>
+      <div class="card-content">
+        <dt>File Size</dt>
+        <dd id="card-file-size">—</dd>
+      </div>
+    </div>
+    <div class="card">
       <div class="card-icon">❤️</div>
       <div class="card-content">
         <dt>Last Watcher Heartbeat</dt>
@@ -1516,6 +1537,28 @@ function updateLiveStats() {
       const timeRemainingEl = document.getElementById("time-remaining");
       if (timeRemainingEl) {
         timeRemainingEl.textContent = formatTime(data.remaining_seconds);
+      }
+
+      // Update FW2 file metadata
+      const materialEl = document.getElementById("card-material");
+      if (materialEl) {
+        materialEl.textContent = data.material || "—";
+      }
+
+      const filamentEl = document.getElementById("card-filament");
+      if (filamentEl) {
+        const grams = parseFloat(data.filament_used_g);
+        filamentEl.textContent = Number.isFinite(grams)
+          ? `${grams.toFixed(1)} g`
+          : "—";
+      }
+
+      const fileSizeEl = document.getElementById("card-file-size");
+      if (fileSizeEl) {
+        const bytes = parseFloat(data.file_size_bytes);
+        fileSizeEl.textContent = Number.isFinite(bytes) && bytes > 0
+          ? `${(bytes / 1024 / 1024).toFixed(1)} MiB`
+          : "—";
       }
 
       // Update Camera Connected Badge

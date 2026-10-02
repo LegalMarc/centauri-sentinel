@@ -48,6 +48,13 @@ class PrinterStatus:
     # Base64-encoded thumbnail PNG image from G-code metadata
     thumbnail_base64: str | None = None
 
+    # FW2 G-code metadata from GET_FILE_DETAIL (1046)
+    filament_used_g: float | None = None
+    material: str | None = None
+    filament_color: str | None = None
+    file_print_time: float | None = None
+    file_size_bytes: int | None = None
+
     # Raw decoded payload for diagnostics
     raw: dict[str, Any] = field(default_factory=dict, compare=False, repr=False)
 

@@ -1,13 +1,17 @@
 """Elegoo Centauri Carbon 2 printer client over MQTT.
 
-Protocol notes (from spike, docs/verified-assumptions.md):
+Protocol notes:
 - Broker: printer_ip:1883, username "elegoo", password = printer_access_code
-- Status topic:  elegoo/<serial>/api_status  (subscribe)
-- Request topic: elegoo/<serial>/<client_id>/api_request  (publish)
-- Method 6000 = periodic status push (contains all state needed)
+- Status topic: elegoo/<serial>/api_status
+- Request topic: elegoo/<serial>/<client_id>/api_request
+- Firmware 1.x provides print state through method 6000 status pushes.
+- Firmware 02.x may omit print-state fields from those pushes, so the client
+  keeps a persistent registered MQTT session and periodically requests
+  GET_STATUS (1002).
+- GET_FILE_DETAIL (1046) provides active-file metadata such as material,
+  filament usage, file size, and total layer count.
 
-The client subscribes and waits for the next status push rather than
-issuing a dedicated request, because the printer pushes status ~1 Hz.
+Both the earlier status-push behaviour and firmware 02.x are supported.
 """
 
 from __future__ import annotations
@@ -193,7 +197,17 @@ def _parse_status(
         if missing_fields:
             logger.warning("Missing key fields in modern MQTT payload: %s", missing_fields)
 
-        print_state = print_status.get("state", "idle")
+        print_state = print_status.get("state")
+        if not print_state:
+            _duration = float(print_status.get("print_duration", 0) or 0)
+            _remaining = float(print_status.get("remaining_time_sec", 0) or 0)
+            _layer = int(print_status.get("current_layer", 0) or 0)
+
+            if _duration > 0 and (_remaining > 0 or _layer > 0):
+                print_state = "printing"
+            else:
+                print_state = "idle"
+
         printing = print_state in ("printing", "paused") or print_status.get("enable") is True
 
         elapsed_seconds = float(print_status.get("print_duration", 0.0))
@@ -231,6 +245,43 @@ def _parse_status(
 
         thumbnail_base64 = payload.get("thumbnail") or result.get("thumbnail") or None
 
+        # FW2 GET_FILE_DETAIL (1046) metadata
+        file_metadata = result.get("file_metadata", {})
+        if not isinstance(file_metadata, dict):
+            file_metadata = {}
+
+        def _float_or_none(value):
+            try:
+                return float(value) if value is not None else None
+            except (TypeError, ValueError):
+                return None
+
+        def _int_or_none(value):
+            try:
+                return int(value) if value is not None else None
+            except (TypeError, ValueError):
+                return None
+
+        filament_used_g = _float_or_none(
+            file_metadata.get("filament_used_g")
+        )
+        file_print_time = _float_or_none(
+            file_metadata.get("print_time")
+        )
+        file_size_bytes = _int_or_none(
+            file_metadata.get("size")
+        )
+
+        material = None
+        filament_color = None
+        color_map = file_metadata.get("color_map", [])
+
+        if isinstance(color_map, list) and color_map:
+            entry = color_map[0]
+            if isinstance(entry, dict):
+                material = entry.get("name")
+                filament_color = entry.get("color")
+
         return PrinterStatus(
             printing=printing,
             elapsed_seconds=elapsed_seconds,
@@ -246,6 +297,11 @@ def _parse_status(
             print_state=print_state,
             camera_connected=camera_connected,
             thumbnail_base64=thumbnail_base64,
+            filament_used_g=filament_used_g,
+            material=material,
+            filament_color=filament_color,
+            file_print_time=file_print_time,
+            file_size_bytes=file_size_bytes,
             raw=payload,
         )
     except (KeyError, ValueError, TypeError) as exc:
@@ -433,13 +489,14 @@ class PrinterClient:
             return _parse_status(self._accumulated_data, self._file_layers_cache)
 
     async def _listen_loop(self) -> None:
-        """Background loop that maintains a persistent connection to MQTT."""
+        """Background loop that maintains a persistent registered MQTT connection."""
         delay = 0.5
+
         while True:
-            has_received = False
             try:
                 resolved_ip = await resolve_and_validate_printer_ip(self._host)
                 client_id = self._status_client_id
+
                 async with aiomqtt.Client(
                     hostname=resolved_ip,
                     port=self._port,
@@ -449,91 +506,407 @@ class PrinterClient:
                     timeout=_TIMEOUT_S,
                     keepalive=60,
                 ) as client:
-                    await client.subscribe("elegoo/+/api_status")
-                    delay = 0.5  # reset backoff on successful connect
 
-                    stream_empty = True
+                    # Listen for normal status pushes first. This also lets us
+                    # discover the printer serial number without another client.
+                    await client.subscribe("elegoo/+/api_status")
+
                     messages_iter = aiter(client.messages)
+
+                    # Wait for first status packet and discover SN.
+                    async with asyncio.timeout(15.0):
+                        first_message = await anext(messages_iter)
+
+                    try:
+                        first_payload: dict[str, Any] = json.loads(first_message.payload)
+                    except json.JSONDecodeError as exc:
+                        raise PrinterProtocolError(
+                            "Malformed initial MQTT status packet"
+                        ) from exc
+
+                    parts = str(first_message.topic).split("/")
+                    if len(parts) < 2:
+                        raise PrinterProtocolError(
+                            "Could not discover printer serial number"
+                        )
+
+                    self._serial_number = parts[1]
+                    sn = self._serial_number
+
+                    # Register THIS SAME persistent client with FW 02.x.
+                    request_id = uuid.uuid4().hex
+                    register_response_topic = (
+                        f"elegoo/{sn}/{request_id}/register_response"
+                    )
+                    response_topic = f"elegoo/{sn}/{client_id}/api_response"
+                    request_topic = f"elegoo/{sn}/{client_id}/api_request"
+
+                    await client.subscribe(register_response_topic)
+                    await client.subscribe(response_topic)
+
+                    await client.publish(
+                        f"elegoo/{sn}/api_register",
+                        json.dumps({
+                            "client_id": client_id,
+                            "request_id": request_id,
+                        }),
+                    )
+
+                    registered = False
+
+                    # Preserve the first status packet before waiting for
+                    # registration response.
+                    if (
+                        isinstance(first_payload, dict)
+                        and first_payload.get("method") == METHOD_STATUS_PUSH
+                    ):
+                        content = (
+                            first_payload.get("result")
+                            or first_payload.get("data")
+                            or {}
+                        )
+                        async with self._state_lock:
+                            self._accumulated_data.setdefault("result", {})
+                            self._accumulated_data.setdefault("data", {})
+                            self._accumulated_data["method"] = METHOD_STATUS_PUSH
+                            _deep_merge(self._accumulated_data["result"], content)
+                            _deep_merge(self._accumulated_data["data"], content)
+                            self._last_update_time = time.monotonic()
+
+                    async with asyncio.timeout(10.0):
+                        while not registered:
+                            message = await anext(messages_iter)
+
+                            if str(message.topic) == register_response_topic:
+                                response = json.loads(message.payload)
+
+                                if response.get("error") == "ok":
+                                    registered = True
+                                    break
+
+                                code = response.get("code")
+                                raise PrinterProtocolError(
+                                    f"FW2 registration rejected: "
+                                    f"code={code}, response={response}"
+                                )
+
+                            # Don't lose status packets while registration
+                            # handshake is in progress.
+                            try:
+                                payload = json.loads(message.payload)
+                            except json.JSONDecodeError:
+                                continue
+
+                            if (
+                                isinstance(payload, dict)
+                                and payload.get("method") == METHOD_STATUS_PUSH
+                            ):
+                                content = (
+                                    payload.get("result")
+                                    or payload.get("data")
+                                    or {}
+                                )
+                                async with self._state_lock:
+                                    self._accumulated_data.setdefault("result", {})
+                                    self._accumulated_data.setdefault("data", {})
+                                    self._accumulated_data["method"] = METHOD_STATUS_PUSH
+                                    _deep_merge(
+                                        self._accumulated_data["result"], content
+                                    )
+                                    _deep_merge(
+                                        self._accumulated_data["data"], content
+                                    )
+                                    self._last_update_time = time.monotonic()
+
+                    logger.info(
+                        "FW2 persistent MQTT client registered; "
+                        "GET_STATUS polling enabled"
+                    )
+
+                    # Send first 1002 immediately.
+                    command_id = self._next_request_id()
+                    await client.publish(
+                        request_topic,
+                        json.dumps({
+                            "id": command_id,
+                            "method": 1002,
+                            "params": {},
+                        }),
+                    )
+
+                    last_poll = time.monotonic()
+                    last_heartbeat = time.monotonic()
+                    metadata_filename = None
+                    metadata_pending = None
+                    delay = 0.5
+
                     while True:
+                        # Use short timeout so we can poll even when there
+                        # are no delta pushes.
                         try:
-                            async with asyncio.timeout(15.0):
+                            async with asyncio.timeout(1.0):
                                 message = await anext(messages_iter)
                         except StopAsyncIteration:
-                            break
-                        except TimeoutError as exc:
-                            raise PrinterTimeoutError(
-                                "MQTT read timeout (no status push for 15s)"
-                            ) from exc
-                        stream_empty = False
+                            raise PrinterProtocolError(
+                                "MQTT status stream ended"
+                            )
+                        except TimeoutError:
+                            message = None
+
+                        now = time.monotonic()
+
+                        if now - last_poll >= 5.0:
+                            command_id = self._next_request_id()
+                            await client.publish(
+                                request_topic,
+                                json.dumps({
+                                    "id": command_id,
+                                    "method": 1002,
+                                    "params": {},
+                                }),
+                            )
+                            last_poll = now
+
+                        # FW2 registration heartbeat, same persistent client.
+                        if now - last_heartbeat >= 30.0:
+                            await client.publish(
+                                request_topic,
+                                json.dumps({"type": "PING"}),
+                            )
+                            last_heartbeat = now
+
+                        # Request file detail once when a new active filename
+                        # appears. 1046 supplies metadata missing from 1002.
+                        async with self._state_lock:
+                            active_filename = (
+                                self._accumulated_data
+                                .get("result", {})
+                                .get("print_status", {})
+                                .get("filename")
+                            )
+
+                        if (
+                            active_filename
+                            and active_filename != metadata_filename
+                            and active_filename != metadata_pending
+                        ):
+                            command_id = self._next_request_id()
+                            await client.publish(
+                                request_topic,
+                                json.dumps({
+                                    "id": command_id,
+                                    "method": 1046,
+                                    "params": {
+                                        "storage_media": "local",
+                                        "filename": active_filename,
+                                    },
+                                }),
+                            )
+                            metadata_pending = active_filename
+                            logger.info(
+                                "FW2 requesting file detail for %s",
+                                active_filename,
+                            )
+
+                        if message is None:
+                            continue
+
                         try:
                             payload: dict[str, Any] = json.loads(message.payload)
                         except json.JSONDecodeError as exc:
-                            logger.warning("Skipping malformed MQTT message: %s", exc)
-                            self.malformed_messages_count += 1
-                            continue
-
-                        if not isinstance(payload, dict) or "method" not in payload:
                             logger.warning(
-                                "MQTT message protocol mismatch: "
-                                "payload lacks expected structure or method key"
+                                "Skipping malformed MQTT message: %s", exc
                             )
                             self.malformed_messages_count += 1
                             continue
 
-                        if payload.get("method") == METHOD_STATUS_PUSH:
-                            has_received = True
-                            parts = str(message.topic).split("/")
-                            if len(parts) >= 2:
-                                self._serial_number = parts[1]
+                        topic = str(message.topic)
 
-                            content = payload.get("result") or payload.get("data") or {}
+                        # Full GET_STATUS response.
+                        if topic == response_topic:
+                            method = payload.get("method")
+
+                            if method == 1002:
+                                content = (
+                                    payload.get("result")
+                                    or payload.get("data")
+                                    or {}
+                                )
+
+                                if isinstance(content, dict):
+                                    async with self._state_lock:
+                                        self._accumulated_data.setdefault(
+                                            "result", {}
+                                        )
+                                        self._accumulated_data.setdefault(
+                                            "data", {}
+                                        )
+                                        self._accumulated_data["method"] = (
+                                            METHOD_STATUS_PUSH
+                                        )
+
+                                        _deep_merge(
+                                            self._accumulated_data["result"],
+                                            content,
+                                        )
+                                        _deep_merge(
+                                            self._accumulated_data["data"],
+                                            content,
+                                        )
+
+                                        self._last_update_time = (
+                                            time.monotonic()
+                                        )
+
+                            elif method == 1046:
+                                detail = (
+                                    payload.get("result")
+                                    or payload.get("data")
+                                    or {}
+                                )
+
+                                if isinstance(detail, dict):
+                                    detail_filename = (
+                                        detail.get("filename")
+                                        or detail.get("file_name")
+                                        or metadata_pending
+                                    )
+
+                                    total_layers = (
+                                        detail.get("TotalLayers")
+                                        or detail.get("layer")
+                                        or detail.get("total_layer")
+                                        or 0
+                                    )
+
+                                    thumbnail = (
+                                        detail.get("thumbnail")
+                                        or detail.get("Thumbnail")
+                                        or detail.get("thumbnail_base64")
+                                    )
+
+                                    try:
+                                        total_layers = int(total_layers or 0)
+                                    except (TypeError, ValueError):
+                                        total_layers = 0
+
+                                    async with self._state_lock:
+                                        result = self._accumulated_data.setdefault(
+                                            "result", {}
+                                        )
+
+                                        if detail_filename and total_layers > 0:
+                                            file_list = result.setdefault(
+                                                "file_list", []
+                                            )
+
+                                            existing = next(
+                                                (
+                                                    item for item in file_list
+                                                    if item.get("filename")
+                                                    == detail_filename
+                                                ),
+                                                None,
+                                            )
+
+                                            if existing is None:
+                                                file_list.append({
+                                                    "filename": detail_filename,
+                                                    "layer": total_layers,
+                                                })
+                                            else:
+                                                existing["layer"] = total_layers
+
+                                        if thumbnail:
+                                            result["thumbnail"] = thumbnail
+
+                                        # Preserve FW2 file metadata in the
+                                        # accumulated status for _parse_status().
+                                        result["file_metadata"] = {
+                                            "filename": detail_filename,
+                                            "filament_used_g": detail.get(
+                                                "total_filament_used"
+                                            ),
+                                            "print_time": detail.get(
+                                                "print_time"
+                                            ),
+                                            "size": detail.get("size"),
+                                            "color_map": detail.get(
+                                                "color_map", []
+                                            ),
+                                        }
+
+                                        self._last_update_time = (
+                                            time.monotonic()
+                                        )
+
+                                    metadata_filename = detail_filename
+                                    metadata_pending = None
+
+                                    logger.info(
+                                        "FW2 file detail received: "
+                                        "filename=%s total_layers=%s "
+                                        "thumbnail=%s",
+                                        detail_filename,
+                                        total_layers,
+                                        bool(thumbnail),
+                                    )
+                                else:
+                                    metadata_pending = None
+
+                            continue
+
+                        # Normal 6000 delta status push.
+                        if payload.get("method") == METHOD_STATUS_PUSH:
+                            content = (
+                                payload.get("result")
+                                or payload.get("data")
+                                or {}
+                            )
+
                             async with self._state_lock:
-                                # _deep_merge only adds/overwrites keys a push carries; it
-                                # never deletes keys a later push omits. When the print
-                                # transitions from active to inactive, fields like
-                                # filename/thumbnail from the finished job would otherwise
-                                # survive indefinitely into the new idle/next-job state.
-                                # Detect that transition via the modern-format
-                                # print_status.state and reset accumulation so it restarts
-                                # cleanly. Only trigger on an explicit new state (never on
-                                # a push that omits print_status.state) to keep this
-                                # narrowly scoped — not a clear on every push.
-                                new_print_state = content.get("print_status", {}).get("state")
+                                new_print_state = (
+                                    content.get("print_status", {}).get("state")
+                                )
+
                                 if new_print_state is not None:
                                     prev_print_state = (
-                                        self._accumulated_data.get("result", {})
+                                        self._accumulated_data
+                                        .get("result", {})
                                         .get("print_status", {})
                                         .get("state")
                                     )
-                                    was_active = prev_print_state in ("printing", "paused")
-                                    now_active = new_print_state in ("printing", "paused")
+
+                                    was_active = prev_print_state in (
+                                        "printing", "paused"
+                                    )
+                                    now_active = new_print_state in (
+                                        "printing", "paused"
+                                    )
+
                                     if was_active and not now_active:
                                         self._accumulated_data["result"] = {}
                                         self._accumulated_data["data"] = {}
 
-                                if "result" not in self._accumulated_data:
-                                    self._accumulated_data["result"] = {}
-                                if "data" not in self._accumulated_data:
-                                    self._accumulated_data["data"] = {}
-                                if "method" not in self._accumulated_data:
-                                    self._accumulated_data["method"] = METHOD_STATUS_PUSH
+                                self._accumulated_data.setdefault("result", {})
+                                self._accumulated_data.setdefault("data", {})
+                                self._accumulated_data["method"] = (
+                                    METHOD_STATUS_PUSH
+                                )
 
-                                _deep_merge(self._accumulated_data["result"], content)
-                                _deep_merge(self._accumulated_data["data"], content)
+                                _deep_merge(
+                                    self._accumulated_data["result"], content
+                                )
+                                _deep_merge(
+                                    self._accumulated_data["data"], content
+                                )
 
-                                # Merge other keys
                                 for k, v in payload.items():
                                     if k not in ("result", "data"):
                                         self._accumulated_data[k] = v
 
                                 self._last_update_time = time.monotonic()
 
-                    if stream_empty or not has_received:
-                        raise PrinterProtocolError("MQTT stream ended without a status message")
-
-                    logger.debug("Printer MQTT status stream ended cleanly. Reconnecting...")
-                    await asyncio.sleep(delay)
-                    delay = min(delay * 2, 30.0)
             except asyncio.CancelledError:
                 raise
             except (
@@ -546,12 +919,25 @@ class PrinterClient:
                 ValueError,
             ) as exc:
                 code = getattr(exc, "rc", None)
-                if isinstance(exc, aiomqtt.MqttCodeError) and code in (4, 5):
-                    logger.critical("MQTT permanent authentication failure: %s", exc)
+
+                if (
+                    isinstance(exc, aiomqtt.MqttCodeError)
+                    and code in (4, 5)
+                ):
+                    logger.critical(
+                        "MQTT permanent authentication failure: %s", exc
+                    )
                     raise
-                logger.warning("Printer MQTT status connection failed: %s. Reconnecting...", exc)
+
+                logger.warning(
+                    "Printer MQTT status connection failed: %s. "
+                    "Reconnecting...",
+                    exc,
+                )
+
                 async with self._state_lock:
                     self._accumulated_data.clear()
+
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, 30.0)
 

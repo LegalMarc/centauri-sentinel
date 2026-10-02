@@ -87,6 +87,7 @@ def _modern_payload(
 def _make_message(payload: dict[str, Any]) -> MagicMock:
     msg = MagicMock()
     msg.payload = json.dumps(payload).encode()
+    msg.topic = "elegoo/TESTSERIAL/api_status"
     return msg
 
 
@@ -100,6 +101,52 @@ def _make_mqtt_cm(messages: list[dict[str, Any]]) -> Any:
     client_mock = AsyncMock()
     client_mock.subscribe = AsyncMock()
     client_mock.publish = AsyncMock()
+    client_mock.__aiter__ = lambda _: _aiter_messages()
+    client_mock.messages.__aiter__ = lambda _: _aiter_messages()
+
+    cm = AsyncMock()
+    cm.__aenter__ = AsyncMock(return_value=client_mock)
+    cm.__aexit__ = AsyncMock(return_value=False)
+    return cm, client_mock
+
+
+def _make_fw2_mqtt_cm(messages: list[dict[str, Any]]) -> Any:
+    """MQTT mock with a realistic Centauri Carbon 2 registration handshake."""
+
+    queue: list[MagicMock] = []
+    if messages:
+        queue.append(_make_message(messages[0]))
+
+    client_mock = AsyncMock()
+    client_mock.subscribe = AsyncMock()
+
+    async def _publish(topic: str, payload_str: str) -> None:
+        payload = json.loads(payload_str)
+
+        if topic.endswith("/api_register"):
+            sn = topic.split("/")[1]
+            request_id = payload["request_id"]
+            registration = _make_message({
+                "client_id": payload["client_id"],
+                "error": "ok",
+            })
+            registration.topic = (
+                f"elegoo/{sn}/{request_id}/register_response"
+            )
+            queue.append(registration)
+
+            for message in messages[1:]:
+                queue.append(_make_message(message))
+
+    client_mock.publish = AsyncMock(side_effect=_publish)
+
+    async def _aiter_messages() -> Any:
+        while True:
+            if queue:
+                yield queue.pop(0)
+            else:
+                await asyncio.sleep(0.005)
+
     client_mock.__aiter__ = lambda _: _aiter_messages()
     client_mock.messages.__aiter__ = lambda _: _aiter_messages()
 
@@ -951,7 +998,7 @@ async def test_listen_loop_stream_clean_reconnect() -> None:
     client = PrinterClient(_SETTINGS)
     # Stream yields one status message, then ends naturally
     payload = _status_payload()
-    cm, _ = _make_mqtt_cm([payload])
+    cm, _ = _make_fw2_mqtt_cm([payload])
     with (
         patch("sentinel.printer.client.aiomqtt.Client", return_value=cm),
         patch("sentinel.printer.client.asyncio.sleep", side_effect=asyncio.CancelledError),
@@ -1087,21 +1134,45 @@ async def test_listen_loop_skips_malformed_json_and_increments_counter() -> None
     client = PrinterClient(_SETTINGS)
     assert client.malformed_messages_count == 0
 
+    payload_initial = _status_payload()
+    msg_initial = _make_message(payload_initial)
+    msg_initial.topic = "elegoo/serial1/api_status"
+
     msg_malformed = MagicMock()
     msg_malformed.payload = b"this is not valid JSON!!!"
     msg_malformed.topic = "elegoo/serial1/api_status"
 
     payload_valid = _status_payload()
-    msg_valid = MagicMock()
-    msg_valid.payload = json.dumps(payload_valid).encode()
+    msg_valid = _make_message(payload_valid)
     msg_valid.topic = "elegoo/serial1/api_status"
 
-    async def _aiter_messages():
-        yield msg_malformed
-        yield msg_valid
+    queue = [msg_initial]
 
     client_mock = AsyncMock()
     client_mock.subscribe = AsyncMock()
+
+    async def _publish(topic: str, payload_str: str) -> None:
+        payload = json.loads(payload_str)
+        if topic.endswith("/api_register"):
+            request_id = payload["request_id"]
+            msg_registration = _make_message({
+                "client_id": payload["client_id"],
+                "error": "ok",
+            })
+            msg_registration.topic = (
+                f"elegoo/serial1/{request_id}/register_response"
+            )
+            queue.extend([msg_registration, msg_malformed, msg_valid])
+
+    client_mock.publish = AsyncMock(side_effect=_publish)
+
+    async def _aiter_messages():
+        while True:
+            if queue:
+                yield queue.pop(0)
+            else:
+                await asyncio.sleep(0.005)
+
     client_mock.messages.__aiter__ = lambda _: _aiter_messages()
 
     cm = AsyncMock()
@@ -1110,7 +1181,10 @@ async def test_listen_loop_skips_malformed_json_and_increments_counter() -> None
 
     with (
         patch("sentinel.printer.client.aiomqtt.Client", return_value=cm),
-        patch("sentinel.printer.client.asyncio.sleep", side_effect=asyncio.CancelledError),
+        patch(
+            "sentinel.printer.client.asyncio.sleep",
+            side_effect=asyncio.CancelledError,
+        ),
         pytest.raises(asyncio.CancelledError),
     ):
         await client._listen_loop()
@@ -1265,7 +1339,7 @@ async def test_listen_loop_clears_stale_fields_on_active_to_idle_transition() ->
     client = PrinterClient(_SETTINGS)
     printing_push = _modern_payload("printing", filename="job_a.gcode", thumbnail="thumbA")
     idle_push = _modern_payload("idle")  # job finished: no filename/thumbnail in this push
-    cm, _ = _make_mqtt_cm([printing_push, idle_push])
+    cm, _ = _make_fw2_mqtt_cm([printing_push, idle_push])
 
     with (
         patch("sentinel.printer.client.aiomqtt.Client", return_value=cm),
@@ -1285,7 +1359,7 @@ async def test_listen_loop_keeps_fields_on_paused_transition() -> None:
     client = PrinterClient(_SETTINGS)
     printing_push = _modern_payload("printing", filename="job_a.gcode", thumbnail="thumbA")
     paused_push = _modern_payload("paused", filename="job_a.gcode", thumbnail="thumbA")
-    cm, _ = _make_mqtt_cm([printing_push, paused_push])
+    cm, _ = _make_fw2_mqtt_cm([printing_push, paused_push])
 
     with (
         patch("sentinel.printer.client.aiomqtt.Client", return_value=cm),
@@ -1308,7 +1382,7 @@ async def test_listen_loop_does_not_clear_on_push_without_print_status_state() -
     client = PrinterClient(_SETTINGS)
     printing_push = _modern_payload("printing", filename="job_a.gcode")
     partial_push = {"method": 6000, "result": {"extruder": {"temperature": 205.0, "target": 210.0}}}
-    cm, _ = _make_mqtt_cm([printing_push, partial_push])
+    cm, _ = _make_fw2_mqtt_cm([printing_push, partial_push])
 
     with (
         patch("sentinel.printer.client.aiomqtt.Client", return_value=cm),
@@ -1330,7 +1404,7 @@ async def test_listen_loop_does_not_clear_on_repeated_idle_pushes() -> None:
     printing_push = _modern_payload("printing", filename="job_a.gcode")
     idle_push_1 = _modern_payload("idle")
     idle_push_2 = _modern_payload("idle", extra_result={"machine_status": {"progress": 99.0}})
-    cm, _ = _make_mqtt_cm([printing_push, idle_push_1, idle_push_2])
+    cm, _ = _make_fw2_mqtt_cm([printing_push, idle_push_1, idle_push_2])
 
     with (
         patch("sentinel.printer.client.aiomqtt.Client", return_value=cm),

@@ -320,6 +320,11 @@ def make_router(
                     "remaining_seconds": p_status.remaining_seconds,
                     "camera_connected": camera_connected,
                     "thumbnail_base64": p_status.thumbnail_base64,
+            "filament_used_g": p_status.filament_used_g,
+            "material": p_status.material,
+            "filament_color": p_status.filament_color,
+            "file_print_time": p_status.file_print_time,
+            "file_size_bytes": p_status.file_size_bytes,
                 }
             )
         else:
