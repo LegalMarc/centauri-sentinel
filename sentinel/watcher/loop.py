@@ -24,9 +24,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
+from sentinel.bot.status_format import format_status_caption
 from sentinel.camera.errors import CameraOfflineError
 from sentinel.ml.types import LastMlObservation
 from sentinel.printer.errors import PauseDebouncedError
+from sentinel.printer.exceptions import exception_name
 from sentinel.watcher.state import WatcherState
 
 if TYPE_CHECKING:
@@ -96,6 +98,8 @@ class WatcherLoop:
         self._alerted_new_print: bool = False
         self._last_heartbeat_time = 0.0
         self._last_heartbeat_state: WatcherState | None = None
+        self._last_progress_status_time = 0.0
+        self._active_exception_codes: set[int] = set()
         self._snooze_task: asyncio.Task[None] | None = None
         self._tick_lock = asyncio.Lock()
         self._state_lock = asyncio.Lock()
@@ -408,6 +412,51 @@ class WatcherLoop:
                         logger.debug("Detection disabled — resetting confirm counter")
                         self._confirm_count = 0
 
+            # Refresh Telegram status independently of the watcher state machine.
+            try:
+                resume_cooldown_s = float(self._settings.resume_cooldown_seconds)
+            except (ValueError, TypeError, AttributeError):
+                resume_cooldown_s = 5.0
+
+            now_mono = time.monotonic()
+            progress_status_allowed = (
+                printer_status.printing
+                and bool(printer_status.filename)
+                and getattr(printer_status, "total_layers", 0) > 0
+                and self.state in (WatcherState.ARMED, WatcherState.CAMERA_OFFLINE)
+                and now_mono - self._last_resume_time >= resume_cooldown_s
+            )
+
+            if progress_status_allowed:
+                if now_mono - self._last_progress_status_time >= 300:
+                    progress_jpeg = await self._safe_grab_jpeg()
+
+                    detection_enabled = await self._db.get_setting(
+                        "detection_enabled",
+                        "true",
+                    )
+
+                    last_detection = None
+                    if self.last_ml_observation is not None:
+                        last_detection = {
+                            "score": self.last_ml_observation.score,
+                            "ts_utc": self.last_ml_observation.ts.isoformat(),
+                        }
+
+                    progress_caption = format_status_caption(
+                        printer_status,
+                        watcher_state=self.state.name,
+                        detection_enabled=(detection_enabled == "true"),
+                        last_detection=last_detection,
+                    )
+
+                    self._dispatcher.dispatch_print_progress(
+                        printer_status,
+                        jpeg=progress_jpeg,
+                        caption=progress_caption,
+                    )
+                    self._last_progress_status_time = now_mono
+
             self.last_printer_status = copy.copy(printer_status)
 
     def _final_job_status(self, terminal_print_state: str | None) -> str:
@@ -430,6 +479,18 @@ class WatcherLoop:
         return "failed"
 
     async def _update_state(self, status: PrinterStatus) -> None:
+        if not getattr(status, "stale", False):
+            current_exceptions = set(getattr(status, "exception_codes", []))
+            new_exceptions = current_exceptions - self._active_exception_codes
+
+            for code in sorted(new_exceptions):
+                self._dispatcher.dispatch_text(
+                    f"⚠️ Printer Error\n"
+                    f"⚠️ {exception_name(code)} ({code})"
+                )
+
+            self._active_exception_codes = current_exceptions
+
         if getattr(status, "stale", False):
             if self.state not in (WatcherState.STALLED, WatcherState.OFFLINE, WatcherState.IDLE):
                 logger.warning(
@@ -490,18 +551,29 @@ class WatcherLoop:
             self._alerted_new_print = False
             self._pause_failure_alerted = False
             self._ml_failure_alerted = False
+            self._dispatcher.reset_print_progress()
+            self._last_progress_status_time = 0.0
             return
 
-        # Printer is printing
+
         if self._print_start is None:
             self._print_start = datetime.now(tz=UTC)
 
-        if not self._alerted_new_print:
+        if not self._alerted_new_print and status.filename:
             self._alerted_new_print = True
             await self._check_and_send_state_reminders()
             if getattr(self._settings, "notify_on_print_start", False):
                 jpeg = await self._safe_grab_jpeg()
                 self._dispatcher.dispatch_print_started(status.filename, jpeg)
+
+        # FW02 may report printing before file details arrive. Adopt the
+        # filename when it becomes available instead of treating it as a new job.
+        if (
+            self._current_job_id is not None
+            and not self._current_filename
+            and status.filename
+        ):
+            self._current_filename = status.filename
 
         # Handle back-to-back print job transitions (filename changed while printing)
         if (
@@ -544,11 +616,11 @@ class WatcherLoop:
             self._ml_error_count = 0
 
         # Start job tracking if not already active
-        if self._current_job_id is None:
+        if self._current_job_id is None and status.filename:
             started_at = datetime.now(tz=UTC).isoformat().replace("+00:00", "Z")
             self._current_filename = status.filename
             self._current_job_id = await self._db.record_print_start(
-                status.filename or "unknown.gcode",
+                status.filename,
                 started_at,
             )
 

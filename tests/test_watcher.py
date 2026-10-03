@@ -2536,3 +2536,65 @@ async def test_print_finishing_with_klipper_complete_state_records_completed() -
 
     jobs = await db.get_recent_jobs(limit=1)
     assert jobs[0]["status"] == "completed"
+
+
+async def test_new_printer_exception_dispatches_alert() -> None:
+    dispatcher = _make_dispatcher()
+    status = _idle_status()
+    status.exception_codes = [1242]
+
+    watcher, *_ = await _make_watcher(
+        printer_status=status,
+        dispatcher=dispatcher,
+    )
+
+    await watcher.tick()
+
+    dispatcher.dispatch_text.assert_called_once_with(
+        "⚠️ Printer Error\n"
+        "⚠️ Canvas: Feed Self-Check Timeout (1242)"
+    )
+
+
+async def test_active_printer_exception_is_not_repeated() -> None:
+    dispatcher = _make_dispatcher()
+    status = _idle_status()
+    status.exception_codes = [1242]
+
+    watcher, *_ = await _make_watcher(
+        printer_status=status,
+        dispatcher=dispatcher,
+    )
+
+    await watcher.tick()
+    await watcher.tick()
+
+    dispatcher.dispatch_text.assert_called_once()
+
+
+async def test_cleared_printer_exception_can_alert_again() -> None:
+    dispatcher = _make_dispatcher()
+
+    error_status = _idle_status()
+    error_status.exception_codes = [1242]
+
+    clear_status = _idle_status()
+    clear_status.exception_codes = []
+
+    printer_statuses = [error_status, clear_status, error_status]
+
+    watcher, printer, *_ = await _make_watcher(
+        printer_status=error_status,
+        dispatcher=dispatcher,
+    )
+    printer.status = AsyncMock(side_effect=printer_statuses)
+
+    await watcher.tick()
+    await watcher.tick()
+    await watcher.tick()
+
+    assert dispatcher.dispatch_text.call_count == 2
+    dispatcher.dispatch_text.assert_any_call(
+        "⚠️ Printer Error\n"
+        "⚠️ Canvas: Feed Self-Check Timeout (1242)"
+    )

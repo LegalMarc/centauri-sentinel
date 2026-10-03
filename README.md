@@ -21,7 +21,15 @@ history.
 
 - **Printer:** Elegoo Centauri Carbon 2 (Carbon 1 not supported — different MQTT API)
 - **Host:** any Docker-capable Linux host on the same LAN as the printer (amd64 or arm64)
-- **Tested firmware:** Centauri Carbon 2 ≥ 1.x (MQTT broker at port 1883)
+- **Tested firmware:** Centauri Carbon 2 1.x and 02.01.00.00 (MQTT broker at port 1883)
+
+### Firmware 02.x compatibility
+
+Firmware 02.x no longer provides all print-state data in the MQTT status push used by
+earlier firmware. centauri-sentinel keeps a persistent registered MQTT session and uses
+`GET_STATUS` (1002) to refresh print state, progress, layers, temperatures, and timing.
+`GET_FILE_DETAIL` (1046) is used for active-file metadata such as material, filament usage,
+file size, and total layer count. Earlier firmware behaviour remains supported.
 
 ---
 

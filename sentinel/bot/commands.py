@@ -9,10 +9,13 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from typing import TYPE_CHECKING, Any
 
 from telegram import KeyboardButton, ReplyKeyboardMarkup
 
+from sentinel.bot.status_format import format_status_caption
 from sentinel.watcher.state import WatcherState
 
 _TUI_KEYBOARD = ReplyKeyboardMarkup(
@@ -166,67 +169,12 @@ class BotCommandHandler:
 
         # Expose printer state and elapsed print time
         p_status = await self._watcher.get_fresh_status()
-        printer_state = "Offline"
-        print_elapsed = "—"
-        extruder_temp = None
-        extruder_target = None
-        bed_temp = None
-        bed_target = None
-        progress = 0.0
-        remaining_seconds = 0.0
-        filename = "—"
-        current_layer = 0
-        total_layers = 0
-
-        if p_status:
-            print_state = p_status.print_state or ("printing" if p_status.printing else "idle")
-            if p_status.stale:
-                print_state = "offline (stale data)"
-            printer_state = print_state.capitalize()
-            is_active = p_status.printing or print_state == "paused"
-            print_elapsed = f"{p_status.elapsed_seconds:.0f}s" if is_active else "—"
-            extruder_temp = p_status.extruder_temp
-            extruder_target = p_status.extruder_target
-            bed_temp = p_status.bed_temp
-            bed_target = p_status.bed_target
-            progress = p_status.progress
-            remaining_seconds = p_status.remaining_seconds
-            filename = p_status.filename or "—"
-            current_layer = p_status.current_layer
-            total_layers = p_status.total_layers
-
-        time_rem = "—"
-        if remaining_seconds > 0:
-            hours = int(remaining_seconds // 3600)
-            minutes = int((remaining_seconds % 3600) // 60)
-            secs = int(remaining_seconds % 60)
-            time_rem = f"{hours}h {minutes}m {secs}s" if hours > 0 else f"{minutes}m {secs}s"
-
-        ext_str = (
-            f"{extruder_temp:.1f}°C / {extruder_target:.0f}°C"
-            if (extruder_temp is not None and extruder_target is not None)
-            else "—"
+        caption = format_status_caption(
+            p_status,
+            watcher_state=self._watcher.state.name,
+            detection_enabled=(detection_enabled == "true"),
+            last_detection=last_det,
         )
-        bed_str = (
-            f"{bed_temp:.1f}°C / {bed_target:.0f}°C"
-            if (bed_temp is not None and bed_target is not None)
-            else "—"
-        )
-
-        lines = [
-            f"👁️ Watcher: {self._watcher.state.name}",
-            f"⚙️ Detection: {'enabled' if detection_enabled == 'true' else 'disabled'}",
-            f"🖨️ Printer: {printer_state}",
-            f"📄 File: {filename}",
-            f"📊 Progress: {progress:.1f}% (Layer {current_layer}/{total_layers})",
-            f"⏳ Remaining: {time_rem} (Elapsed: {print_elapsed})",
-            f"🔥 Extruder: {ext_str}",
-            f"🛏️ Bed: {bed_str}",
-        ]
-        if last_det:
-            lines.append(f"⚠️ Last detection: score={last_det['score']:.2f} at {last_det['ts_utc']}")
-
-        caption = "\n".join(lines)
 
         try:
             jpeg = await self._camera.grab()

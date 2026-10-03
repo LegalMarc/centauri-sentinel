@@ -59,6 +59,7 @@ async def setup_integration_env():
     # Mocked notifier
     notifier = MagicMock()
     notifier.send_detection_alert = AsyncMock()
+    notifier.send_print_progress = AsyncMock()
     dispatcher = NotificationDispatcher([notifier])
 
     watcher = WatcherLoop(

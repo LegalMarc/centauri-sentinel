@@ -171,6 +171,35 @@ class NotificationDispatcher:
 
             self._fire_and_forget(self._with_retry(_call, channel_name))
 
+    def dispatch_print_progress(
+        self,
+        status,
+        *,
+        jpeg: bytes | None = None,
+        caption: str | None = None,
+        force: bool = False,
+    ) -> None:
+        """Update print progress on notifiers that support progress messages."""
+        for notifier in self._notifiers:
+            send_progress = getattr(notifier, "send_print_progress", None)
+            if send_progress is not None:
+                self._fire_and_forget(
+                    send_progress(
+                        status,
+                        jpeg=jpeg,
+                        caption=caption,
+                        force=force,
+                    ),
+                    critical=False,
+                )
+
+    def reset_print_progress(self) -> None:
+        """Reset progress state on notifiers that support it."""
+        for notifier in self._notifiers:
+            reset_progress = getattr(notifier, "reset_print_progress", None)
+            if reset_progress is not None:
+                reset_progress()
+
     def dispatch_print_completed(
         self, filename: str | None, elapsed_seconds: float, jpeg: bytes | None = None
     ) -> None:

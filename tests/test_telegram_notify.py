@@ -33,6 +33,9 @@ def _make_notifier_enabled() -> tuple[TelegramNotifier, MagicMock]:
     mock_bot = MagicMock()
     mock_bot.send_message = AsyncMock()
     mock_bot.send_photo = AsyncMock()
+    mock_bot.edit_message_media = AsyncMock()
+    mock_bot.edit_message_text = AsyncMock()
+    mock_bot.delete_message = AsyncMock()
 
     with patch("sentinel.notify.telegram.Bot", return_value=mock_bot):
         notifier = TelegramNotifier(_enabled_settings())
@@ -401,3 +404,104 @@ async def test_telegram_edge_cases(tmp_path: Any, monkeypatch: pytest.MonkeyPatc
     mock_bot_enabled.shutdown = AsyncMock()
     await notifier_enabled.close()
     mock_bot_enabled.shutdown.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Live print status card
+# ---------------------------------------------------------------------------
+
+
+def _progress_status(progress: float, filename: str = "benchy.gcode") -> MagicMock:
+    status = MagicMock()
+    status.progress = progress
+    status.filename = filename
+    return status
+
+
+async def test_print_progress_first_update_sends_photo() -> None:
+    notifier, mock_bot = _make_notifier_enabled()
+    message = MagicMock()
+    message.message_id = 123
+    mock_bot.send_photo.return_value = message
+
+    with patch("sentinel.notify.telegram.time.monotonic", return_value=1000.0):
+        await notifier.send_print_progress(
+            _progress_status(10.0),
+            jpeg=b"jpeg-1",
+            caption="status 10%",
+        )
+
+    mock_bot.send_photo.assert_called_once()
+    assert mock_bot.send_photo.call_args.kwargs["photo"] == b"jpeg-1"
+    assert mock_bot.send_photo.call_args.kwargs["caption"] == "status 10%"
+    assert mock_bot.send_photo.call_args.kwargs["disable_notification"] is False
+    assert notifier._progress_message_id == 123
+
+
+async def test_print_progress_after_five_minutes_edits_media() -> None:
+    notifier, mock_bot = _make_notifier_enabled()
+    message = MagicMock()
+    message.message_id = 123
+    mock_bot.send_photo.return_value = message
+
+    with patch(
+        "sentinel.notify.telegram.time.monotonic",
+        side_effect=[1000.0, 1301.0],
+    ):
+        await notifier.send_print_progress(
+            _progress_status(10.0),
+            jpeg=b"jpeg-1",
+            caption="status 10%",
+        )
+        await notifier.send_print_progress(
+            _progress_status(20.0),
+            jpeg=b"jpeg-2",
+            caption="status 20%",
+        )
+
+    mock_bot.send_photo.assert_called_once()
+    mock_bot.edit_message_media.assert_called_once()
+
+    kwargs = mock_bot.edit_message_media.call_args.kwargs
+    assert kwargs["message_id"] == 123
+    assert kwargs["media"].caption == "status 20%"
+    assert kwargs["media"].media is not None
+
+
+async def test_print_progress_milestone_sends_silent_new_card() -> None:
+    notifier, mock_bot = _make_notifier_enabled()
+
+    first = MagicMock()
+    first.message_id = 123
+    second = MagicMock()
+    second.message_id = 456
+    mock_bot.send_photo.side_effect = [first, second]
+
+    with patch(
+        "sentinel.notify.telegram.time.monotonic",
+        side_effect=[1000.0, 1301.0],
+    ):
+        await notifier.send_print_progress(
+            _progress_status(20.0),
+            jpeg=b"jpeg-1",
+            caption="status 20%",
+        )
+        await notifier.send_print_progress(
+            _progress_status(26.0),
+            jpeg=b"jpeg-2",
+            caption="status 26%",
+        )
+
+    assert mock_bot.send_photo.call_count == 2
+
+    kwargs = mock_bot.send_photo.call_args.kwargs
+    assert kwargs["photo"] == b"jpeg-2"
+    assert kwargs["caption"] == "status 26%"
+    assert kwargs["disable_notification"] is True
+
+    mock_bot.delete_message.assert_awaited_once_with(
+        chat_id="99",
+        message_id=123,
+    )
+    assert notifier._progress_message_id == 456
+    assert notifier._progress_milestone == 25

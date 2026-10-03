@@ -8,6 +8,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -54,6 +57,10 @@ class TelegramNotifier:
         self._chat_id = settings.telegram_chat_id or ""
         self._allowed_users = _parse_user_ids(settings.telegram_user_ids)
         self._snapshots_dir = Path(settings.db_path).parent / "snapshots"
+        self._progress_message_id: int | None = None
+        self._progress_last_update = 0.0
+        self._progress_filename: str | None = None
+        self._progress_milestone = 0
         if not self._allowed_users:
             raise ValueError(
                 "TELEGRAM_USER_IDS is required when Telegram is enabled but is empty or "
@@ -212,6 +219,152 @@ class TelegramNotifier:
             with attempt:
                 await fn()
 
+    @staticmethod
+    def _format_progress_duration(seconds: float) -> str:
+        total = max(0, int(seconds))
+        hours, remainder = divmod(total, 3600)
+        minutes, secs = divmod(remainder, 60)
+        if hours:
+            return f"{hours}h {minutes}m {secs}s"
+        return f"{minutes}m {secs}s"
+
+    @staticmethod
+    def _format_print_progress(status) -> str:
+        progress = max(0.0, min(100.0, float(status.progress or 0.0)))
+        filled = round(progress / 5)
+        bar = "█" * filled + "░" * (20 - filled)
+
+        current_layer = status.current_layer or 0
+        total_layers = status.total_layers or 0
+        filename = status.filename or "Unknown"
+
+        remaining = max(0.0, float(status.remaining_seconds or 0.0))
+        elapsed = max(0.0, float(status.elapsed_seconds or 0.0))
+
+        now = datetime.now(ZoneInfo("Europe/Tallinn"))
+        eta = (
+            (now + timedelta(seconds=remaining)).strftime("%H:%M")
+            if remaining > 0
+            else "—"
+        )
+
+        return "\n".join(
+            [
+                f"📊 {progress:.1f}%",
+                bar,
+                f"📐 Layer {current_layer} / {total_layers}",
+                "",
+                f"📄 {filename}",
+                f"⏳ Remaining: {TelegramNotifier._format_progress_duration(remaining)}",
+                f"⏱️ Elapsed: {TelegramNotifier._format_progress_duration(elapsed)}",
+                f"🏁 ETA: {eta}",
+                f"🕐 Updated: {now.strftime('%H:%M')}",
+            ]
+        )
+
+    async def send_print_progress(
+        self,
+        status,
+        *,
+        jpeg: bytes | None = None,
+        caption: str | None = None,
+        force: bool = False,
+    ) -> None:
+        """Create or update one live Telegram status card."""
+        if not self._enabled:
+            return
+
+        now_mono = time.monotonic()
+        filename = status.filename or None
+
+        if filename != self._progress_filename:
+            self._progress_message_id = None
+            self._progress_last_update = 0.0
+            self._progress_filename = filename
+            self._progress_milestone = 0
+
+        if (
+            not force
+            and self._progress_message_id is not None
+            and now_mono - self._progress_last_update < 300
+        ):
+            return
+
+        text = caption or self._format_print_progress(status)
+        progress = max(0.0, min(100.0, float(status.progress or 0.0)))
+
+        milestone = 0
+        for threshold in (75, 50, 25):
+            if progress >= threshold:
+                milestone = threshold
+                break
+
+        refresh_card = (
+            self._progress_message_id is None
+            or milestone > self._progress_milestone
+        )
+
+        try:
+            if refresh_card:
+                old_message_id = self._progress_message_id
+
+                if jpeg is not None:
+                    message = await self._bot.send_photo(
+                        chat_id=self._chat_id,
+                        photo=jpeg,
+                        caption=text,
+                        disable_notification=(old_message_id is not None),
+                    )
+                else:
+                    message = await self._bot.send_message(
+                        chat_id=self._chat_id,
+                        text=text,
+                        disable_notification=(old_message_id is not None),
+                    )
+
+                self._progress_message_id = message.message_id
+                self._progress_milestone = milestone
+
+                if old_message_id is not None:
+                    try:
+                        await self._bot.delete_message(
+                            chat_id=self._chat_id,
+                            message_id=old_message_id,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "Failed to remove previous Telegram status card",
+                            exc_info=True,
+                        )
+
+            elif jpeg is not None:
+                from telegram import InputMediaPhoto
+
+                await self._bot.edit_message_media(
+                    chat_id=self._chat_id,
+                    message_id=self._progress_message_id,
+                    media=InputMediaPhoto(media=jpeg, caption=text),
+                )
+
+            else:
+                await self._bot.edit_message_text(
+                    chat_id=self._chat_id,
+                    message_id=self._progress_message_id,
+                    text=text,
+                )
+
+            self._progress_last_update = now_mono
+
+        except Exception as exc:
+            if "message is not modified" not in str(exc).lower():
+                logger.exception("Failed to update Telegram print status")
+
+    def reset_print_progress(self) -> None:
+        self._progress_message_id = None
+        self._progress_last_update = 0.0
+        self._progress_filename = None
+        self._progress_milestone = 0
+
     async def send_print_started_alert(
         self, filename: str | None, jpeg: bytes | None = None
     ) -> None:
@@ -219,7 +372,7 @@ class TelegramNotifier:
             return
 
         name = filename or "Unknown file"
-        caption = f"🚀 Print started: {name}"
+        caption = f"🚀 Print Started\n📄 {name}"
 
         async def _send() -> None:
             nonlocal jpeg
