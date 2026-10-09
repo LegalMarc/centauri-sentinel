@@ -14,7 +14,13 @@ Branch: `fix/persistent-sessions-and-review`.
   daily. Logout revokes server-side. Dashboard Log out button. Basic auth no longer creates
   sessions. See `docs/threat-model.md#attack-surface`.
 - `e2d21fa` Shared `effective_stall_seconds` helper in `sentinel/watcher/state.py`.
-- `68dd451` All review findings below fixed with regression tests. 700 tests pass, 93% coverage.
+- `68dd451` All review findings below fixed with regression tests.
+- `87a444a`, `fa0cee3`, `e1ee155` Three deep-tier review passes over the branch and their
+  fixes: late-landing pause adoption (60 s window, unacknowledged only), operator pause and
+  resume hooks, graceful shutdown (uvicorn 5 s timeout, no SIGTERM re-raise,
+  `stop_grace_period: 30s`), config bounds clamp instead of reject, login `next` hardening,
+  Basic-auth digest cache. The third pass found no critical or high issues. 760 tests pass,
+  93.7% coverage.
 
 ## Review findings fixed
 
@@ -40,5 +46,6 @@ Three reviewers (watcher, printer/camera/ML, bot/notify/db/web) reported:
 
 ## Next step
 
-Deep-tier review of `git diff main...HEAD` is running. Fix every item it reports, rerun the
-full suite, re-review until clean, then merge to `main`.
+Merged to local `main`. Not pushed: pushing may trigger a Coolify redeploy to the live
+printer host, so that is the owner's call. After deploy, sign in once; the session then
+persists until Log out.
