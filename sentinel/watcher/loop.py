@@ -22,11 +22,11 @@ import time
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 
 from sentinel.camera.errors import CameraOfflineError
 from sentinel.ml.types import LastMlObservation
-from sentinel.printer.errors import PauseDebouncedError
+from sentinel.printer.errors import PauseDebouncedError, PrinterCommandUnacknowledgedError
 from sentinel.watcher.state import (
     WatcherState,
     effective_stall_seconds,
@@ -48,6 +48,18 @@ logger = logging.getLogger(__name__)
 # for the legacy/mock format and older tests.
 _COMPLETED_PRINT_STATES = frozenset({"complete", "completed"})
 _FAILED_PRINT_STATES = frozenset({"cancelled", "canceled", "error", "stopped"})
+
+# How long a cancelled watcher waits for an in-flight pause publish to finish
+# before giving up and re-raising (shutdown must not close the printer client
+# under a half-sent pause).
+_PAUSE_PUBLISH_CANCEL_WAIT_SECONDS = 15.0
+
+
+# runtime_settings key: "false" when detection was already disabled at the start
+# of a snooze, so the snooze's expiry must not re-enable it.
+_SNOOZE_RESTORE_KEY = "snooze_restore_detection"
+
+_INTERRUPT_STATES = (WatcherState.OFFLINE, WatcherState.STALLED)
 
 
 class Camera(Protocol):
@@ -111,6 +123,9 @@ class WatcherLoop:
         # alert, snapshot file and detection row are emitted once per episode.
         self._pause_failure_alerted = False
         self._ml_failure_alerted = False
+        # True while OFFLINE/STALLED was entered from PAUSED, so the eventual
+        # return to ARMED/WARMUP still runs the PAUSED-exit handling.
+        self._interrupted_from_paused = False
 
     @property
     def state(self) -> WatcherState:
@@ -118,9 +133,12 @@ class WatcherLoop:
 
     @state.setter
     def state(self, value: WatcherState) -> None:
-        if self._state == WatcherState.PAUSED and value in (
-            WatcherState.ARMED,
-            WatcherState.WARMUP,
+        old = self._state
+        if old == WatcherState.PAUSED and value in _INTERRUPT_STATES:
+            self._interrupted_from_paused = True
+        if value in (WatcherState.ARMED, WatcherState.WARMUP) and (
+            old == WatcherState.PAUSED
+            or (old in _INTERRUPT_STATES and self._interrupted_from_paused)
         ):
             self._last_resume_time = time.monotonic()
             logger.info("Printer resumed — setting resume cooldown anchor")
@@ -129,7 +147,23 @@ class WatcherLoop:
             # silently dropped (external resume path — client.resume() handles
             # the command-driven path directly).
             getattr(self._printer, "clear_pause_debounce", lambda: None)()
+            # New context: a failed-pause episode from before the pause must
+            # not make the next failure look like a silent retry.
+            self._reset_detection_episode()
+        if value not in _INTERRUPT_STATES:
+            self._interrupted_from_paused = False
         self._state = value
+
+    def _reset_detection_episode(self) -> None:
+        """Drop the confirm streak and the alert-once guards.
+
+        Called on every context change (pause/resume, detection toggle, camera
+        error, new job) so a later failure is a fresh episode with its own
+        alert, snapshot and detection row rather than a silent retry.
+        """
+        self._confirm_count = 0
+        self._pause_failure_alerted = False
+        self._ml_failure_alerted = False
 
     @property
     def dispatcher(self) -> NotificationDispatcher:
@@ -156,8 +190,7 @@ class WatcherLoop:
 
                     now = time.time()
                     if now > snooze_until:
-                        await self._db.set_setting("detection_enabled", "true")
-                        await self._db.set_setting("snooze_until_utc", "0")
+                        await self._end_snooze()
                     else:
                         self._snooze_task = asyncio.create_task(
                             self._re_enable_after(snooze_until - now)
@@ -230,6 +263,14 @@ class WatcherLoop:
         import time
 
         snooze_until = time.time() + seconds
+        # Remember whether detection was on when the snooze began, so expiry
+        # does not switch on detection the operator had deliberately disabled
+        # (/disable, then Snooze). A snooze already in progress keeps the flag
+        # recorded by the first one: detection reads as disabled only because
+        # of that snooze.
+        if not await self._snooze_in_progress():
+            was_enabled = await self._db.get_setting("detection_enabled", "true") != "false"
+            await self._db.set_setting(_SNOOZE_RESTORE_KEY, "true" if was_enabled else "false")
         # Write the expiry timestamp FIRST so that a crash between the two writes
         # leaves a recoverable state: run_forever will see snooze_until > 0 and
         # either reschedule or re-enable, rather than leaving detection disabled
@@ -268,6 +309,23 @@ class WatcherLoop:
 
         return self.last_printer_status
 
+    async def _snooze_in_progress(self) -> bool:
+        """True if a snooze has been started and not yet ended or cancelled."""
+        try:
+            return float(await self._db.get_setting("snooze_until_utc", "0") or 0) > 0
+        except (ValueError, TypeError):
+            return False
+
+    async def _end_snooze(self) -> bool:
+        """Finish a snooze. Re-enables detection only if it was enabled when the
+        snooze began; returns whether it did."""
+        restore = await self._db.get_setting(_SNOOZE_RESTORE_KEY, "true") != "false"
+        if restore:
+            await self._db.set_setting("detection_enabled", "true")
+        await self._db.set_setting("snooze_until_utc", "0")
+        await self._db.set_setting(_SNOOZE_RESTORE_KEY, "true")
+        return restore
+
     async def _re_enable_after(self, delay: float) -> None:
         current_task = asyncio.current_task()
         try:
@@ -276,10 +334,15 @@ class WatcherLoop:
                 # we just skip the wait and re-enable immediately.
                 await asyncio.sleep(delay)
             if self._snooze_task is current_task:
-                await self._db.set_setting("detection_enabled", "true")
-                await self._db.set_setting("snooze_until_utc", "0")
-                self._dispatcher.dispatch_text("Detection re-enabled after snooze.")
-                logger.info("Detection re-enabled after %.0fs snooze", delay)
+                if await self._end_snooze():
+                    self._dispatcher.dispatch_text("Detection re-enabled after snooze.")
+                    logger.info("Detection re-enabled after %.0fs snooze", delay)
+                else:
+                    logger.info(
+                        "Snooze ended after %.0fs; detection stays disabled "
+                        "(it was disabled before the snooze)",
+                        delay,
+                    )
         except asyncio.CancelledError:
             pass
         finally:
@@ -406,11 +469,14 @@ class WatcherLoop:
                 if detection_enabled == "true":
                     await self._check_frame(prev_state)
                 else:
-                    # Reset the confirm counter so that re-enabling detection
-                    # does not carry stale consecutive hits into the new window.
+                    # Reset the confirm counter, ML error streak and alert-once
+                    # guards so that re-enabling detection does not carry stale
+                    # consecutive hits (or a single ML error that would instantly
+                    # fail-closed) into the new window.
                     if self._confirm_count > 0:
                         logger.debug("Detection disabled — resetting confirm counter")
-                        self._confirm_count = 0
+                    self._reset_detection_episode()
+                    self._ml_error_count = 0
 
             self.last_printer_status = copy.copy(printer_status)
 
@@ -446,7 +512,7 @@ class WatcherLoop:
             if self.state != WatcherState.IDLE:
                 logger.info("Printer idle — transitioning IDLE")
             self.state = WatcherState.IDLE
-            self._confirm_count = 0
+            self._reset_detection_episode()
             self._ml_error_count = 0
 
             # Record print end if a job was active
@@ -492,8 +558,6 @@ class WatcherLoop:
             self._paused_by_sentinel = False
             self._auto_stop_notified = False
             self._alerted_new_print = False
-            self._pause_failure_alerted = False
-            self._ml_failure_alerted = False
             return
 
         # Printer is printing
@@ -544,7 +608,7 @@ class WatcherLoop:
             self._print_start = datetime.now(tz=UTC)
             self._alerted_new_print = False
             # Reset detection counters so job A's streak does not carry into job B
-            self._confirm_count = 0
+            self._reset_detection_episode()
             self._ml_error_count = 0
 
         # Start job tracking if not already active
@@ -596,7 +660,7 @@ class WatcherLoop:
                     prev_s = self.state
                     logger.info("Printer paused externally — transitioning PAUSED")
                     self.state = WatcherState.PAUSED
-                    self._confirm_count = 0
+                    self._reset_detection_episode()
                     if prev_s not in (WatcherState.OFFLINE, WatcherState.STALLED) and getattr(
                         self._settings, "notify_on_print_paused", True
                     ):
@@ -608,7 +672,7 @@ class WatcherLoop:
 
         if elapsed < warmup:
             self.state = WatcherState.WARMUP
-            self._confirm_count = 0
+            self._reset_detection_episode()
         else:
             if self.state in (WatcherState.IDLE, WatcherState.WARMUP):
                 logger.info("Printer armed for detection (elapsed=%.0fs)", elapsed)
@@ -644,14 +708,14 @@ class WatcherLoop:
         except CameraOfflineError:
             if self.state != WatcherState.CAMERA_OFFLINE:
                 self.state = WatcherState.CAMERA_OFFLINE
-                self._confirm_count = 0
+                self._reset_detection_episode()
                 if prev_state != WatcherState.CAMERA_OFFLINE:
                     logger.warning("Camera offline — suspending detection")
                     self._dispatcher.dispatch_camera_offline()
             return
         except Exception:
             logger.warning("Camera grab failed; skipping this tick")
-            self._confirm_count = 0
+            self._reset_detection_episode()
             return
 
         if self.state == WatcherState.CAMERA_OFFLINE:
@@ -670,43 +734,9 @@ class WatcherLoop:
                         "🚨 Sentinel ML service is failing continuously. "
                         "Pausing printer for safety."
                     )
-                printer_paused = False
-                try:
-                    await self._printer.pause()
-                    printer_paused = True
-                except PauseDebouncedError:
-                    # No new pause was actually sent — the debounce window suppressed
-                    # it. Check live status: if the printer is already paused (e.g.
-                    # from a prior command), treat this as success; otherwise leave
-                    # _ml_error_count untouched so the next tick retries without
-                    # needing to rebuild the failure streak from scratch.
-                    logger.warning(
-                        "ML-failure pause suppressed by debounce — "
-                        "printer may already be paused from a prior command"
-                    )
-                    try:
-                        live_status = await self._printer.status()
-                        printer_paused = live_status.print_state == "paused"
-                    except Exception:
-                        logger.warning(
-                            "Could not fetch live printer status after debounced "
-                            "ML-failure pause; will retry on next tick"
-                        )
-                except Exception as e:
-                    logger.error("Failed to pause printer on ML failure: %s", e)
-                    try:
-                        live_status = await self._printer.status()
-                        printer_paused = live_status.print_state == "paused"
-                    except Exception:
-                        logger.warning(
-                            "Could not fetch live printer status after failed "
-                            "ML-failure pause; will retry on next tick"
-                        )
-
-                if printer_paused:
-                    self.state = WatcherState.PAUSED
-                    self._paused_since = datetime.now(tz=UTC)
-                    self._paused_by_sentinel = True
+                outcome = await self._publish_pause(verify_on_error=True)
+                await self._record_pause_row("ml_failure", outcome == "ok")
+                if outcome == "ok":
                     self._confirm_count = 0
                     self._ml_error_count = 0
                     self._ml_failure_alerted = False
@@ -757,6 +787,108 @@ class WatcherLoop:
             # Score dropped: a failed-pause retry episode (if any) is over.
             self._pause_failure_alerted = False
 
+    async def _publish_pause(
+        self, *, verify_on_error: bool = False
+    ) -> Literal["ok", "debounced", "failed", "unacknowledged"]:
+        """Publish a pause and, on success, move to PAUSED. The only place the
+        watcher sends a pause command (detection and ML fail-closed both use it).
+
+        The publish runs as its own task behind a shield so a cancellation
+        arriving mid-call cannot abort the MQTT command. On cancellation we wait
+        (bounded) for that task before re-raising, so shutdown does not close the
+        printer client under a half-sent pause. State only becomes PAUSED after
+        the command is acknowledged or live status confirms the printer is
+        paused; otherwise the watcher stays ARMED and the next tick retries.
+
+        Returns "ok", "debounced" (suppressed and the printer is still printing),
+        "unacknowledged" (sent, but the printer never confirmed it) or "failed"
+        (the command was not sent or the printer rejected it). With verify_on_error, a raised command
+        is followed by a live status check and counts as "ok" if the printer is
+        in fact paused (the ML fail-closed path, which has no detection to retry).
+        """
+
+        async def _publish() -> None:
+            await self._printer.pause()
+
+        inner = asyncio.create_task(_publish(), name="watcher-pause-publish")
+        # Retrieve the result so a late failure after a timed-out wait is not
+        # reported as a never-retrieved task exception.
+        inner.add_done_callback(lambda t: t.cancelled() or t.exception())
+
+        try:
+            await asyncio.shield(inner)
+        except asyncio.CancelledError:
+            if not inner.done():
+                await asyncio.wait({inner}, timeout=_PAUSE_PUBLISH_CANCEL_WAIT_SECONDS)
+            if inner.done() and not inner.cancelled() and inner.exception() is None:
+                self._mark_paused_by_sentinel()
+            else:
+                logger.critical("Watcher cancelled before printer pause completed")
+            raise
+        except PauseDebouncedError:
+            # The debounce window is active — we did NOT send a new pause command.
+            # Inspect the live printer status to determine the real outcome:
+            # - if the printer is already paused, the earlier pause took effect → treat as success.
+            # - if the printer is still printing, the pause was silently lost → stay ARMED and retry.
+            logger.info(
+                "Pause suppressed by debounce window — checking live printer status "
+                "to determine whether printer is actually paused"
+            )
+            try:
+                live_status = await self._printer.status()
+                printer_is_paused = live_status.print_state == "paused"
+            except Exception:
+                logger.warning(
+                    "Could not fetch live printer status after debounced pause; "
+                    "staying ARMED to retry on next tick"
+                )
+                printer_is_paused = False
+
+            if printer_is_paused:
+                logger.info("Debounced pause: printer confirmed paused — transitioning PAUSED")
+                self._mark_paused_by_sentinel()
+                return "ok"
+            logger.warning(
+                "Debounced pause: printer still printing — staying ARMED, will retry next tick"
+            )
+            return "debounced"
+        except Exception as exc:
+            logger.error("Printer pause failed: %s", exc)
+            if verify_on_error:
+                # A pause that raised may still have reached the printer: trust
+                # live status over the exception.
+                try:
+                    live_status = await self._printer.status()
+                    if live_status.print_state == "paused":
+                        self._mark_paused_by_sentinel()
+                        return "ok"
+                except Exception:
+                    logger.warning(
+                        "Could not fetch live printer status after failed "
+                        "pause; will retry on next tick"
+                    )
+            if isinstance(exc, PrinterCommandUnacknowledgedError):
+                return "unacknowledged"
+            return "failed"
+
+        self._mark_paused_by_sentinel()
+        return "ok"
+
+    def _mark_paused_by_sentinel(self) -> None:
+        self.state = WatcherState.PAUSED
+        self._paused_since = datetime.now(tz=UTC)
+        self._paused_by_sentinel = True
+
+    async def _record_pause_row(self, source: str, ok: bool) -> None:
+        try:
+            await self._db.record_pause(
+                source=source,
+                result="ok" if ok else "error",
+                error_message=None if ok else "Printer pause failed",
+            )
+        except Exception:
+            logger.exception("DB write of pause_history failed (source=%s)", source)
+
     async def _on_confirmed_detection(self, result: MlResult, jpeg: bytes) -> None:
         # A retry is a confirmed detection on the tick right after a pause
         # failure: _confirm_count was restored so the pause is re-attempted
@@ -786,71 +918,18 @@ class WatcherLoop:
                 snapshot_id = None
                 snapshot_path = None
 
-        # Shield the pause publish so that a task cancellation arriving mid-call
-        # still lets the MQTT command complete before propagating CancelledError.
-        # State is only set to PAUSED after a successful publish; on failure the
-        # watcher stays ARMED and the next tick will retry.
-        pause_ok = False
-        pause_sent = False
-
-        async def _do_pause() -> None:
-            nonlocal pause_sent
-            await self._printer.pause()
-            pause_sent = True
-
-        try:
-            await asyncio.shield(_do_pause())
-            pause_ok = True
-            self.state = WatcherState.PAUSED
-            self._paused_since = datetime.now(tz=UTC)
-            self._paused_by_sentinel = True
-        except asyncio.CancelledError:
-            if pause_sent:
-                self.state = WatcherState.PAUSED
-                self._paused_since = datetime.now(tz=UTC)
-                self._paused_by_sentinel = True
-            else:
-                logger.critical("Watcher cancelled before printer pause completed")
-            raise
-        except PauseDebouncedError:
-            # The debounce window is active — we did NOT send a new pause command.
-            # Inspect the live printer status to determine the real outcome:
-            # - if the printer is already paused, the earlier pause took effect → treat as success.
-            # - if the printer is still printing, the pause was silently lost → stay ARMED and retry.
-            logger.info(
-                "Pause suppressed by debounce window — checking live printer status "
-                "to determine whether printer is actually paused"
-            )
-            try:
-                live_status = await self._printer.status()
-                printer_is_paused = live_status.print_state == "paused"
-            except Exception:
-                logger.warning(
-                    "Could not fetch live printer status after debounced pause; "
-                    "staying ARMED to retry on next tick"
+        outcome = await self._publish_pause()
+        pause_ok = outcome == "ok"
+        if outcome == "debounced":
+            # Restore the streak so the next high-score tick retries the
+            # pause immediately instead of waiting for N more frames.
+            self._confirm_count = consecutive_count
+            if not is_retry:
+                self._dispatcher.dispatch_text(
+                    "⚠️ Pause suppressed by debounce window but printer is still printing. "
+                    "Sentinel remains armed and will retry if failure is still detected."
                 )
-                printer_is_paused = False
-
-            if printer_is_paused:
-                logger.info("Debounced pause: printer confirmed paused — transitioning PAUSED")
-                pause_ok = True
-                self.state = WatcherState.PAUSED
-                self._paused_since = datetime.now(tz=UTC)
-                self._paused_by_sentinel = True
-            else:
-                logger.warning(
-                    "Debounced pause: printer still printing — staying ARMED, will retry next tick"
-                )
-                # Restore the streak so the next high-score tick retries the
-                # pause immediately instead of waiting for N more frames.
-                self._confirm_count = consecutive_count
-                if not is_retry:
-                    self._dispatcher.dispatch_text(
-                        "⚠️ Pause suppressed by debounce window but printer is still printing. "
-                        "Sentinel remains armed and will retry if failure is still detected."
-                    )
-        except Exception:
-            logger.exception("Printer pause failed — notifying anyway")
+        elif outcome == "failed":
             self._confirm_count = consecutive_count
             if not is_retry:
                 self._dispatcher.dispatch_text(
@@ -858,11 +937,16 @@ class WatcherLoop:
                     "G-code is still running. The watcher remains armed and will retry "
                     "if failure is still detected."
                 )
+        elif outcome == "unacknowledged":
+            self._confirm_count = consecutive_count
+            if not is_retry:
+                self._dispatcher.dispatch_text(
+                    "⚠️ Pause command sent during failure detection, but the printer did "
+                    "not confirm it. Check the printer. The watcher remains armed and will "
+                    "retry if failure is still detected."
+                )
 
-        if pause_ok:
-            self._pause_failure_alerted = False
-        else:
-            self._pause_failure_alerted = True
+        self._pause_failure_alerted = not pause_ok
 
         if not is_retry:
             self._dispatcher.dispatch_detection(result.score, snapshot_id, jpeg)

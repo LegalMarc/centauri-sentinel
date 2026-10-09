@@ -15,6 +15,17 @@ from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, Settings
 if TYPE_CHECKING:
     from pydantic.fields import FieldInfo
 
+# Bounds for the operator-tunable detection knobs. Shared by the env-var
+# validators below and the POST /api/settings route so the two entry points
+# can never disagree. The upper caps stop a typo (e.g. 86400) from silently
+# switching monitoring off for a day.
+ML_CONFIRM_COUNT_MAX = 20
+ML_POLL_INTERVAL_MAX_SECONDS = 300
+DETECTION_WARMUP_MAX_SECONDS = 3600
+# heartbeat_interval_seconds() floors at 10 s; a lower stall threshold would be
+# meaningless (and 0 would flag every tick as stalled).
+WATCHER_STALL_MIN_SECONDS = 10
+
 # ---------------------------------------------------------------------------
 # Secret stash — populated by model_post_init on the first Settings()
 # construction that exercises the env-scrub path (i.e. outside pytest).
@@ -288,6 +299,9 @@ class Settings(BaseSettings):
         if v < 1:
             msg = "ML_CONFIRM_COUNT must be at least 1"
             raise ValueError(msg)
+        if v > ML_CONFIRM_COUNT_MAX:
+            msg = f"ML_CONFIRM_COUNT must be at most {ML_CONFIRM_COUNT_MAX}"
+            raise ValueError(msg)
         return v
 
     @field_validator("ml_consecutive_failure_threshold")
@@ -304,6 +318,9 @@ class Settings(BaseSettings):
         if v < 1:
             msg = "ML_POLL_INTERVAL_SECONDS must be at least 1 second"
             raise ValueError(msg)
+        if v > ML_POLL_INTERVAL_MAX_SECONDS:
+            msg = f"ML_POLL_INTERVAL_SECONDS must be at most {ML_POLL_INTERVAL_MAX_SECONDS} seconds"
+            raise ValueError(msg)
         return v
 
     @field_validator("detection_warmup_seconds")
@@ -312,13 +329,16 @@ class Settings(BaseSettings):
         if v < 0:
             msg = "DETECTION_WARMUP_SECONDS must be at least 0"
             raise ValueError(msg)
+        if v > DETECTION_WARMUP_MAX_SECONDS:
+            msg = f"DETECTION_WARMUP_SECONDS must be at most {DETECTION_WARMUP_MAX_SECONDS}"
+            raise ValueError(msg)
         return v
 
     @field_validator("watcher_stall_seconds")
     @classmethod
     def _validate_watcher_stall_seconds(cls, v: int) -> int:
-        if v < 0:
-            msg = "WATCHER_STALL_SECONDS must be at least 0"
+        if v < WATCHER_STALL_MIN_SECONDS:
+            msg = f"WATCHER_STALL_SECONDS must be at least {WATCHER_STALL_MIN_SECONDS}"
             raise ValueError(msg)
         return v
 

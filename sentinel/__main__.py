@@ -366,6 +366,9 @@ async def _run(args: argparse.Namespace) -> None:
         finally:
             watcher_task.cancel()
             server_task.cancel()
+            # Wait for the watcher to finish unwinding BEFORE any client is
+            # closed: on cancellation it waits (bounded) for an in-flight
+            # shielded pause publish, and closing the printer first would abort it.
             await asyncio.gather(watcher_task, server_task, return_exceptions=True)
             if bot is not None:
                 await bot.stop()

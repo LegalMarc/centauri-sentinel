@@ -153,6 +153,31 @@ async def test_with_retry_predicate_matches_telegram_network_error() -> None:
     assert "MagicMock" in dispatcher.failed_channels
 
 
+async def test_with_retry_predicate_excludes_telegram_bad_request() -> None:
+    """BadRequest subclasses NetworkError but is permanent: one attempt only."""
+    import tenacity
+    from telegram.error import BadRequest
+
+    notifier = MagicMock()
+    notifier.send_camera_offline_alert = AsyncMock(side_effect=BadRequest("chat not found"))
+    dispatcher = NotificationDispatcher([notifier])
+
+    orig_retry = tenacity.AsyncRetrying
+
+    def mock_retry(*args: object, **kwargs: object) -> object:
+        kwargs["wait"] = tenacity.wait_fixed(0)
+        return orig_retry(*args, **kwargs)
+
+    from unittest.mock import patch
+
+    with patch("tenacity.AsyncRetrying", mock_retry):
+        dispatcher.dispatch_camera_offline()
+        await asyncio.sleep(0.05)
+
+    assert notifier.send_camera_offline_alert.call_count == 1
+    assert "MagicMock" in dispatcher.failed_channels
+
+
 async def test_with_retry_predicate_excludes_out_of_scope_exceptions() -> None:
     """httpx.HTTPStatusError and telegram.error.RetryAfter are handled (or
     intentionally left unretried) at the inner notifier layer. The outer

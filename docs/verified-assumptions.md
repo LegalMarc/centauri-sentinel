@@ -168,6 +168,8 @@ danielcherubini/elegoo-homeassistant (`cc2/client.py`, `cc2/const.py`,
 | Ack matching | `payload["id"] == cmd_id` | `_response_events[request_id]` | yes |
 | Codes | pause 1021, stop 1022, resume 1023 | same | yes |
 | Ack timeout | **5 s → now 10 s** | `CC2_COMMAND_TIMEOUT = 10` | fixed |
+| Retry after ack timeout | n/a | never re-published; raises `PrinterCommandUnacknowledgedError` (retries cover connect/register only) | fixed 2026-10-09 |
+| Bad access code | CONNACK 4/5 | aiomqtt reports paho `ReasonCode` 134/135; both forms detected | fixed 2026-10-09 |
 
 Two things the reference does that Sentinel deliberately does not need: a
 10 s `{"type":"PING"}` heartbeat (registrations expire after minutes of

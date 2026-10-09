@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 import httpx
 import tenacity
-from telegram.error import NetworkError
+from telegram.error import BadRequest, NetworkError
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
@@ -100,6 +100,7 @@ class NotificationDispatcher:
                 retryer = tenacity.AsyncRetrying(
                     wait=tenacity.wait_exponential(multiplier=0.5, min=0.5, max=60.0),
                     stop=tenacity.stop_after_attempt(5),
+                    # BadRequest subclasses NetworkError but is permanent.
                     retry=tenacity.retry_if_exception_type(
                         (
                             OSError,
@@ -108,7 +109,8 @@ class NotificationDispatcher:
                             httpx.TransportError,
                             NetworkError,
                         )
-                    ),
+                    )
+                    & tenacity.retry_if_not_exception_type(BadRequest),
                     before_sleep=tenacity.before_sleep_log(logger, logging.WARNING),
                 )
                 try:

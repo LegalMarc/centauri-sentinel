@@ -26,6 +26,16 @@ class PrinterCommandError(PrinterError):
     """
 
 
+class PrinterCommandUnacknowledgedError(PrinterCommandError):
+    """Raised when a command WAS published but its ack never arrived.
+
+    Deliberately not a PrinterTimeoutError and never retried: the printer may
+    well have acted on the command, so re-publishing risks a duplicate pause,
+    resume or stop. Callers must treat the outcome as unknown and confirm it by
+    reading the printer's status rather than by sending the command again.
+    """
+
+
 class PrinterRegistrationError(PrinterCommandError):
     """Raised when the firmware-02.x registration handshake fails or times out.
 

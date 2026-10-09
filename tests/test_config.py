@@ -377,15 +377,40 @@ def test_detection_warmup_seconds_invalid() -> None:
 
 
 def test_watcher_stall_seconds_valid() -> None:
-    s = Settings(watcher_stall_seconds=0)
-    assert s.watcher_stall_seconds == 0
     s = Settings(watcher_stall_seconds=10)
     assert s.watcher_stall_seconds == 10
 
 
 def test_watcher_stall_seconds_invalid() -> None:
-    with pytest.raises(ValueError, match="WATCHER_STALL_SECONDS must be at least 0"):
-        Settings(watcher_stall_seconds=-1)
+    for bad in (-1, 0, 9):
+        with pytest.raises(ValueError, match="WATCHER_STALL_SECONDS must be at least 10"):
+            Settings(watcher_stall_seconds=bad)
+
+
+def test_ml_confirm_count_upper_bound() -> None:
+    from sentinel.config import ML_CONFIRM_COUNT_MAX
+
+    assert Settings(ml_confirm_count=ML_CONFIRM_COUNT_MAX).ml_confirm_count == 20
+    with pytest.raises(ValueError, match="ML_CONFIRM_COUNT must be at most 20"):
+        Settings(ml_confirm_count=ML_CONFIRM_COUNT_MAX + 1)
+
+
+def test_ml_poll_interval_upper_bound() -> None:
+    from sentinel.config import ML_POLL_INTERVAL_MAX_SECONDS
+
+    s = Settings(ml_poll_interval_seconds=ML_POLL_INTERVAL_MAX_SECONDS)
+    assert s.ml_poll_interval_seconds == 300
+    with pytest.raises(ValueError, match="ML_POLL_INTERVAL_SECONDS must be at most 300"):
+        Settings(ml_poll_interval_seconds=86400)
+
+
+def test_detection_warmup_seconds_upper_bound() -> None:
+    from sentinel.config import DETECTION_WARMUP_MAX_SECONDS
+
+    s = Settings(detection_warmup_seconds=DETECTION_WARMUP_MAX_SECONDS)
+    assert s.detection_warmup_seconds == 3600
+    with pytest.raises(ValueError, match="DETECTION_WARMUP_SECONDS must be at most 3600"):
+        Settings(detection_warmup_seconds=86400)
 
 
 def test_log_format_default() -> None:

@@ -311,6 +311,35 @@ async def test_pause_fails_notifier_still_fires() -> None:
     )
 
 
+async def test_unacknowledged_pause_alert_does_not_claim_gcode_running() -> None:
+    """A pause that was sent but never acked may have worked: say so, stay ARMED."""
+    from sentinel.printer.errors import PrinterCommandUnacknowledgedError
+
+    dispatcher = _make_dispatcher()
+    watcher, printer, _camera, _ml, _db = await _make_watcher(
+        printer_status=_printing_status(),
+        ml_score=0.9,
+        dispatcher=dispatcher,
+    )
+    watcher._settings = Settings(
+        printer_ip="10.0.0.1",
+        printer_access_code="test",
+        detection_warmup_seconds=0,
+        ml_confirm_count=1,
+        ml_score_threshold=0.4,
+        ml_poll_interval_seconds=10,
+        watcher_stall_seconds=60,
+    )
+    printer.pause = AsyncMock(side_effect=PrinterCommandUnacknowledgedError("no ack"))
+
+    await watcher.tick()
+
+    assert watcher.state == WatcherState.ARMED
+    text = dispatcher.dispatch_text.call_args.args[0]
+    assert "did not confirm" in text
+    assert "G-code is still running" not in text
+
+
 async def test_db_records_detection_on_pause() -> None:
     watcher, _printer, _camera, _ml, db = await _make_watcher(
         printer_status=_printing_status(),
@@ -495,7 +524,7 @@ _FAST_SETTINGS = Settings(
     ml_confirm_count=1,
     ml_score_threshold=0.4,
     ml_poll_interval_seconds=1,
-    watcher_stall_seconds=0,
+    watcher_stall_seconds=10,
     resume_cooldown_seconds=0,
 )
 
@@ -2536,3 +2565,310 @@ async def test_print_finishing_with_klipper_complete_state_records_completed() -
 
     jobs = await db.get_recent_jobs(limit=1)
     assert jobs[0]["status"] == "completed"
+
+
+# ---------------------------------------------------------------------------
+# Review fixes: episode flags, shielded pause on shutdown, ML pause audit,
+# ML streak reset, OFFLINE/STALLED exit from PAUSED, snooze vs disabled detection
+# ---------------------------------------------------------------------------
+
+
+def _paused_status() -> PrinterStatus:
+    import dataclasses
+
+    return dataclasses.replace(_printing_status(), print_state="paused")
+
+
+async def _fail_pause_then_pause_externally(
+    watcher: WatcherLoop, printer: MagicMock, dispatcher: MagicMock
+) -> None:
+    """One failed auto-pause (alerts once), then the operator pauses from the screen."""
+    printer.pause = AsyncMock(side_effect=Exception("MQTT down"))
+    await watcher.tick()
+    assert dispatcher.dispatch_detection.call_count == 1
+    assert watcher._pause_failure_alerted is True
+    printer.status = AsyncMock(return_value=_paused_status())
+    await watcher.tick()
+    assert watcher.state == WatcherState.PAUSED
+
+
+async def test_external_pause_and_resume_ends_pause_failure_episode() -> None:
+    """A later failure in the same print must alert again, not be treated as a silent retry."""
+    dispatcher = _make_dispatcher()
+    watcher, printer, _camera, _ml, db = await _make_watcher(
+        printer_status=_printing_status(), ml_score=0.9, dispatcher=dispatcher
+    )
+    watcher._settings = _one_confirm_settings()
+
+    await _fail_pause_then_pause_externally(watcher, printer, dispatcher)
+    assert watcher._pause_failure_alerted is False
+
+    watcher._paused_since = datetime.now(tz=UTC) - timedelta(seconds=60)
+    printer.status = AsyncMock(return_value=_printing_status())
+    printer.pause = AsyncMock(side_effect=Exception("MQTT down again"))
+    watcher._last_resume_time = 0.0
+    await watcher.tick()  # resumes -> ARMED (cooldown skips the frame)
+    assert watcher.state == WatcherState.ARMED
+    watcher._last_resume_time = 0.0
+    await watcher.tick()  # new failure: fresh episode
+
+    assert dispatcher.dispatch_detection.call_count == 2
+    assert len(await db.get_recent_detections(limit=10)) == 2
+    assert printer.pause.await_count == 1
+
+
+async def test_detection_disabled_ends_pause_failure_episode() -> None:
+    dispatcher = _make_dispatcher()
+    watcher, printer, _camera, _ml, db = await _make_watcher(
+        printer_status=_printing_status(), ml_score=0.9, dispatcher=dispatcher
+    )
+    watcher._settings = _one_confirm_settings()
+    printer.pause = AsyncMock(side_effect=Exception("MQTT down"))
+    await watcher.tick()
+    assert watcher._pause_failure_alerted is True
+
+    await db.set_setting("detection_enabled", "false")
+    await watcher.tick()
+    assert watcher._pause_failure_alerted is False
+
+    await db.set_setting("detection_enabled", "true")
+    await watcher.tick()
+    assert dispatcher.dispatch_detection.call_count == 2
+
+
+async def test_camera_error_ends_pause_failure_episode() -> None:
+    dispatcher = _make_dispatcher()
+    watcher, printer, camera, _ml, _db = await _make_watcher(
+        printer_status=_printing_status(), ml_score=0.9, dispatcher=dispatcher
+    )
+    watcher._settings = _one_confirm_settings()
+    printer.pause = AsyncMock(side_effect=Exception("MQTT down"))
+    await watcher.tick()
+    assert watcher._pause_failure_alerted is True
+
+    camera.grab = AsyncMock(side_effect=RuntimeError("boom"))
+    await watcher.tick()
+    assert watcher._pause_failure_alerted is False
+
+    camera.grab = AsyncMock(side_effect=CameraOfflineError("gone"))
+    watcher._pause_failure_alerted = True
+    await watcher.tick()
+    assert watcher.state == WatcherState.CAMERA_OFFLINE
+    assert watcher._pause_failure_alerted is False
+
+
+async def test_cancel_during_inflight_pause_still_completes_the_pause() -> None:
+    """Shutdown cancels the watcher mid-publish: the pause must still be sent and
+    the cancellation must not finish before it does."""
+    watcher, printer, _camera, _ml, _db = await _make_watcher(
+        printer_status=_printing_status(), ml_score=0.9
+    )
+    watcher._settings = _one_confirm_settings()
+    release = asyncio.Event()
+    completed = False
+
+    async def slow_pause() -> None:
+        nonlocal completed
+        await release.wait()
+        completed = True
+
+    printer.pause = slow_pause
+    task = asyncio.create_task(watcher.tick())
+    await asyncio.sleep(0.05)  # pause publish is now in flight
+    task.cancel()
+    asyncio.get_running_loop().call_later(0.1, release.set)
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert completed, "cancellation must wait for the in-flight pause publish"
+    assert watcher.state == WatcherState.PAUSED
+    assert watcher._paused_by_sentinel is True
+
+
+async def test_cancel_during_inflight_pause_wait_is_bounded() -> None:
+    watcher, printer, _camera, _ml, _db = await _make_watcher(
+        printer_status=_printing_status(), ml_score=0.9
+    )
+    watcher._settings = _one_confirm_settings()
+    forever = asyncio.Event()
+
+    async def stuck_pause() -> None:
+        await forever.wait()
+
+    printer.pause = stuck_pause
+    with patch("sentinel.watcher.loop._PAUSE_PUBLISH_CANCEL_WAIT_SECONDS", 0.1):
+        task = asyncio.create_task(watcher.tick())
+        await asyncio.sleep(0.05)
+        task.cancel()
+        started = time.monotonic()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert time.monotonic() - started < 2.0
+    assert watcher.state != WatcherState.PAUSED
+
+
+def _ml_failure_settings() -> Settings:
+    return Settings(
+        printer_ip="10.0.0.1",
+        printer_access_code="test",
+        detection_warmup_seconds=0,
+        ml_consecutive_failure_threshold=1,
+        watcher_stall_seconds=60,
+    )
+
+
+async def test_ml_failure_pause_records_pause_history_row() -> None:
+    watcher, _printer, _camera, ml, db = await _make_watcher(printer_status=_printing_status())
+    watcher._settings = _ml_failure_settings()
+    ml.detect = AsyncMock(return_value=MlResult(score=0.0, error=True))
+
+    await watcher.tick()
+    assert watcher.state == WatcherState.PAUSED
+    assert watcher._paused_by_sentinel is True  # auto-stop path unchanged
+    pauses = await db.get_recent_pauses(limit=10)
+    assert [(p["source"], p["result"]) for p in pauses] == [("ml_failure", "ok")]
+
+    # A failing pause is audited per attempt as an error row.
+    watcher2, printer2, _c2, ml2, db2 = await _make_watcher(printer_status=_printing_status())
+    watcher2._settings = _ml_failure_settings()
+    ml2.detect = AsyncMock(return_value=MlResult(score=0.0, error=True))
+    printer2.pause = AsyncMock(side_effect=Exception("MQTT down"))
+    await watcher2.tick()
+    await watcher2.tick()
+    assert watcher2.state == WatcherState.ARMED
+    pauses2 = await db2.get_recent_pauses(limit=10)
+    assert [(p["source"], p["result"]) for p in pauses2] == [
+        ("ml_failure", "error"),
+        ("ml_failure", "error"),
+    ]
+
+
+async def test_ml_failure_pause_is_shielded_from_cancellation() -> None:
+    watcher, printer, _camera, ml, _db = await _make_watcher(printer_status=_printing_status())
+    watcher._settings = _ml_failure_settings()
+    ml.detect = AsyncMock(return_value=MlResult(score=0.0, error=True))
+    release = asyncio.Event()
+    completed = False
+
+    async def slow_pause() -> None:
+        nonlocal completed
+        await release.wait()
+        completed = True
+
+    printer.pause = slow_pause
+    task = asyncio.create_task(watcher.tick())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    asyncio.get_running_loop().call_later(0.1, release.set)
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert completed
+    assert watcher.state == WatcherState.PAUSED
+
+
+async def test_disabling_detection_resets_ml_error_streak() -> None:
+    watcher, printer, _camera, ml, db = await _make_watcher(printer_status=_printing_status())
+    watcher._settings = Settings(
+        printer_ip="10.0.0.1",
+        printer_access_code="test",
+        detection_warmup_seconds=0,
+        ml_consecutive_failure_threshold=3,
+        watcher_stall_seconds=60,
+    )
+    ml.detect = AsyncMock(return_value=MlResult(score=0.0, error=True))
+    await watcher.tick()
+    await watcher.tick()
+    assert watcher._ml_error_count == 2
+
+    await db.set_setting("detection_enabled", "false")
+    await watcher.tick()
+    assert watcher._ml_error_count == 0
+
+    await db.set_setting("detection_enabled", "true")
+    await watcher.tick()  # a single error after re-enabling must not fail closed
+    assert watcher._ml_error_count == 1
+    printer.pause.assert_not_awaited()
+
+
+@pytest.mark.parametrize("interrupt", [WatcherState.OFFLINE, WatcherState.STALLED])
+async def test_leaving_paused_via_offline_or_stalled_runs_paused_exit_handling(
+    interrupt: WatcherState,
+) -> None:
+    watcher, printer, _camera, _ml, _db = await _make_watcher(printer_status=_printing_status())
+    watcher.state = WatcherState.PAUSED
+    watcher._paused_since = datetime.now(tz=UTC) - timedelta(seconds=60)
+    watcher._pause_failure_alerted = True
+
+    watcher.state = interrupt
+    assert watcher._last_resume_time == 0.0
+    watcher.state = WatcherState.ARMED  # printer came back, not paused
+
+    assert watcher._last_resume_time > 0.0
+    printer.clear_pause_debounce.assert_called_once()
+    assert watcher._pause_failure_alerted is False
+
+    # Not from PAUSED: no cooldown anchor, no debounce clear.
+    printer.clear_pause_debounce.reset_mock()
+    watcher._last_resume_time = 0.0
+    watcher.state = interrupt
+    watcher.state = WatcherState.ARMED
+    assert watcher._last_resume_time == 0.0
+    printer.clear_pause_debounce.assert_not_called()
+
+
+async def test_offline_while_paused_then_printing_sets_resume_cooldown() -> None:
+    import dataclasses
+
+    watcher, printer, _camera, _ml, _db = await _make_watcher(printer_status=_printing_status())
+    watcher.state = WatcherState.PAUSED
+    watcher._paused_since = datetime.now(tz=UTC) - timedelta(seconds=60)
+    printer.status = AsyncMock(return_value=dataclasses.replace(_printing_status(), stale=True))
+    await watcher.tick()
+    assert watcher.state == WatcherState.OFFLINE
+
+    printer.status = AsyncMock(return_value=_printing_status())
+    await watcher.tick()
+    assert watcher.state == WatcherState.ARMED
+    assert watcher._last_resume_time > 0.0
+    printer.clear_pause_debounce.assert_called()
+
+
+async def test_snooze_with_detection_disabled_stays_disabled_after_expiry() -> None:
+    dispatcher = _make_dispatcher()
+    watcher, _printer, _camera, _ml, db = await _make_watcher(dispatcher=dispatcher)
+    await db.set_setting("detection_enabled", "false")
+
+    await watcher.snooze(0.05)
+    assert (await db.get_setting("detection_enabled")) == "false"
+    await asyncio.sleep(0.1)
+
+    assert (await db.get_setting("detection_enabled")) == "false"
+    assert (await db.get_setting("snooze_until_utc")) == "0"
+    assert watcher._snooze_task is None
+    dispatcher.dispatch_text.assert_not_called()
+
+
+async def test_resnooze_keeps_original_detection_intent() -> None:
+    watcher, _printer, _camera, _ml, db = await _make_watcher()
+    await db.set_setting("detection_enabled", "true")
+    await watcher.snooze(0.2)
+    await watcher.snooze(0.05)  # detection reads "false" now, only because of the snooze
+    await asyncio.sleep(0.1)
+    assert (await db.get_setting("detection_enabled")) == "true"
+
+
+async def test_startup_with_expired_snooze_respects_detection_intent() -> None:
+    watcher, _printer, _camera, _ml, db = await _make_watcher()
+    await db.set_setting("detection_enabled", "false")
+    await watcher.snooze(1000.0)
+    watcher.cancel_snooze()
+    await db.set_setting("snooze_until_utc", str(time.time() - 10.0))
+
+    task = asyncio.create_task(watcher.run_forever())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert (await db.get_setting("detection_enabled")) == "false"
+    assert (await db.get_setting("snooze_until_utc")) == "0"

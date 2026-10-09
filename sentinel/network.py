@@ -36,6 +36,15 @@ def validate_printer_ip(v: str) -> str:
     return v_str
 
 
+class HostResolutionError(ValueError):
+    """The hostname could not be resolved (e.g. a transient DNS/mDNS failure).
+
+    Subclasses ValueError so existing ``except ValueError`` callers keep working,
+    but lets retry logic tell "try again" apart from an SSRF-validation
+    rejection (a plain ValueError for a disallowed address).
+    """
+
+
 async def resolve_and_validate_printer_ip(v: str) -> str:
     """
     Resolves a printer hostname or IP to a literal IP address, then validates
@@ -56,7 +65,7 @@ async def resolve_and_validate_printer_ip(v: str) -> str:
             resolved_ip_str = await asyncio.to_thread(socket.gethostbyname, v_str)
             ip = ipaddress.ip_address(resolved_ip_str)
         except OSError as e:
-            raise ValueError(f"SSRF Protection: Cannot resolve hostname {v_str}") from e
+            raise HostResolutionError(f"SSRF Protection: Cannot resolve hostname {v_str}") from e
 
     # Unmap IPv4-mapped IPv6 addresses (e.g., ::ffff:127.0.0.1)
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:

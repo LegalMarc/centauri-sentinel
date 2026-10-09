@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 
 import tenacity
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import BadRequest
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -23,6 +24,15 @@ logger = logging.getLogger(__name__)
 
 _TIMEOUT = 10
 _RETRIES = 3
+
+# Photo sends fall back to plain text only on BadRequest (Telegram rejected the
+# image itself, e.g. IMAGE_PROCESS_FAILED), where text is the only way to get
+# the alert out. Transient errors (TimedOut, NetworkError, RetryAfter) are NOT
+# caught: a timed-out upload is often already delivered, so an immediate text
+# send would duplicate the alert, and after RetryAfter the text send would hit
+# the same flood limit while the photo is lost. They propagate to
+# _send_with_retry_fn, which waits (honoring retry_after) and retries the
+# whole send, photo included.
 
 
 def _parse_user_ids(raw: str | None) -> frozenset[int]:
@@ -115,8 +125,8 @@ class TelegramNotifier:
                         connect_timeout=_TIMEOUT,
                     )
                     return
-                except Exception:
-                    logger.exception("Telegram photo send failed for detection alert")
+                except BadRequest:
+                    logger.exception("Telegram photo send rejected for detection alert")
                     photo_bytes = None
 
             text_to_send = caption
@@ -202,10 +212,13 @@ class TelegramNotifier:
         # Permanent failures (invalid token, chat not found, etc.) are not
         # retried — they will re-raise immediately so the watcher loop can log
         # them without spending 3x the send time on certain failures.
+        # BadRequest subclasses NetworkError in python-telegram-bot, so it is
+        # excluded explicitly.
         retryer = tenacity.AsyncRetrying(
             stop=tenacity.stop_after_attempt(_RETRIES),
             wait=_wait_for_retry_after,
-            retry=tenacity.retry_if_exception_type((NetworkError, TimedOut, RetryAfter)),
+            retry=tenacity.retry_if_exception_type((NetworkError, TimedOut, RetryAfter))
+            & tenacity.retry_if_not_exception_type(BadRequest),
             reraise=True,
         )
         async for attempt in retryer:
@@ -234,8 +247,8 @@ class TelegramNotifier:
                         connect_timeout=_TIMEOUT,
                     )
                     return
-                except Exception:
-                    logger.exception("Telegram photo send failed for print start")
+                except BadRequest:
+                    logger.exception("Telegram photo send rejected for print start")
                     jpeg = None
 
             await self._bot.send_message(
@@ -273,8 +286,8 @@ class TelegramNotifier:
                         connect_timeout=_TIMEOUT,
                     )
                     return
-                except Exception:
-                    logger.exception("Telegram photo send failed for print completed")
+                except BadRequest:
+                    logger.exception("Telegram photo send rejected for print completed")
                     jpeg = None
 
             await self._bot.send_message(
@@ -306,8 +319,8 @@ class TelegramNotifier:
                         connect_timeout=_TIMEOUT,
                     )
                     return
-                except Exception:
-                    logger.exception("Telegram photo send failed for external pause")
+                except BadRequest:
+                    logger.exception("Telegram photo send rejected for external pause")
                     jpeg = None
 
             await self._bot.send_message(

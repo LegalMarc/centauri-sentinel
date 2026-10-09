@@ -211,6 +211,18 @@ async def test_retry_exhausted_reraises() -> None:
         await notifier.send_text("hello")
 
 
+async def test_bad_request_is_not_retried() -> None:
+    """BadRequest subclasses NetworkError but is permanent: one attempt only."""
+    from telegram.error import BadRequest
+
+    notifier, mock_bot = _make_notifier_enabled()
+    mock_bot.send_message = AsyncMock(side_effect=BadRequest("chat not found"))
+
+    with pytest.raises(BadRequest):
+        await notifier.send_text("hello")
+    assert mock_bot.send_message.call_count == 1
+
+
 async def test_retry_after_honors_server_wait_time(monkeypatch: pytest.MonkeyPatch) -> None:
     """RetryAfter(retry_after=30) must wait ~30s, not the ~8s exponential cap."""
     from telegram.error import RetryAfter
@@ -270,6 +282,115 @@ async def test_retry_after_falls_back_to_exponential_for_other_errors(
 
 
 # ---------------------------------------------------------------------------
+# Photo fallback: only a rejected image falls back to text
+# ---------------------------------------------------------------------------
+
+
+def _photo_send_calls(
+    notifier: TelegramNotifier,
+) -> dict[str, Any]:
+    """The four photo-capable senders, each invoked with a JPEG."""
+    return {
+        "detection": lambda: notifier.send_detection_alert(score=0.85, jpeg=b"jpeg"),
+        "print_started": lambda: notifier.send_print_started_alert("f.gcode", b"jpeg"),
+        "print_completed": lambda: notifier.send_print_completed_alert("f.gcode", 61.0, b"jpeg"),
+        "external_pause": lambda: notifier.send_external_pause_alert(b"jpeg"),
+    }
+
+
+@pytest.mark.parametrize(
+    "sender", ["detection", "print_started", "print_completed", "external_pause"]
+)
+async def test_photo_timeout_retries_photo_without_text_fallback(
+    sender: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A TimedOut photo may already be delivered: the text fallback would
+    duplicate the alert. It must go through the retry loop as a photo instead.
+    """
+    from telegram.error import TimedOut
+
+    notifier, mock_bot = _make_notifier_enabled()
+    mock_bot.send_photo.side_effect = [TimedOut("Timed out"), None]
+
+    async def _fake_sleep(seconds: float) -> None:
+        pass
+
+    monkeypatch.setattr("asyncio.sleep", _fake_sleep)
+
+    await _photo_send_calls(notifier)[sender]()
+
+    assert mock_bot.send_photo.call_count == 2
+    mock_bot.send_message.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "sender", ["detection", "print_started", "print_completed", "external_pause"]
+)
+async def test_photo_retry_after_waits_and_retries_photo(
+    sender: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After a flood-control error the text send would hit the same limit and
+    the photo would be lost; honor retry_after and resend the photo.
+    """
+    from telegram.error import RetryAfter
+
+    notifier, mock_bot = _make_notifier_enabled()
+    mock_bot.send_photo.side_effect = [RetryAfter(30), None]
+
+    sleep_calls: list[float] = []
+
+    async def _fake_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+
+    monkeypatch.setattr("asyncio.sleep", _fake_sleep)
+
+    await _photo_send_calls(notifier)[sender]()
+
+    assert sleep_calls == [30.0]
+    assert mock_bot.send_photo.call_count == 2
+    mock_bot.send_message.assert_not_called()
+
+
+async def test_photo_network_error_exhausted_reraises_without_text_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from telegram.error import NetworkError
+
+    notifier, mock_bot = _make_notifier_enabled()
+    mock_bot.send_photo.side_effect = NetworkError("down")
+
+    async def _fake_sleep(seconds: float) -> None:
+        pass
+
+    monkeypatch.setattr("asyncio.sleep", _fake_sleep)
+
+    with pytest.raises(NetworkError):
+        await notifier.send_detection_alert(score=0.85, jpeg=b"jpeg")
+    mock_bot.send_message.assert_not_called()
+
+
+async def test_photo_bad_request_then_text_failure_does_not_resend_photo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Once the image is known-bad it is dropped for the retries too."""
+    from telegram.error import BadRequest, NetworkError
+
+    notifier, mock_bot = _make_notifier_enabled()
+    mock_bot.send_photo.side_effect = BadRequest("IMAGE_PROCESS_FAILED")
+    mock_bot.send_message.side_effect = [NetworkError("blip"), None]
+
+    async def _fake_sleep(seconds: float) -> None:
+        pass
+
+    monkeypatch.setattr("asyncio.sleep", _fake_sleep)
+
+    await notifier.send_print_started_alert("f.gcode", b"jpeg")
+
+    mock_bot.send_photo.assert_called_once()
+    assert mock_bot.send_message.call_count == 2
+
+
+# ---------------------------------------------------------------------------
 # Startup validation — fail loudly on empty or invalid user IDs
 # ---------------------------------------------------------------------------
 
@@ -313,8 +434,10 @@ async def test_send_print_started_alert_with_photo() -> None:
 
 
 async def test_send_print_started_alert_with_photo_fallback() -> None:
+    from telegram.error import BadRequest
+
     notifier, mock_bot = _make_notifier_enabled()
-    mock_bot.send_photo.side_effect = Exception("failed")
+    mock_bot.send_photo.side_effect = BadRequest("IMAGE_PROCESS_FAILED")
     await notifier.send_print_started_alert("file.gcode", b"jpeg")
     mock_bot.send_message.assert_called_once()
 
@@ -332,8 +455,10 @@ async def test_send_print_completed_alert_with_photo() -> None:
 
 
 async def test_send_print_completed_alert_with_photo_fallback() -> None:
+    from telegram.error import BadRequest
+
     notifier, mock_bot = _make_notifier_enabled()
-    mock_bot.send_photo.side_effect = Exception("failed")
+    mock_bot.send_photo.side_effect = BadRequest("IMAGE_PROCESS_FAILED")
     await notifier.send_print_completed_alert("file.gcode", 3661.0, b"jpeg")
     mock_bot.send_message.assert_called_once()
 
@@ -351,8 +476,10 @@ async def test_send_external_pause_alert_with_photo() -> None:
 
 
 async def test_send_external_pause_alert_with_photo_fallback() -> None:
+    from telegram.error import BadRequest
+
     notifier, mock_bot = _make_notifier_enabled()
-    mock_bot.send_photo.side_effect = Exception("failed")
+    mock_bot.send_photo.side_effect = BadRequest("IMAGE_PROCESS_FAILED")
     await notifier.send_external_pause_alert(b"jpeg")
     mock_bot.send_message.assert_called_once()
 

@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS detection_events (
 CREATE TABLE IF NOT EXISTS pause_history (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     ts_utc          TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-    source          TEXT    NOT NULL,      -- 'auto' | 'telegram' | 'web'
+    source          TEXT    NOT NULL,      -- 'auto' | 'ml_failure' | 'telegram' | 'web'
     result          TEXT    NOT NULL,      -- 'ok' | 'error'
     error_message   TEXT
 );

@@ -13,6 +13,13 @@ from typing import TYPE_CHECKING, Any
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, Response, StreamingResponse
 
+from sentinel.config import (
+    DETECTION_WARMUP_MAX_SECONDS,
+    ML_CONFIRM_COUNT_MAX,
+    ML_POLL_INTERVAL_MAX_SECONDS,
+)
+from sentinel.watcher.state import effective_stall_seconds
+
 _SNAPSHOT_ID_RE = re.compile(r"^[a-f0-9]{32}$")
 
 if TYPE_CHECKING:
@@ -98,7 +105,23 @@ def make_router(
     settings: Settings,
 ) -> APIRouter:
     router = APIRouter()
-    stall_seconds = settings.watcher_stall_seconds
+
+    async def _current_poll_interval() -> float:
+        """Poll interval in force: the runtime db override, else the config default."""
+        default = float(settings.ml_poll_interval_seconds)
+        if db is None:
+            return default
+        raw = await db.get_setting("ml_poll_interval_seconds", str(default))
+        try:
+            return float(raw) if raw is not None else default
+        except ValueError:
+            return default
+
+    async def _stall_seconds() -> float:
+        """The watchdog's effective stall threshold, so every view agrees with it."""
+        return effective_stall_seconds(
+            settings.watcher_stall_seconds, await _current_poll_interval()
+        )
 
     @router.get("/", response_class=HTMLResponse)
     async def status_page(request: Request) -> Response:
@@ -205,6 +228,9 @@ def make_router(
         last_ml_score = observation.score if observation else None
         last_ml_score_age_s = _age_seconds(observation.ts if observation else None)
         last_ml_score_age = _format_age(last_ml_score_age_s)
+        stall_seconds = effective_stall_seconds(
+            settings.watcher_stall_seconds, ml_poll_interval_seconds
+        )
         last_ml_score_stale = (
             last_ml_score_age_s is not None and last_ml_score_age_s > stall_seconds
         )
@@ -270,6 +296,7 @@ def make_router(
 
         observation = watcher.last_ml_observation
         last_ml_score_age_s = _age_seconds(observation.ts if observation else None)
+        stall_seconds = await _stall_seconds()
 
         data: dict[str, Any] = {
             "watcher_state": watcher.state.name,
@@ -461,15 +488,22 @@ def make_router(
             raise HTTPException(status_code=503, detail="Service not initialised")
         try:
             body = await request.json()
+            if not isinstance(body, dict):
+                raise HTTPException(status_code=400, detail="Request body must be a JSON object")
+
+            # Validate every field before writing anything, so a rejected
+            # field can never leave an earlier one half-applied (saved to the
+            # DB and pushed into the live printer/camera connections).
             printer_ip = body.get("printer_ip")
             ml_confirm_count = body.get("ml_confirm_count")
             ml_score_threshold = body.get("ml_score_threshold")
             ml_poll_interval_seconds = body.get("ml_poll_interval_seconds")
             detection_warmup_seconds = body.get("detection_warmup_seconds")
 
+            new_ip: str | None = None
             if printer_ip is not None:
                 try:
-                    from sentinel.network import format_host_for_url, validate_printer_ip
+                    from sentinel.network import validate_printer_ip
 
                     printer_ip = await asyncio.to_thread(validate_printer_ip, printer_ip)
                 except ValueError as exc:
@@ -477,24 +511,26 @@ def make_router(
                         status_code=400,
                         detail=f"Invalid printer IP: {exc}",
                     ) from exc
+                # The dashboard form always sends printer_ip; reconnecting
+                # mid-print for an unchanged value would drop the MQTT
+                # listener, clear a pending auto-stop retry and kill /stream
+                # viewers, so only a real change is persisted and applied.
+                current_ip = await db.get_setting("printer_ip", settings.printer_ip)
+                if not isinstance(current_ip, str) or not current_ip:
+                    current_ip = settings.printer_ip
+                if printer_ip != current_ip:
+                    new_ip = printer_ip
 
-                await db.set_setting("printer_ip", printer_ip)
-                # Bracket IPv6 literals exactly as MjpegGrabber does at startup;
-                # a bare "fd00::10:8080" netloc is unparseable by urlparse.
-                new_camera_url = (
-                    f"http://{format_host_for_url(printer_ip)}:"
-                    f"{settings.printer_mjpeg_port}{settings.printer_mjpeg_path}"
-                )
-                if hasattr(camera, "reconfigure"):
-                    await camera.reconfigure(new_camera_url)
-                if hasattr(watcher.printer, "reconfigure"):
-                    await watcher.printer.reconfigure(printer_ip)
+            writes: dict[str, str] = {}
 
             if ml_confirm_count is not None:
                 ml_confirm_count_val = int(ml_confirm_count)
-                if ml_confirm_count_val < 1:
-                    raise HTTPException(status_code=400, detail="Confirm count must be at least 1")
-                await db.set_setting("ml_confirm_count", str(ml_confirm_count_val))
+                if not 1 <= ml_confirm_count_val <= ML_CONFIRM_COUNT_MAX:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Confirm count must be between 1 and {ML_CONFIRM_COUNT_MAX}",
+                    )
+                writes["ml_confirm_count"] = str(ml_confirm_count_val)
 
             if ml_score_threshold is not None:
                 ml_score_threshold_val = float(ml_score_threshold)
@@ -502,23 +538,46 @@ def make_router(
                     raise HTTPException(
                         status_code=400, detail="Score threshold must be between 0.0 and 1.0"
                     )
-                await db.set_setting("ml_score_threshold", str(ml_score_threshold_val))
+                writes["ml_score_threshold"] = str(ml_score_threshold_val)
 
             if ml_poll_interval_seconds is not None:
                 ml_poll_interval_seconds_val = int(ml_poll_interval_seconds)
-                if ml_poll_interval_seconds_val < 1:
+                if not 1 <= ml_poll_interval_seconds_val <= ML_POLL_INTERVAL_MAX_SECONDS:
                     raise HTTPException(
-                        status_code=400, detail="Poll interval must be at least 1 second"
+                        status_code=400,
+                        detail="Poll interval must be between 1 and "
+                        f"{ML_POLL_INTERVAL_MAX_SECONDS} seconds",
                     )
-                await db.set_setting("ml_poll_interval_seconds", str(ml_poll_interval_seconds_val))
+                writes["ml_poll_interval_seconds"] = str(ml_poll_interval_seconds_val)
 
             if detection_warmup_seconds is not None:
                 detection_warmup_seconds_val = int(detection_warmup_seconds)
-                if detection_warmup_seconds_val < 0:
+                if not 0 <= detection_warmup_seconds_val <= DETECTION_WARMUP_MAX_SECONDS:
                     raise HTTPException(
-                        status_code=400, detail="Warmup duration cannot be negative"
+                        status_code=400,
+                        detail="Warmup duration must be between 0 and "
+                        f"{DETECTION_WARMUP_MAX_SECONDS} seconds",
                     )
-                await db.set_setting("detection_warmup_seconds", str(detection_warmup_seconds_val))
+                writes["detection_warmup_seconds"] = str(detection_warmup_seconds_val)
+
+            # All fields are valid: apply.
+            if new_ip is not None:
+                from sentinel.network import format_host_for_url
+
+                await db.set_setting("printer_ip", new_ip)
+                # Bracket IPv6 literals exactly as MjpegGrabber does at startup;
+                # a bare "fd00::10:8080" netloc is unparseable by urlparse.
+                new_camera_url = (
+                    f"http://{format_host_for_url(new_ip)}:"
+                    f"{settings.printer_mjpeg_port}{settings.printer_mjpeg_path}"
+                )
+                if hasattr(camera, "reconfigure"):
+                    await camera.reconfigure(new_camera_url)
+                if hasattr(watcher.printer, "reconfigure"):
+                    await watcher.printer.reconfigure(new_ip)
+
+            for key, value in writes.items():
+                await db.set_setting(key, value)
 
             return Response(
                 content=json.dumps({"status": "ok", "message": "Settings updated successfully"}),
@@ -526,7 +585,7 @@ def make_router(
             )
         except HTTPException:
             raise
-        except (ValueError, TypeError) as exc:
+        except (ValueError, TypeError, OverflowError) as exc:
             raise HTTPException(status_code=400, detail=f"Invalid parameter format: {exc}") from exc
         except Exception as exc:
             logger.exception("Failed to update settings")
@@ -664,6 +723,7 @@ def make_router(
             reasons.append("db not reachable")
 
         watcher_healthy = False
+        stall_seconds = await _stall_seconds()
         if age is None:
             reasons.append("no heartbeat recorded")
         elif age > stall_seconds:

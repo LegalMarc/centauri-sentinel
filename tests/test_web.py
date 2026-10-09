@@ -1985,13 +1985,16 @@ async def test_post_settings_success(
         ({"printer_ip": "invalid ip address"}, "must be a valid IP address or hostname"),
         ({"printer_ip": "10.0.0.999"}, "must be a valid IP address or hostname"),
         ({"printer_ip": "bad_host@name"}, "must be a valid IP address or hostname"),
-        ({"ml_confirm_count": 0}, "Confirm count must be at least 1"),
-        ({"ml_confirm_count": -2}, "Confirm count must be at least 1"),
+        ({"ml_confirm_count": 0}, "Confirm count must be between 1 and 20"),
+        ({"ml_confirm_count": -2}, "Confirm count must be between 1 and 20"),
+        ({"ml_confirm_count": 21}, "Confirm count must be between 1 and 20"),
         ({"ml_score_threshold": -0.1}, "Score threshold must be between 0.0 and 1.0"),
         ({"ml_score_threshold": 1.1}, "Score threshold must be between 0.0 and 1.0"),
-        ({"ml_poll_interval_seconds": 0}, "Poll interval must be at least 1 second"),
-        ({"ml_poll_interval_seconds": -5}, "Poll interval must be at least 1 second"),
-        ({"detection_warmup_seconds": -1}, "Warmup duration cannot be negative"),
+        ({"ml_poll_interval_seconds": 0}, "Poll interval must be between 1 and 300"),
+        ({"ml_poll_interval_seconds": -5}, "Poll interval must be between 1 and 300"),
+        ({"ml_poll_interval_seconds": 86400}, "Poll interval must be between 1 and 300"),
+        ({"detection_warmup_seconds": -1}, "Warmup duration must be between 0 and 3600"),
+        ({"detection_warmup_seconds": 86400}, "Warmup duration must be between 0 and 3600"),
     ],
 )
 async def test_post_settings_invalid_values(
@@ -2280,3 +2283,204 @@ async def test_post_settings_ipv6_printer_ip_brackets_camera_url(
     mock_db.set_setting.assert_any_call("printer_ip", "fd00::10")
     printer.reconfigure.assert_called_once_with("fd00::10")
     mock_camera.reconfigure.assert_called_once_with("http://[fd00::10]:8080/mjpeg")
+
+
+# ---------------------------------------------------------------------------
+# POST /api/settings: no-op reconnects, atomicity, body shape
+# ---------------------------------------------------------------------------
+
+
+async def test_post_settings_unchanged_ip_does_not_reconnect(
+    mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: AsyncMock
+) -> None:
+    """The dashboard form always sends printer_ip; an unchanged value must not
+    drop the MQTT listener or kill /stream viewers mid-print.
+    """
+    printer = AsyncMock()
+    mock_watcher.printer = printer
+    mock_db.get_setting.return_value = "192.168.1.10"
+    app_state = create_app(
+        _base_settings(auth_enabled=False), db=mock_db, watcher=mock_watcher, camera=mock_camera
+    )
+    async with _client(app_state) as c:
+        r = await c.post(
+            "/api/settings", json={"printer_ip": "192.168.1.10", "ml_score_threshold": 0.5}
+        )
+
+    assert r.status_code == 200
+    printer.reconfigure.assert_not_called()
+    mock_camera.reconfigure.assert_not_called()
+    mock_db.set_setting.assert_any_call("ml_score_threshold", "0.5")
+    assert not any(c.args[0] == "printer_ip" for c in mock_db.set_setting.await_args_list)
+
+
+async def test_post_settings_unchanged_ip_falls_back_to_config_default(
+    mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: AsyncMock
+) -> None:
+    """With no printer_ip override in the db the config value is the current IP."""
+    printer = AsyncMock()
+    mock_watcher.printer = printer
+    # Mirror Database.get_setting: return the supplied default when unset.
+    mock_db.get_setting.side_effect = lambda key, default=None: default
+    app_state = create_app(
+        _base_settings(auth_enabled=False), db=mock_db, watcher=mock_watcher, camera=mock_camera
+    )
+    async with _client(app_state) as c:
+        r = await c.post("/api/settings", json={"printer_ip": "192.168.1.10"})
+
+    assert r.status_code == 200
+    printer.reconfigure.assert_not_called()
+    mock_camera.reconfigure.assert_not_called()
+    mock_db.set_setting.assert_not_called()
+
+
+async def test_post_settings_rejected_field_applies_nothing(
+    mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: AsyncMock
+) -> None:
+    """A valid new IP plus an invalid count must be all-or-nothing."""
+    printer = AsyncMock()
+    mock_watcher.printer = printer
+    mock_db.get_setting.return_value = "192.168.1.10"
+    app_state = create_app(
+        _base_settings(auth_enabled=False), db=mock_db, watcher=mock_watcher, camera=mock_camera
+    )
+    async with _client(app_state) as c:
+        r = await c.post(
+            "/api/settings", json={"printer_ip": "192.168.1.11", "ml_confirm_count": 0}
+        )
+
+    assert r.status_code == 400
+    mock_db.set_setting.assert_not_called()
+    printer.reconfigure.assert_not_called()
+    mock_camera.reconfigure.assert_not_called()
+
+
+@pytest.mark.parametrize("body", [[1], "text", 5, [{"printer_ip": "10.0.0.1"}]])
+async def test_post_settings_non_object_body_is_400(
+    mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: AsyncMock, body: object
+) -> None:
+    app_state = create_app(
+        _base_settings(auth_enabled=False), db=mock_db, watcher=mock_watcher, camera=mock_camera
+    )
+    async with _client(app_state) as c:
+        r = await c.post("/api/settings", json=body)
+
+    assert r.status_code == 400
+    assert "JSON object" in r.json()["detail"]
+    mock_db.set_setting.assert_not_called()
+
+
+async def test_post_settings_accepts_upper_bounds(
+    mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: AsyncMock
+) -> None:
+    app_state = create_app(
+        _base_settings(auth_enabled=False), db=mock_db, watcher=mock_watcher, camera=mock_camera
+    )
+    async with _client(app_state) as c:
+        r = await c.post(
+            "/api/settings",
+            json={
+                "ml_confirm_count": 20,
+                "ml_poll_interval_seconds": 300,
+                "detection_warmup_seconds": 3600,
+            },
+        )
+
+    assert r.status_code == 200
+    mock_db.set_setting.assert_any_call("ml_confirm_count", "20")
+    mock_db.set_setting.assert_any_call("ml_poll_interval_seconds", "300")
+    mock_db.set_setting.assert_any_call("detection_warmup_seconds", "3600")
+
+
+# ---------------------------------------------------------------------------
+# Staleness uses the watchdog's effective threshold, not raw watcher_stall_seconds
+# ---------------------------------------------------------------------------
+
+
+def _ts_ago(seconds: float) -> str:
+    return (datetime.now(UTC) - timedelta(seconds=seconds)).isoformat()
+
+
+async def test_readyz_long_poll_interval_uses_effective_stall_threshold(
+    mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: AsyncMock
+) -> None:
+    """stall=60, poll=120 -> a healthy loop's heartbeat can be 30+240=270 s old."""
+    mock_db.get_heartbeat.return_value = {"last_tick_utc": _ts_ago(200), "state": "ARMED"}
+    mock_db.get_setting.return_value = "120"
+    long_poll_app = create_app(
+        _base_settings(watcher_stall_seconds=60),
+        db=mock_db,
+        watcher=mock_watcher,
+        camera=mock_camera,
+    )
+    async with _client(long_poll_app) as c:
+        r = await c.get("/readyz")
+    assert r.status_code == 200
+    assert r.json()["subsystems"]["watcher"] == "healthy"
+
+
+async def test_readyz_still_stalled_beyond_effective_threshold(
+    mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: AsyncMock
+) -> None:
+    mock_db.get_heartbeat.return_value = {"last_tick_utc": _ts_ago(400), "state": "ARMED"}
+    mock_db.get_setting.return_value = "120"
+    long_poll_app = create_app(
+        _base_settings(watcher_stall_seconds=60),
+        db=mock_db,
+        watcher=mock_watcher,
+        camera=mock_camera,
+    )
+    async with _client(long_poll_app) as c:
+        r = await c.get("/readyz")
+    assert r.status_code == 503
+    assert any("stalled" in reason for reason in r.json()["reasons"])
+
+
+async def test_api_printer_stale_flags_use_effective_threshold(
+    mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: AsyncMock
+) -> None:
+    mock_db.get_heartbeat.return_value = {"last_tick_utc": _ts_ago(200), "state": "ARMED"}
+    mock_watcher.last_ml_observation = MagicMock(
+        score=0.1, ts=datetime.now(UTC) - timedelta(seconds=200)
+    )
+    mock_db.get_setting.return_value = "120"
+    long_poll_app = create_app(
+        _base_settings(watcher_stall_seconds=60),
+        db=mock_db,
+        watcher=mock_watcher,
+        camera=mock_camera,
+    )
+    async with _client(long_poll_app) as c:
+        r = await c.get("/api/printer")
+    data = r.json()
+    assert data["tick_age_stale"] is False
+    assert data["last_ml_score_stale"] is False
+
+    # Same ages against the short default poll interval (effective 60 s) are stale.
+    mock_db.get_setting.return_value = "10"
+    async with _client(long_poll_app) as c:
+        r = await c.get("/api/printer")
+    data = r.json()
+    assert data["tick_age_stale"] is True
+    assert data["last_ml_score_stale"] is True
+
+
+async def test_status_page_tick_age_stale_uses_effective_threshold(
+    mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: AsyncMock
+) -> None:
+    mock_db.get_heartbeat.return_value = {"last_tick_utc": _ts_ago(200), "state": "ARMED"}
+    settings_by_key = {"ml_poll_interval_seconds": "120"}
+    mock_db.get_setting.side_effect = lambda key, default=None: settings_by_key.get(key, default)
+    long_poll_app = create_app(
+        _base_settings(watcher_stall_seconds=60),
+        db=mock_db,
+        watcher=mock_watcher,
+        camera=mock_camera,
+    )
+    async with _client(long_poll_app) as c:
+        healthy = await c.get("/")
+        settings_by_key["ml_poll_interval_seconds"] = "10"
+        stale = await c.get("/")
+    assert healthy.status_code == 200
+    assert stale.status_code == 200
+    assert healthy.text != stale.text

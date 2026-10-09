@@ -104,6 +104,69 @@ async def test_main_checkpoints_and_closes_db_when_client_construction_raises() 
         get_settings.cache_clear()
 
 
+@pytest.mark.asyncio
+async def test_main_shutdown_waits_for_watcher_before_closing_printer() -> None:
+    """The watcher waits for an in-flight shielded pause on cancellation, so the
+    printer client must not be closed until the watcher task has finished."""
+    import asyncio
+
+    args = argparse.Namespace(host=None, port=None)
+    events: list[str] = []
+
+    mock_db = AsyncMock()
+    mock_db.list_auth_sessions.return_value = []
+    mock_db.prune_auth_sessions.return_value = 0
+    mock_db.get_setting.return_value = "true"
+
+    async def run_forever() -> None:
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            await asyncio.sleep(0.05)  # finishing an in-flight pause publish
+            events.append("watcher_done")
+            raise
+
+    mock_watcher = MagicMock()
+    mock_watcher.run_forever = run_forever
+
+    async def printer_close() -> None:
+        events.append("printer_close")
+
+    mock_printer = MagicMock()
+    mock_printer.close = printer_close
+    mock_ml = MagicMock()
+    mock_ml.close = AsyncMock()
+    mock_camera = MagicMock()
+    mock_camera.close = AsyncMock()
+
+    orig_env = dict(os.environ)
+    try:
+        with (
+            patch("sentinel.db.repo.Database", return_value=mock_db),
+            patch("sentinel.camera.mjpeg.MjpegGrabber", return_value=mock_camera),
+            patch("sentinel.printer.client.PrinterClient", return_value=mock_printer),
+            patch("sentinel.ml.client.MlClient", return_value=mock_ml),
+            patch("sentinel.watcher.loop.WatcherLoop", return_value=mock_watcher),
+            patch("sentinel.web.app.create_app"),
+            patch("sentinel.safety.check_external_bind"),
+            patch("uvicorn.Config"),
+            patch("uvicorn.Server") as mock_server_class,
+        ):
+            mock_server = MagicMock()
+            mock_server.serve = AsyncMock()  # returns at once -> triggers shutdown
+            mock_server_class.return_value = mock_server
+
+            await _run(args)
+    finally:
+        os.environ.clear()
+        os.environ.update(orig_env)
+        from sentinel.config import get_settings
+
+        get_settings.cache_clear()
+
+    assert events == ["watcher_done", "printer_close"]
+
+
 # ---------------------------------------------------------------------------
 # hash-password CLI command (Pattern 3)
 # ---------------------------------------------------------------------------

@@ -24,10 +24,11 @@ from typing import TYPE_CHECKING, Any, TypeVar
 import aiomqtt
 import tenacity
 
-from sentinel.network import resolve_and_validate_printer_ip
+from sentinel.network import HostResolutionError, resolve_and_validate_printer_ip
 from sentinel.printer.errors import (
     PauseDebouncedError,
     PrinterCommandError,
+    PrinterCommandUnacknowledgedError,
     PrinterProtocolError,
     PrinterRegistrationError,
     PrinterTimeoutError,
@@ -252,6 +253,21 @@ def _parse_status(
         raise PrinterProtocolError(f"Cannot parse status payload: {exc}") from exc
 
 
+# CONNACK refusal codes for "bad username or password" / "not authorised". MQTT
+# 3.1.1 reports them as 4/5; paho 2.x hands aiomqtt a ReasonCode that maps them to
+# the MQTT 5 values 134/135, and a ReasonCode never compares equal to 4/5.
+_AUTH_FAILURE_CODES = frozenset({4, 5, 134, 135})
+
+
+def _is_auth_failure(exc: BaseException) -> bool:
+    """Return True if ``exc`` is a permanent MQTT credential/authorisation refusal."""
+    if not isinstance(exc, aiomqtt.MqttCodeError):
+        return False
+    rc = exc.rc
+    value = getattr(rc, "value", rc)  # ReasonCode -> int; plain int passes through
+    return isinstance(value, int) and value in _AUTH_FAILURE_CODES
+
+
 class PrinterClient:
     """Async client for the Elegoo Centauri Carbon 2 over MQTT."""
 
@@ -320,8 +336,11 @@ class PrinterClient:
         PauseDebouncedError must query printer status directly to determine
         whether the printer is actually paused.
 
-        _last_pause_at is only updated on a successful publish so a failed
-        attempt does not block the next retry.
+        _last_pause_at is only kept when a pause may have reached the printer, so
+        a failed attempt does not block the next retry. A pause that was published
+        but never acked (PrinterCommandUnacknowledgedError) keeps the anchor:
+        the printer may have paused, so the next pause() is debounced and callers
+        check the live status instead of re-publishing immediately.
         """
         now = time.monotonic()
         if now - self._last_pause_at < _PAUSE_DEBOUNCE_S:
@@ -333,6 +352,10 @@ class PrinterClient:
         self._last_pause_at = now
         try:
             await self._with_retry(lambda: self._send_command(CC2_CMD_PAUSE_PRINT))
+        except PrinterCommandUnacknowledgedError:
+            # Restart the window from now: the ack wait itself can take most of it.
+            self._last_pause_at = time.monotonic()
+            raise
         except BaseException:
             # BaseException (not Exception) so a mid-publish asyncio.CancelledError
             # also rolls back the anchor — it's a BaseException in Python 3.8+, and
@@ -413,8 +436,12 @@ class PrinterClient:
             try:
                 async with asyncio.timeout(_TIMEOUT_S):
                     while not self._accumulated_data:
-                        if self._listener_task.done():
-                            exc = self._listener_task.exception()
+                        # close()/reconfigure() can null the task while we wait.
+                        task = self._listener_task
+                        if task is None:
+                            raise PrinterTimeoutError("Status request aborted: listener closed")
+                        if task.done():
+                            exc = task.exception()
                             if exc:
                                 raise exc
                             break
@@ -545,8 +572,7 @@ class PrinterClient:
                 PrinterTimeoutError,
                 ValueError,
             ) as exc:
-                code = getattr(exc, "rc", None)
-                if isinstance(exc, aiomqtt.MqttCodeError) and code in (4, 5):
+                if _is_auth_failure(exc):
                     logger.critical("MQTT permanent authentication failure: %s", exc)
                     raise
                 logger.warning("Printer MQTT status connection failed: %s. Reconnecting...", exc)
@@ -575,7 +601,11 @@ class PrinterClient:
             PrinterProtocolError: serial unknown / malformed response.
             PrinterRegistrationError: registration rejected or timed out.
             PrinterCommandError: command acknowledged with a non-zero error_code.
-            PrinterTimeoutError: no registration or command ack in time.
+            PrinterTimeoutError: no registration in time (nothing published yet,
+                so safe to retry).
+            PrinterCommandUnacknowledgedError: the command was published but no
+                ack arrived / the session died waiting. NOT retryable: the
+                printer may have acted, so re-publishing could duplicate it.
 
         Returns the decoded command-response payload on success.
         """
@@ -583,9 +613,15 @@ class PrinterClient:
             raise PrinterProtocolError(
                 "serial unknown — no status received yet; cannot publish command"
             )
-        resolved_ip = await resolve_and_validate_printer_ip(self._host)
+        try:
+            resolved_ip = await resolve_and_validate_printer_ip(self._host)
+        except HostResolutionError as exc:
+            # A momentary DNS/mDNS failure is transient, so make it retryable. An
+            # SSRF rejection (plain ValueError) is a config problem and stays fatal.
+            raise PrinterTimeoutError(f"Cannot resolve printer host: {exc}") from exc
         client_id, request_id = _generate_cc2_ids()
         cmd_id = self._next_request_id()
+        command_published = False
         try:
             async with aiomqtt.Client(
                 hostname=resolved_ip,
@@ -625,9 +661,26 @@ class PrinterClient:
                     request_topic,
                     json.dumps({"id": cmd_id, "method": method, "params": params or {}}),
                 )
+                command_published = True
                 return await self._await_command_ack(messages, response_topic, cmd_id)
-        except TimeoutError as exc:
-            raise PrinterTimeoutError("Command timed out (registration or ack)") from exc
+        except PrinterCommandError:
+            raise  # explicit rejection by the printer: not a lost ack
+        except (
+            TimeoutError,
+            PrinterTimeoutError,
+            PrinterProtocolError,
+            aiomqtt.MqttError,
+            OSError,
+        ) as exc:
+            if command_published:
+                # The command is already on the wire; any retry would publish it
+                # again. Surface "sent, outcome unknown" instead (see class docs).
+                raise PrinterCommandUnacknowledgedError(
+                    f"command id={cmd_id} was published but not acknowledged: {exc}"
+                ) from exc
+            if isinstance(exc, TimeoutError):
+                raise PrinterTimeoutError("Command timed out (registration)") from exc
+            raise
 
     async def _read_json_on_topic(
         self, messages: Any, topic: str, timeout_s: float, what: str

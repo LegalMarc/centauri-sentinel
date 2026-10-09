@@ -12,13 +12,18 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiomqtt
+import paho.mqtt.client as paho_mqtt
 import pytest
+import tenacity
+from aiomqtt.exceptions import MqttConnectError
 
 from sentinel.config import Settings
+from sentinel.network import HostResolutionError
 from sentinel.printer.client import PrinterClient, _parse_status
 from sentinel.printer.errors import (
     PauseDebouncedError,
     PrinterCommandError,
+    PrinterCommandUnacknowledgedError,
     PrinterProtocolError,
     PrinterRegistrationError,
     PrinterTimeoutError,
@@ -526,18 +531,183 @@ async def test_send_command_registration_timeout_raises_timeout() -> None:
         await client._send_command(CC2_CMD_PAUSE_PRINT)
 
 
-async def test_send_command_ack_timeout_raises_timeout() -> None:
+async def test_send_command_ack_timeout_raises_unacknowledged() -> None:
     cm, fake = _make_command_client(drop_ack=True)
     with (
-        patch("sentinel.printer.client._TIMEOUT_S", 0.05),
+        patch("sentinel.printer.client._COMMAND_ACK_TIMEOUT_S", 0.05),
         patch("sentinel.printer.client.aiomqtt.Client", return_value=cm),
-        pytest.raises(PrinterTimeoutError, match="command ack"),
+        pytest.raises(PrinterCommandUnacknowledgedError, match="command ack"),
     ):
         client = PrinterClient(_SETTINGS)
         client._serial_number = "SN1"
         await client._send_command(CC2_CMD_PAUSE_PRINT)
     # Registration still happened and the command was published; only the ack was lost.
     assert fake.command_publishes and fake.command_publishes[0]["method"] == CC2_CMD_PAUSE_PRINT
+
+
+@pytest.mark.parametrize("method_name", ["pause", "resume", "stop"])
+async def test_lost_ack_publishes_command_exactly_once(method_name: str) -> None:
+    """A published command with no ack must never be re-published by the retry layer."""
+    cm, fake = _make_command_client(drop_ack=True)
+    with (
+        patch("sentinel.printer.client._COMMAND_ACK_TIMEOUT_S", 0.05),
+        patch("sentinel.printer.client._RETRY_WAIT", tenacity.wait_fixed(0.01)),
+        patch("sentinel.printer.client.aiomqtt.Client", return_value=cm),
+        pytest.raises(PrinterCommandUnacknowledgedError),
+    ):
+        client = PrinterClient(_SETTINGS)
+        client._serial_number = "SN1"
+        await getattr(client, method_name)()
+    assert len(fake.command_publishes) == 1
+
+
+async def test_session_drop_after_publish_is_not_republished() -> None:
+    """A connection error while waiting for the ack is also 'sent, outcome unknown'."""
+    cm, fake = _make_command_client(drop_ack=True)
+
+    async def _broken_anext() -> MagicMock:
+        raise aiomqtt.MqttError("connection lost")
+
+    fake.__anext__ = _broken_anext  # type: ignore[method-assign]
+    with (
+        patch("sentinel.printer.client._RETRY_WAIT", tenacity.wait_fixed(0.01)),
+        patch("sentinel.printer.client.aiomqtt.Client", return_value=cm),
+        pytest.raises(PrinterCommandUnacknowledgedError),
+    ):
+        client = PrinterClient(_SETTINGS)
+        client._serial_number = "SN1"
+        await client.pause()
+    assert len(fake.command_publishes) == 1
+
+
+async def test_registration_timeout_is_still_retried() -> None:
+    """Nothing was published before registration succeeded, so retrying is safe."""
+    cm, fake = _make_command_client(drop_register=True)
+    with (
+        patch("sentinel.printer.client.CC2_REGISTRATION_TIMEOUT_S", 0.02),
+        patch("sentinel.printer.client._RETRY_WAIT", tenacity.wait_fixed(0.01)),
+        patch("sentinel.printer.client.aiomqtt.Client", return_value=cm),
+        pytest.raises(PrinterTimeoutError),
+    ):
+        client = PrinterClient(_SETTINGS)
+        client._serial_number = "SN1"
+        await client.pause()
+    registers = [t for t, _ in fake.published if t.endswith("/api_register")]
+    assert len(registers) == 3
+    assert fake.command_publishes == []
+
+
+async def test_unacked_pause_keeps_debounce_anchor() -> None:
+    """A pause published without an ack may have worked: the next pause() is debounced."""
+    cm, fake = _make_command_client(drop_ack=True)
+    with (
+        patch("sentinel.printer.client._COMMAND_ACK_TIMEOUT_S", 0.05),
+        patch("sentinel.printer.client.aiomqtt.Client", return_value=cm),
+    ):
+        client = PrinterClient(_SETTINGS)
+        client._serial_number = "SN1"
+        with pytest.raises(PrinterCommandUnacknowledgedError):
+            await client.pause()
+        assert client._last_pause_at > 0.0
+        with pytest.raises(PauseDebouncedError):
+            await client.pause()
+    assert len(fake.command_publishes) == 1
+
+
+async def test_unacked_resume_does_not_clear_pause_debounce() -> None:
+    cm, _ = _make_command_client(drop_ack=True)
+    with (
+        patch("sentinel.printer.client._COMMAND_ACK_TIMEOUT_S", 0.05),
+        patch("sentinel.printer.client.aiomqtt.Client", return_value=cm),
+        pytest.raises(PrinterCommandUnacknowledgedError),
+    ):
+        client = PrinterClient(_SETTINGS)
+        client._serial_number = "SN1"
+        client._last_pause_at = time.monotonic()
+        await client.resume()
+    assert client._last_pause_at > 0.0
+
+
+# ---------------------------------------------------------------------------
+# Host resolution failures (transient) vs SSRF rejections (permanent)
+# ---------------------------------------------------------------------------
+
+
+async def test_transient_dns_failure_is_retried_then_succeeds() -> None:
+    cm, fake = _make_command_client()
+    calls = 0
+
+    async def _flaky_resolve(_host: str) -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise HostResolutionError("SSRF Protection: Cannot resolve hostname printer.local")
+        return "10.0.0.1"
+
+    with (
+        patch("sentinel.printer.client.resolve_and_validate_printer_ip", _flaky_resolve),
+        patch("sentinel.printer.client._RETRY_WAIT", tenacity.wait_fixed(0.01)),
+        patch("sentinel.printer.client.aiomqtt.Client", return_value=cm),
+    ):
+        client = PrinterClient(_SETTINGS)
+        client._serial_number = "SN1"
+        await client.pause()
+    assert calls == 2
+    assert len(fake.command_publishes) == 1
+
+
+async def test_persistent_dns_failure_raises_timeout_error() -> None:
+    calls = 0
+
+    async def _always_fail(_host: str) -> str:
+        nonlocal calls
+        calls += 1
+        raise HostResolutionError("SSRF Protection: Cannot resolve hostname printer.local")
+
+    with (
+        patch("sentinel.printer.client.resolve_and_validate_printer_ip", _always_fail),
+        patch("sentinel.printer.client._RETRY_WAIT", tenacity.wait_fixed(0.01)),
+        pytest.raises(PrinterTimeoutError, match="resolve"),
+    ):
+        client = PrinterClient(_SETTINGS)
+        client._serial_number = "SN1"
+        await client.pause()
+    assert calls == 3
+
+
+async def test_ssrf_rejection_is_not_retried() -> None:
+    calls = 0
+
+    async def _rejected(_host: str) -> str:
+        nonlocal calls
+        calls += 1
+        raise ValueError("SSRF Protection: Disallowed IP address type: 127.0.0.1")
+
+    with (
+        patch("sentinel.printer.client.resolve_and_validate_printer_ip", _rejected),
+        patch("sentinel.printer.client._RETRY_WAIT", tenacity.wait_fixed(0.01)),
+        pytest.raises(ValueError, match="SSRF Protection"),
+    ):
+        client = PrinterClient(_SETTINGS)
+        client._serial_number = "SN1"
+        await client.pause()
+    assert calls == 1
+
+
+async def test_resolve_and_validate_distinguishes_resolution_from_ssrf() -> None:
+    from sentinel.network import resolve_and_validate_printer_ip
+
+    with (
+        patch("sentinel.network.socket.gethostbyname", side_effect=OSError("nodename")),
+        pytest.raises(HostResolutionError),
+    ):
+        await resolve_and_validate_printer_ip("printer.local")
+    with (
+        patch("sentinel.network.socket.gethostbyname", return_value="127.0.0.1"),
+        pytest.raises(ValueError, match="Disallowed") as excinfo,
+    ):
+        await resolve_and_validate_printer_ip("printer.local")
+    assert not isinstance(excinfo.value, HostResolutionError)
 
 
 # ---------------------------------------------------------------------------
@@ -933,6 +1103,22 @@ async def test_fetch_status_listener_done_without_exception() -> None:
         await client._fetch_status()
 
 
+async def test_fetch_status_wait_survives_close_during_wait() -> None:
+    """close()/reconfigure() nulling the listener task mid-wait must not AttributeError."""
+    client = PrinterClient(_SETTINGS)
+
+    async def _idle_listener() -> None:
+        await asyncio.sleep(10.0)
+
+    client._listener_task = asyncio.create_task(_idle_listener())
+    waiter = asyncio.create_task(client._fetch_status())
+    await asyncio.sleep(0.15)  # let the wait loop spin at least once
+    assert not waiter.done()
+    await client.close()
+    with pytest.raises(PrinterTimeoutError, match="listener closed"):
+        await asyncio.wait_for(waiter, timeout=2.0)
+
+
 async def test_fetch_status_stale_update() -> None:
     client = PrinterClient(_SETTINGS)
     client._accumulated_data = {"method": 6000}
@@ -1202,10 +1388,16 @@ async def test_is_connected_true_after_real_update() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _connect_error(connack_rc: int) -> MqttConnectError:
+    """Build the error exactly as aiomqtt 2.x does: paho hands it a ReasonCode."""
+    return MqttConnectError(paho_mqtt.convert_connack_rc_to_reason_code(connack_rc))
+
+
 async def test_listen_loop_reraises_on_bad_credentials_rc4() -> None:
-    """rc=4 ('bad username or password') must propagate, not retry forever."""
+    """CONNACK 4 ('bad username or password') must propagate, not retry forever."""
     client = PrinterClient(_SETTINGS)
-    auth_error = aiomqtt.MqttCodeError(4, "Bad username or password")
+    auth_error = _connect_error(4)
+    assert auth_error.rc != 4  # a ReasonCode (134), which is why `rc == 4` never matched
 
     cm = AsyncMock()
     cm.__aenter__ = AsyncMock(side_effect=auth_error)
@@ -1219,9 +1411,9 @@ async def test_listen_loop_reraises_on_bad_credentials_rc4() -> None:
 
 
 async def test_listen_loop_reraises_on_not_authorised_rc5() -> None:
-    """rc=5 ('not authorised') must propagate, not retry forever."""
+    """CONNACK 5 ('not authorised') must propagate, not retry forever."""
     client = PrinterClient(_SETTINGS)
-    auth_error = aiomqtt.MqttCodeError(5, "Not authorised")
+    auth_error = _connect_error(5)
 
     cm = AsyncMock()
     cm.__aenter__ = AsyncMock(side_effect=auth_error)
@@ -1230,6 +1422,36 @@ async def test_listen_loop_reraises_on_not_authorised_rc5() -> None:
     with (
         patch("sentinel.printer.client.aiomqtt.Client", return_value=cm),
         pytest.raises(aiomqtt.MqttCodeError),
+    ):
+        await client._listen_loop()
+
+
+@pytest.mark.parametrize("rc", [4, 5])
+async def test_listen_loop_reraises_on_plain_int_auth_rc(rc: int) -> None:
+    """Plain-int rc (older paho / MqttCodeError) keeps working alongside ReasonCode."""
+    client = PrinterClient(_SETTINGS)
+    cm = AsyncMock()
+    cm.__aenter__ = AsyncMock(side_effect=aiomqtt.MqttCodeError(rc, "auth"))
+    cm.__aexit__ = AsyncMock(return_value=False)
+
+    with (
+        patch("sentinel.printer.client.aiomqtt.Client", return_value=cm),
+        pytest.raises(aiomqtt.MqttCodeError),
+    ):
+        await client._listen_loop()
+
+
+async def test_listen_loop_retries_on_reasoncode_server_unavailable() -> None:
+    """A transient ReasonCode refusal (CONNACK 3) must still retry."""
+    client = PrinterClient(_SETTINGS)
+    cm = AsyncMock()
+    cm.__aenter__ = AsyncMock(side_effect=_connect_error(3))
+    cm.__aexit__ = AsyncMock(return_value=False)
+
+    with (
+        patch("sentinel.printer.client.aiomqtt.Client", return_value=cm),
+        patch("sentinel.printer.client.asyncio.sleep", side_effect=asyncio.CancelledError),
+        pytest.raises(asyncio.CancelledError),
     ):
         await client._listen_loop()
 

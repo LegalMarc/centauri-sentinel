@@ -47,11 +47,16 @@ the printer's own screen) is recognised only after the printer has reported
 `printing` and at least five seconds have passed since the pause, which
 prevents a stale status push from bouncing the watcher back to `ARMED`.
 Setting state away from `PAUSED` also clears the printer's pause debounce, so a
-re-detection inside the 30-second window still publishes a real pause.
+re-detection inside the 30-second window still publishes a real pause. The same
+exit handling runs when a paused printer drops to `OFFLINE` or `STALLED` and
+then comes back printing.
 
-The watchdog compares the heartbeat age against
-`max(WATCHER_STALL_SECONDS, 2 × poll interval)`. Deriving the threshold from
-the poll interval stops a large interval from producing false stall alerts.
+Heartbeats are written at most every `max(10, WATCHER_STALL_SECONDS / 2)`
+seconds. The watchdog, `/readyz` and the dashboard all judge staleness with
+`effective_stall_seconds()` (`sentinel/watcher/state.py`):
+`max(WATCHER_STALL_SECONDS, heartbeat interval + 2 × poll interval)`. Deriving
+it from both intervals stops a large poll interval or heartbeat throttling from
+producing false stall alerts.
 
 ## Detection path
 
@@ -70,23 +75,31 @@ Each tick, while `ARMED` and detection is enabled:
 Requiring consecutive hits is what makes the system usable. A single frame with
 a bad shadow scores high; three in a row usually means the print is failing.
 The counter resets whenever the score drops, detection is toggled off, the
-camera fails, or a new job starts, so hits never carry across contexts.
+camera fails, the printer is paused or resumed externally, or a new job starts,
+so hits never carry across contexts. The same reset ends a pause-failure
+episode, so the next failure alerts again instead of being treated as a retry.
+
+Snoozing detection remembers whether detection was on. When the snooze ends,
+detection is re-enabled only if it was enabled when the snooze began.
 
 ## Safety rules
 
 These are the invariants. Changing any of them changes what happens to a real
 printer with hot plastic in it.
 
-- **Pause only through `_on_confirmed_detection()`.** The watcher never calls
-  `pause()` or `stop()` from anywhere else, and never during `IDLE` or `WARMUP`.
+- **Pause only through `_publish_pause()`.** Confirmed detection and the ML
+  fail-closed path are its only callers. The watcher never pauses during `IDLE`
+  or `WARMUP`, and calls `stop()` only for the auto-stop escalation.
 - **State follows the printer, not the intent.** The watcher moves to `PAUSED`
   only after the pause command is acknowledged, or after live status confirms
   the printer really is paused. A failed pause leaves it `ARMED` so the next
   tick retries.
 - **The pause publish is shielded from cancellation.** A cancellation arriving
-  mid-publish still lets the MQTT command complete.
+  mid-publish waits up to 15 seconds for the MQTT command to complete, and
+  shutdown awaits the watcher before closing the printer client.
 - **Fail closed on ML failure.** After `ML_CONSECUTIVE_FAILURE_THRESHOLD`
-  consecutive ML errors, the printer is paused rather than left unwatched.
+  consecutive ML errors, the printer is paused rather than left unwatched. The
+  attempt is recorded in `pause_history` with source `ml_failure`.
 - **Retries are silent, alerts are not.** When a pause keeps failing, the
   command is retried every tick but the operator is alerted once per episode,
   with one snapshot and one detection row. Every attempt is still written to
@@ -95,15 +108,20 @@ printer with hot plastic in it.
   defaults to `0`, meaning disabled. When set, a Sentinel-initiated pause that
   outlives it escalates to a stop, and the escalation stays eligible to retry
   until a stop actually succeeds.
-- **Commands must be acknowledged.** An unacknowledged pause raises rather than
-  reporting success, so a silently-dropped command surfaces as a real failure.
+- **Commands must be acknowledged, and are published once.** An unacknowledged
+  command raises `PrinterCommandUnacknowledgedError` rather than reporting
+  success. It is never re-published by the client's retry loop, because the
+  printer may already have acted on it. Retries cover only connecting and
+  registering. An unacknowledged pause keeps the 30-second debounce, so the
+  next tick checks live status before sending anything again.
 
 ## Notification fan-out
 
 `NotificationDispatcher` is fire-and-forget by design: the detection loop must
 never block on a slow Telegram API. Each alert becomes a background task with a
 strong reference, a 90-second ceiling, and a retry policy that covers transient
-network errors only. Permanent failures (revoked token, 4xx) are not retried,
+network errors only. Permanent failures (revoked token, 4xx, Telegram
+`BadRequest`) are not retried,
 because holding JPEG bytes in memory for minutes helps nobody. Concurrent tasks
 are capped, and non-critical alerts are dropped first when the cap is hit.
 

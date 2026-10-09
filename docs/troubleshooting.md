@@ -71,7 +71,8 @@ The `token-init` container will regenerate the token on the next deploy.
 
 **Causes and fixes:**
 
-1. **Wrong access code.** Check `PRINTER_ACCESS_CODE` matches the code in
+1. **Wrong access code.** The log shows CRITICAL `MQTT permanent authentication failure` and
+   the listener stops retrying. Check `PRINTER_ACCESS_CODE` matches the code in
    **Settings → Network** on the printer touchscreen.
 
 2. **Wrong IP.** Same as above.
