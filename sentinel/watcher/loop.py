@@ -27,7 +27,11 @@ from typing import TYPE_CHECKING, Protocol
 from sentinel.camera.errors import CameraOfflineError
 from sentinel.ml.types import LastMlObservation
 from sentinel.printer.errors import PauseDebouncedError
-from sentinel.watcher.state import WatcherState
+from sentinel.watcher.state import (
+    WatcherState,
+    effective_stall_seconds,
+    heartbeat_interval_seconds,
+)
 
 if TYPE_CHECKING:
     from sentinel.config import Settings
@@ -324,7 +328,7 @@ class WatcherLoop:
                 stall_s = int(self._settings.watcher_stall_seconds)
             except (ValueError, TypeError):
                 stall_s = 60
-            hb_interval = max(10.0, stall_s / 2.0)
+            hb_interval = heartbeat_interval_seconds(stall_s)
 
             if (
                 self.state != self._last_heartbeat_state
@@ -1000,11 +1004,9 @@ class WatcherLoop:
     async def _watchdog_tick(self, db: Database) -> None:
         stall_s = self._settings.watcher_stall_seconds
 
-        # Derive the effective stall threshold so that a large poll interval
-        # (set via env or POST /api/settings) does not trigger false STALLED alerts.
-        # A healthy loop writes a heartbeat on every tick; the earliest the watchdog
-        # could see a legitimate stall is 2x the poll interval after the last tick,
-        # so we use max(stall_s, 2 * poll_interval) as the effective threshold.
+        # A large poll interval (env or POST /api/settings) or heartbeat
+        # throttling must not trigger false STALLED alerts; see
+        # effective_stall_seconds for the derivation.
         try:
             poll_interval_str = await db.get_setting(
                 "ml_poll_interval_seconds",
@@ -1015,7 +1017,7 @@ class WatcherLoop:
             poll_interval = float(poll_interval_str)
         except Exception:
             poll_interval = float(self._settings.ml_poll_interval_seconds)
-        effective_stall = max(stall_s, 2.0 * poll_interval)
+        effective_stall = effective_stall_seconds(stall_s, poll_interval)
 
         heartbeat = await db.get_heartbeat()
         if heartbeat is None:
