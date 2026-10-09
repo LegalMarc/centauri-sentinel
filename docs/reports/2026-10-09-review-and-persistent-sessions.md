@@ -14,8 +14,9 @@ Branch: `fix/persistent-sessions-and-review`.
   daily. Logout revokes server-side. Dashboard Log out button. Basic auth no longer creates
   sessions. See `docs/threat-model.md#attack-surface`.
 - `e2d21fa` Shared `effective_stall_seconds` helper in `sentinel/watcher/state.py`.
+- `68dd451` All review findings below fixed with regression tests. 700 tests pass, 93% coverage.
 
-## Review findings being fixed
+## Review findings fixed
 
 Three reviewers (watcher, printer/camera/ML, bot/notify/db/web) reported:
 
@@ -39,5 +40,5 @@ Three reviewers (watcher, printer/camera/ML, bot/notify/db/web) reported:
 
 ## Next step
 
-Review the three coders' diffs, run the full suite, deep-tier review of the branch, fix all
-items, commit, then merge.
+Deep-tier review of `git diff main...HEAD` is running. Fix every item it reports, rerun the
+full suite, re-review until clean, then merge to `main`.
