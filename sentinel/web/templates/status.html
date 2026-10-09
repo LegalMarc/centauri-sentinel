@@ -116,6 +116,10 @@ h1 {
   align-items: center;
 }
 
+.logout-form {
+  margin: 0;
+}
+
 h2 {
   font-size: 1.1rem;
   font-weight: 600;
@@ -784,6 +788,11 @@ footer a {
   <h1>Centauri Sentinel</h1>
   <div class="header-status">
     <span id="header-watcher-badge" class="state-badge state-{{ watcher_state | lower }}">Watcher: {{ watcher_state }}</span>
+    {% if auth_enabled %}
+    <form method="post" action="/logout" class="logout-form">
+      <button type="submit" class="btn btn-secondary">Log out</button>
+    </form>
+    {% endif %}
   </div>
 </div>
 

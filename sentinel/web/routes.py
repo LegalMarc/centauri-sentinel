@@ -100,20 +100,6 @@ def make_router(
     router = APIRouter()
     stall_seconds = settings.watcher_stall_seconds
 
-    @router.post("/logout")
-    async def logout() -> Response:
-        """Clear the session cookie."""
-        response = Response(content=json.dumps({"status": "ok"}), media_type="application/json")
-        response.set_cookie(
-            key="sentinel_session",
-            value="",
-            path="/",
-            httponly=True,
-            samesite="strict",
-            max_age=0,
-        )
-        return response
-
     @router.get("/", response_class=HTMLResponse)
     async def status_page(request: Request) -> Response:
         if db is None or templates is None or watcher is None:
@@ -269,6 +255,7 @@ def make_router(
                 "ml_poll_interval_seconds": ml_poll_interval_seconds,
                 "detection_warmup_seconds": detection_warmup_seconds,
                 "version": __version__,
+                "auth_enabled": settings.auth_enabled,
             },
         )
 

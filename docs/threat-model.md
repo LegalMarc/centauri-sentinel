@@ -23,11 +23,26 @@ operating outside the design envelope.
 **Default configuration:** No authentication. Any LAN device can view the status page, camera
 snapshot, and camera stream.
 
-**Mitigation (optional):** Set `AUTH_USERNAME` and `AUTH_PASSWORD_BCRYPT` to enable HTTP Basic
-Auth. The service issues an HMAC-SHA256 signed session cookie (1-hour TTL) on successful login,
-so the password is sent only once per session. The cookie carries `SameSite=Strict; HttpOnly`.
-When `EXTERNAL_BIND_ALLOWED=true` the `Secure` flag is added automatically so the cookie is
-only transmitted over HTTPS.
+**Mitigation (optional):** Set `AUTH_USERNAME` and `AUTH_PASSWORD_BCRYPT` to enable login.
+Browsers sign in through the `/login` form and get a server-side session
+(`sentinel/web/sessions.py`). The cookie holds a random 256-bit token. Only its SHA-256 is
+stored, in the `auth_sessions` table, so a copied database cannot be replayed as a cookie.
+
+- **Lifetime.** A session lasts until someone presses **Log out** on the dashboard. The cookie
+  is re-issued with a 400-day `Max-Age` (the browser maximum) at most once a day while in use,
+  so an active browser stays signed in indefinitely. A session unused for 400 days is pruned.
+- **Revocation.** Log out deletes the session row, so the cookie stops working everywhere, not
+  just in the browser that clicked the button. Changing `AUTH_USERNAME` or the password signs
+  every session out at the next restart.
+- **Scripts.** Non-browser clients may send HTTP Basic credentials on each request. That
+  authenticates the one request and creates no session.
+- **Rate limit.** 10 failed credential attempts per client IP per minute. Successes reset it.
+- **Cookie flags.** `SameSite=Strict; HttpOnly`, plus `Secure` per `AUTH_COOKIE_SECURE`
+  (`auto` adds it when the request arrived over HTTPS).
+
+Accepted risk: a long-lived session on a lost or shared device stays valid until it is logged
+out from that device or the password is rotated. There is no "log out everywhere" button yet;
+rotating the password is the way to revoke all sessions.
 
 **Safety guard:** If `EXTERNAL_BIND_ALLOWED` is `false` (default) and the service detects it
 is reachable on a non-loopback interface without auth configured, it refuses to start. This
@@ -128,6 +143,6 @@ To protect user privacy and limit disk space consumption, the system enforces th
 ## v0.2 candidates
 
 - Add ML-reachability ping to `/readyz`.
-- Replace session cookie HMAC with proper JWT (rotate on password change).
+- "Log out all devices" button and a session list on the dashboard.
 - Audit log: record all bot commands and who sent them to the database.
 - Evaluate MQTT 5 TLS for Carbon 2 when firmware support lands.

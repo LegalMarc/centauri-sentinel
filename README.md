@@ -280,7 +280,7 @@ python -m sentinel hash-password
 
 | Surface | Who can reach it | Mitigation |
 |---|---|---|
-| Status dashboard / snapshot / stream | LAN devices (default) | Optional Basic Auth + session cookie. Safety guard refuses external bind without auth. |
+| Status dashboard / snapshot / stream | LAN devices (default) | Optional login: persistent session until logout, or Basic Auth for scripts. Safety guard refuses external bind without auth. |
 | Telegram bot | Anyone on Telegram | Allowlist by chat ID + user ID. `/stop` requires `/confirm`. |
 | ntfy alerts | Anyone who knows the topic URL | Use a long random topic; self-hosted ntfy recommended. |
 | Obico ML API | Internal Docker network only | Auth token in shared volume; no host ports; `internal: true` network. |

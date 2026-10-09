@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 
     from sentinel.config import Settings
     from sentinel.db.repo import Database
+    from sentinel.web.sessions import SessionStore
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 
@@ -85,7 +86,7 @@ def create_app(
     db: Database | None = None,
     watcher: Any = None,
     camera: Any = None,
-    auth_secret: bytes | None = None,
+    sessions: SessionStore | None = None,
     internal_token: str | None = None,
 ) -> FastAPI:
     """Create and configure the FastAPI application."""
@@ -145,7 +146,7 @@ def create_app(
             raise HTTPException(status_code=404, detail="Snapshot not found or already consumed")
         return Response(content=jpeg, media_type="image/jpeg")
 
-    app.add_middleware(AuthMiddleware, settings=settings, secret=auth_secret)
+    app.add_middleware(AuthMiddleware, settings=settings, sessions=sessions)
 
     # Registered LAST so it ends up OUTERMOST: Starlette's add_middleware()
     # prepends each new registration (user_middleware.insert(0, ...)), and

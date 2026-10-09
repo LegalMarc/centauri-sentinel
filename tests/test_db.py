@@ -44,6 +44,7 @@ async def test_migrate_creates_tables(tmp_path: Path) -> None:
         "runtime_settings",
         "schema_version",
         "watcher_heartbeat",
+        "auth_sessions",
     }
     async with (
         aiosqlite.connect(path) as conn,
@@ -206,26 +207,32 @@ async def test_update_heartbeat_upserts(db: Database) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Auth secret persistence
+# Auth sessions
 # ---------------------------------------------------------------------------
 
 
-async def test_get_auth_secret_none_when_not_set(db: Database) -> None:
-    result = await db.get_auth_secret()
-    assert result is None
+async def test_auth_session_insert_list_touch_delete(db: Database) -> None:
+    await db.insert_auth_session("h1", "fp", 100)
+    await db.insert_auth_session("h2", "fp", 200)
+    assert sorted(await db.list_auth_sessions()) == [("h1", 100), ("h2", 200)]
+
+    await db.touch_auth_session("h1", 300)
+    await db.delete_auth_session("h2")
+    assert await db.list_auth_sessions() == [("h1", 300)]
 
 
-async def test_set_and_get_auth_secret(db: Database) -> None:
-    secret = bytes(range(32))
-    await db.set_auth_secret(secret)
-    result = await db.get_auth_secret()
-    assert result == secret
+async def test_prune_auth_sessions_drops_other_credentials_and_idle(db: Database) -> None:
+    await db.insert_auth_session("current", "fp-new", 1000)
+    await db.insert_auth_session("old-creds", "fp-old", 1000)
+    await db.insert_auth_session("idle", "fp-new", 10)
+    await db.set_setting("auth_cookie_secret", "00" * 32)
 
+    removed = await db.prune_auth_sessions("fp-new", refreshed_before=500)
 
-async def test_get_auth_secret_invalid_hex_returns_none(db: Database) -> None:
-    await db.set_setting("auth_cookie_secret", "not_valid_hex!")
-    result = await db.get_auth_secret()
-    assert result is None
+    assert removed == 2
+    assert await db.list_auth_sessions() == [("current", 1000)]
+    # The pre-v8 HMAC cookie secret is cleaned up as well.
+    assert await db.get_setting("auth_cookie_secret") is None
 
 
 # ---------------------------------------------------------------------------

@@ -21,7 +21,8 @@ async def test_main_cli_overrides() -> None:
     args = argparse.Namespace(host="127.0.0.9", port=9999)
 
     mock_db = AsyncMock()
-    mock_db.get_auth_secret.return_value = b"fake_secret"
+    mock_db.list_auth_sessions.return_value = []
+    mock_db.prune_auth_sessions.return_value = 0
     mock_db.get_setting.return_value = "true"
 
     mock_watcher = MagicMock()
@@ -76,7 +77,8 @@ async def test_main_checkpoints_and_closes_db_when_client_construction_raises() 
     args = argparse.Namespace(host=None, port=None)
 
     mock_db = AsyncMock()
-    mock_db.get_auth_secret.return_value = b"fake_secret"
+    mock_db.list_auth_sessions.return_value = []
+    mock_db.prune_auth_sessions.return_value = 0
     mock_db.get_setting.return_value = "true"
 
     orig_env = dict(os.environ)

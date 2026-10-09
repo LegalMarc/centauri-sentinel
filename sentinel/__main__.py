@@ -218,6 +218,7 @@ async def _run(args: argparse.Namespace) -> None:
     from sentinel.safety import check_external_bind
     from sentinel.watcher.loop import WatcherLoop
     from sentinel.web.app import create_app
+    from sentinel.web.sessions import SessionStore, credential_fingerprint
 
     if args.host:
         os.environ["BIND_HOST"] = args.host
@@ -274,11 +275,14 @@ async def _run(args: argparse.Namespace) -> None:
     # ntfy/Telegram/ML URL), which previously aborted startup before the
     # (former, narrower) try/finally around the run loop was ever entered.
     try:
-        # Persist auth cookie secret across restarts so sessions survive reloads.
-        auth_secret = await db.get_auth_secret()
-        if auth_secret is None:
-            auth_secret = os.urandom(32)
-            await db.set_auth_secret(auth_secret)
+        # Login sessions persist in the DB and last until the user logs out.
+        sessions = SessionStore(
+            credential_fingerprint(
+                settings.auth_username or "", settings.auth_password_bcrypt or ""
+            ),
+            db,
+        )
+        await sessions.load()
 
         # Initialise detection_enabled on first run; preserve the operator's
         # intent on subsequent starts by reading from DB rather than config.
@@ -330,7 +334,7 @@ async def _run(args: argparse.Namespace) -> None:
             db=db,
             watcher=watcher,
             camera=camera,
-            auth_secret=auth_secret,
+            sessions=sessions,
             internal_token=internal_token,
         )
 

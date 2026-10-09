@@ -1,35 +1,27 @@
-"""Basic-auth + signed session cookie middleware.
+"""Login gate for the dashboard: form login, persistent sessions, Basic auth for scripts.
 
-If auth_enabled=False the middleware is a no-op pass-through.
+If auth_enabled=False the middleware only enforces the localhost restriction.
 If auth_enabled=True:
-  - A valid ``sentinel_session`` cookie (HMAC-SHA256, 1 h TTL) passes through.
-  - Otherwise challenge with WWW-Authenticate: Basic.
-  - Successful Basic credentials set the cookie and redirect to the same URL.
+  - A valid ``sentinel_session`` cookie passes through. Sessions are
+    server-side (sentinel/web/sessions.py) and last until the user logs out;
+    the cookie is re-issued on use so the browser never ages it out.
+  - Browsers without a session are redirected to the /login form.
+  - Non-browser clients may send HTTP Basic credentials on each request.
+    That authenticates the single request and creates no session.
+  - POST /logout revokes the session server-side and clears the cookie.
 
 Internal routes (/__internal_snapshot/*) are always exempt.
-
-Cookie format: ``{ts}.{rnd}.{ua_hash}.{sig}`` where:
-  - rnd      = per-issuance random hex (makes each cookie unique)
-  - ua_hash  = first 16 hex chars of HMAC(secret, User-Agent); binds the
-               cookie to the issuing browser so a captured cookie cannot be
-               replayed from a different User-Agent
-  - sig      = HMAC-SHA256(secret, "{ts}.{rnd}.{ua_hash}")
-
-The HMAC secret is loaded from the DB at startup (persisted by ``_run()``),
-so sessions survive process restarts.  If no secret is found (first run or
-no DB), a fresh random secret is generated — callers should persist it.
 """
 
 from __future__ import annotations
 
 import asyncio
 import base64
+import collections
 import contextlib
-import hashlib
 import hmac
+import html
 import ipaddress
-import os
-import secrets
 import time
 from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, quote
@@ -39,18 +31,28 @@ from urllib.parse import urlsplit as _urlsplit_parse
 import bcrypt
 from starlette.responses import Response
 
+from sentinel.web.sessions import (
+    COOKIE_MAX_AGE,
+    COOKIE_NAME,
+    SessionStore,
+    credential_fingerprint,
+)
+
 if TYPE_CHECKING:
-    from starlette.types import ASGIApp, Receive, Scope, Send
+    from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
     from sentinel.config import Settings
 
-_COOKIE_NAME = "sentinel_session"
-_TTL = 3600  # 1 hour
 # Hard cap on the /login form body. This middleware wraps LimitUploadSizeMiddleware
 # (it is registered later, so it is the outer layer) and handles /login itself,
 # so the 1 MB app-level limit never sees the login body. A real login form is a
 # few hundred bytes; anything larger is an unauthenticated memory-exhaustion attempt.
 _MAX_LOGIN_BODY_BYTES = 64 * 1024
+
+# Failed-credential rate limit: attempts per client IP per window.
+_RATE_LIMIT_ATTEMPTS = 10
+_RATE_LIMIT_WINDOW_S = 60.0
+_RATE_LIMIT_MAX_IPS = 1000
 
 
 class _BodyTooLargeError(Exception):
@@ -125,22 +127,31 @@ def _resolve_client_ip(
     return client[0] if client else "0.0.0.0"
 
 
-class AuthMiddleware:
-    """ASGI middleware that gates all routes behind Basic auth + cookie session."""
+def _safe_next(raw: str) -> str:
+    """Return *raw* if it is a same-origin path, else "/" (prevents open redirects)."""
+    if raw.startswith("/") and not raw.startswith("//") and "\\" not in raw:
+        return raw
+    return "/"
 
-    def __init__(self, app: ASGIApp, settings: Settings, secret: bytes | None = None) -> None:
+
+class AuthMiddleware:
+    """ASGI middleware that gates all routes behind a login session or Basic auth."""
+
+    def __init__(
+        self, app: ASGIApp, settings: Settings, sessions: SessionStore | None = None
+    ) -> None:
         self._app = app
         self._settings = settings
         self._enabled = settings.auth_enabled
         self._username = settings.auth_username or ""
         self._password_hash = settings.auth_password_bcrypt or ""
-        # secret must be provided by caller (loaded from DB); fall back to
-        # ephemeral random only if no DB is available (e.g. tests).
-        self._secret = secret if secret is not None else os.urandom(32)
-        # Store auth attempts by IP: [timestamps...] (max 10 per minute)
-        # Bounded by OrderedDict to prevent memory leak (OOM) from many IPs
-        import collections
-
+        # The caller passes a DB-backed store loaded at startup; the memory-only
+        # fallback serves tests and runs without a database.
+        self._sessions = sessions or SessionStore(
+            credential_fingerprint(self._username, self._password_hash)
+        )
+        # Recent credential attempts per client IP, LRU-bounded so a flood of
+        # source addresses cannot grow it without limit.
         self._auth_attempts: collections.OrderedDict[str, list[float]] = collections.OrderedDict()
         self._auth_cookie_secure = settings.auth_cookie_secure
 
@@ -150,7 +161,6 @@ class AuthMiddleware:
             return
 
         headers = dict(scope.get("headers", []))
-        user_agent = headers.get(b"user-agent", b"").decode()
 
         # Internal routes are always exempt — checked first, before host/CSRF
         # guards, so that the ML callback (Host: sentinel:8000) is never
@@ -193,112 +203,15 @@ class AuthMiddleware:
 
         # /login is exempt from CSRF and auth checks (it IS the auth endpoint).
         # DNS-rebinding protection above still applies.
-        if path == "/login":
-            method = scope.get("method", "")
-            if method == "GET":
-                qs = scope.get("query_string", b"").decode()
-                next_url = parse_qs(qs).get("next", ["/"])[0]
-                response = Response(
-                    content=self._login_page(next_url),
-                    media_type="text/html",
-                )
-                await response(scope, receive, send)
-                return
-            if method == "POST":
-                try:
-                    body = await self._read_body(receive)
-                except _BodyTooLargeError:
-                    response = Response(status_code=413, content="Payload Too Large")
-                    await response(scope, receive, send)
-                    return
-                form = parse_qs(body.decode("utf-8", errors="replace"))
-                username = form.get("username", [""])[0]
-                password = form.get("password", [""])[0]
-                raw_next = form.get("next", ["/"])[0]
-                safe_next = (
-                    raw_next
-                    if raw_next.startswith("/")
-                    and not raw_next.startswith("//")
-                    and "\\" not in raw_next
-                    else "/"
-                )
+        if path == "/login" and scope.get("method") in ("GET", "POST"):
+            await self._handle_login(scope, receive, send, headers)
+            return
 
-                client_ip = _resolve_client_ip(scope, headers, self._settings.trust_proxies)
-                now = time.time()
-                attempts = [t for t in self._auth_attempts.get(client_ip, []) if now - t < 60]
-                if len(attempts) >= 10:
-                    self._auth_attempts[client_ip] = attempts
-                    self._auth_attempts.move_to_end(client_ip)
-                    response = Response(status_code=429, content="Too Many Requests")
-                    await response(scope, receive, send)
-                    return
-                attempts.append(now)
-                self._auth_attempts[client_ip] = attempts
-                self._auth_attempts.move_to_end(client_ip)
-                while len(self._auth_attempts) > 1000:
-                    self._auth_attempts.popitem(last=False)
-
-                if await self._check_credentials(username, password):
-                    cookie = self._make_cookie(user_agent)
-                    if self._auth_cookie_secure == "always":
-                        is_secure = True
-                    elif self._auth_cookie_secure == "never":
-                        is_secure = False
-                    else:
-                        headers_dict = {k.lower(): v for k, v in headers.items()}
-                        proto = headers_dict.get(b"x-forwarded-proto", b"").decode().lower()
-                        scheme = scope.get("scheme", "http").lower()
-                        is_secure = scheme == "https" or proto == "https"
-                    secure_flag = "; Secure" if is_secure else ""
-                    response = Response(
-                        status_code=302,
-                        headers={
-                            "Location": safe_next,
-                            "Set-Cookie": (
-                                f"{_COOKIE_NAME}={cookie}; Path=/; HttpOnly; "
-                                f"SameSite=Strict{secure_flag}; Max-Age={_TTL}"
-                            ),
-                        },
-                    )
-                else:
-                    await asyncio.sleep(0.5)
-                    response = Response(
-                        content=self._login_page(safe_next, error=True),
-                        media_type="text/html",
-                    )
-                await response(scope, receive, send)
-                return
-
-        if scope.get("method") in ("POST", "PUT", "DELETE", "PATCH"):
-            origin = headers.get(b"origin")
-            host = headers.get(b"host", b"")
-            if origin:
-                try:
-                    parsed_origin = _urlparse(origin.decode())
-                    origin_netloc = parsed_origin.netloc
-                except Exception:
-                    origin_netloc = ""
-
-                if not origin_netloc or origin_netloc != host.decode():
-                    response = Response(status_code=403, content="CSRF Protection: Origin mismatch")
-                    await response(scope, receive, send)
-                    return
-            else:
-                referer = headers.get(b"referer")
-                if referer and host:
-                    parsed = _urlparse(referer.decode())
-                    if parsed.netloc != host.decode():
-                        response = Response(
-                            status_code=403, content="CSRF Protection: Referer mismatch"
-                        )
-                        await response(scope, receive, send)
-                        return
-                else:
-                    response = Response(
-                        status_code=403, content="CSRF Protection: Missing Origin and Referer"
-                    )
-                    await response(scope, receive, send)
-                    return
+        csrf_error = self._csrf_error(scope, headers)
+        if csrf_error is not None:
+            response = Response(status_code=403, content=csrf_error)
+            await response(scope, receive, send)
+            return
 
         if not self._enabled:
             # Ticket 1: strictly block any client IP that is not localhost when auth is disabled.
@@ -317,77 +230,36 @@ class AuthMiddleware:
             await self._app(scope, receive, send)
             return
 
-        cookie_header = headers.get(b"cookie", b"").decode()
+        token = self._session_token(headers)
 
-        if self._valid_cookie(cookie_header, user_agent):
+        if path == "/logout" and scope.get("method") == "POST":
+            await self._handle_logout(scope, receive, send, headers, token)
+            return
+
+        if token and self._sessions.is_valid(token):
+            if self._sessions.needs_refresh(token):
+                await self._sessions.refresh(token)
+                send = self._with_cookie(send, self._session_cookie(scope, headers, token))
             await self._app(scope, receive, send)
             return
 
         auth_header = headers.get(b"authorization", b"").decode()
         if auth_header.startswith("Basic "):
             client_ip = _resolve_client_ip(scope, headers, self._settings.trust_proxies)
-            now = time.time()
-            attempts = [t for t in self._auth_attempts.get(client_ip, []) if now - t < 60]
-            if len(attempts) >= 10:
-                self._auth_attempts[client_ip] = attempts
-                self._auth_attempts.move_to_end(client_ip)
+            if self._rate_limited(client_ip):
                 response = Response(status_code=429, content="Too Many Requests")
                 await response(scope, receive, send)
                 return
-            attempts.append(now)
-            self._auth_attempts[client_ip] = attempts
-            self._auth_attempts.move_to_end(client_ip)
-            while len(self._auth_attempts) > 1000:
-                self._auth_attempts.popitem(last=False)
-
             try:
                 decoded = base64.b64decode(auth_header[6:]).decode()
                 username, _, password = decoded.partition(":")
             except Exception:
                 username = password = ""
-
             if await self._check_credentials(username, password):
-                cookie = self._make_cookie(user_agent)
-
-                if self._auth_cookie_secure == "always":
-                    is_secure = True
-                elif self._auth_cookie_secure == "never":
-                    is_secure = False
-                else:  # "auto"
-                    headers_dict = {k.lower(): v for k, v in headers.items()}
-                    proto = headers_dict.get(b"x-forwarded-proto", b"").decode().lower()
-                    scheme = scope.get("scheme", "http").lower()
-                    is_secure = scheme == "https" or proto == "https"
-                secure_flag = "; Secure" if is_secure else ""
-
-                query_string = scope.get("query_string", b"").decode()
-
-                # Prevent open redirects: ensure path starts with a single slash,
-                # and doesn't use scheme-relative URLs (//) or backslashes (\).
-                safe_path = "/"
-                if (
-                    path.startswith("/")
-                    and not path.startswith("//")
-                    and not path.startswith("/\\")
-                ):
-                    safe_path = path
-
-                redirect_url = f"{safe_path}?{query_string}" if query_string else safe_path
-
-                response = Response(
-                    status_code=302,
-                    headers={
-                        "Location": redirect_url,
-                        "Set-Cookie": (
-                            f"{_COOKIE_NAME}={cookie}; Path=/; HttpOnly; "
-                            f"SameSite=Strict{secure_flag}; Max-Age={_TTL}"
-                        ),
-                    },
-                )
-                await response(scope, receive, send)
+                self._auth_attempts.pop(client_ip, None)
+                await self._app(scope, receive, send)
                 return
-            else:
-                await asyncio.sleep(0.5)
+            await asyncio.sleep(0.5)
 
         # Redirect browsers to the login form; return 401 for API clients.
         accept = headers.get(b"accept", b"").decode()
@@ -406,11 +278,179 @@ class AuthMiddleware:
             )
         await response(scope, receive, send)
 
+    # ------------------------------------------------------------------
+    # /login and /logout
+    # ------------------------------------------------------------------
+
+    async def _handle_login(
+        self, scope: Scope, receive: Receive, send: Send, headers: dict[bytes, bytes]
+    ) -> None:
+        if scope.get("method") == "GET":
+            qs = scope.get("query_string", b"").decode()
+            next_url = parse_qs(qs).get("next", ["/"])[0]
+            token = self._session_token(headers)
+            if self._enabled and token and self._sessions.is_valid(token):
+                # Already signed in: skip the form.
+                response = Response(status_code=302, headers={"Location": _safe_next(next_url)})
+            else:
+                response = Response(content=self._login_page(next_url), media_type="text/html")
+            await response(scope, receive, send)
+            return
+
+        try:
+            body = await self._read_body(receive)
+        except _BodyTooLargeError:
+            response = Response(status_code=413, content="Payload Too Large")
+            await response(scope, receive, send)
+            return
+        form = parse_qs(body.decode("utf-8", errors="replace"))
+        username = form.get("username", [""])[0]
+        password = form.get("password", [""])[0]
+        safe_next = _safe_next(form.get("next", ["/"])[0])
+
+        client_ip = _resolve_client_ip(scope, headers, self._settings.trust_proxies)
+        if self._rate_limited(client_ip):
+            response = Response(status_code=429, content="Too Many Requests")
+            await response(scope, receive, send)
+            return
+
+        if await self._check_credentials(username, password):
+            self._auth_attempts.pop(client_ip, None)
+            token = await self._sessions.create()
+            response = Response(
+                status_code=302,
+                headers={
+                    "Location": safe_next,
+                    "Set-Cookie": self._session_cookie(scope, headers, token),
+                },
+            )
+        else:
+            await asyncio.sleep(0.5)
+            response = Response(
+                content=self._login_page(safe_next, error=True),
+                media_type="text/html",
+            )
+        await response(scope, receive, send)
+
+    async def _handle_logout(
+        self,
+        scope: Scope,
+        receive: Receive,
+        send: Send,
+        headers: dict[bytes, bytes],
+        token: str | None,
+    ) -> None:
+        if token:
+            await self._sessions.revoke(token)
+        clear = self._session_cookie(scope, headers, "", max_age=0)
+        if "text/html" in headers.get(b"accept", b"").decode():
+            # A form submit from the dashboard: land on the login page.
+            response = Response(
+                status_code=303, headers={"Location": "/login", "Set-Cookie": clear}
+            )
+        else:
+            response = Response(
+                content='{"status": "ok"}',
+                media_type="application/json",
+                headers={"Set-Cookie": clear},
+            )
+        await response(scope, receive, send)
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _csrf_error(scope: Scope, headers: dict[bytes, bytes]) -> str | None:
+        """Return a rejection message for a cross-origin state-changing request."""
+        if scope.get("method") not in ("POST", "PUT", "DELETE", "PATCH"):
+            return None
+        host = headers.get(b"host", b"").decode()
+        origin = headers.get(b"origin")
+        if origin:
+            try:
+                origin_netloc = _urlparse(origin.decode()).netloc
+            except Exception:
+                origin_netloc = ""
+            if not origin_netloc or origin_netloc != host:
+                return "CSRF Protection: Origin mismatch"
+            return None
+        referer = headers.get(b"referer")
+        if referer and host:
+            if _urlparse(referer.decode()).netloc != host:
+                return "CSRF Protection: Referer mismatch"
+            return None
+        return "CSRF Protection: Missing Origin and Referer"
+
+    def _rate_limited(self, client_ip: str) -> bool:
+        """Record a credential attempt; True if the IP is over the limit.
+
+        The attempt is recorded before the (slow) bcrypt check so concurrent
+        guesses cannot all slip under the limit. A successful check clears the
+        IP's history, so only failures accumulate.
+        """
+        now = time.time()
+        attempts = [
+            t for t in self._auth_attempts.get(client_ip, []) if now - t < _RATE_LIMIT_WINDOW_S
+        ]
+        limited = len(attempts) >= _RATE_LIMIT_ATTEMPTS
+        if not limited:
+            attempts.append(now)
+        self._auth_attempts[client_ip] = attempts
+        self._auth_attempts.move_to_end(client_ip)
+        while len(self._auth_attempts) > _RATE_LIMIT_MAX_IPS:
+            self._auth_attempts.popitem(last=False)
+        return limited
+
+    @staticmethod
+    def _session_token(headers: dict[bytes, bytes]) -> str | None:
+        for part in headers.get(b"cookie", b"").decode().split(";"):
+            name, _, value = part.strip().partition("=")
+            if name.strip() == COOKIE_NAME and value.strip():
+                return value.strip()
+        return None
+
+    def _session_cookie(
+        self,
+        scope: Scope,
+        headers: dict[bytes, bytes],
+        token: str,
+        max_age: int = COOKIE_MAX_AGE,
+    ) -> str:
+        if self._auth_cookie_secure == "always":
+            is_secure = True
+        elif self._auth_cookie_secure == "never":
+            is_secure = False
+        else:  # "auto"
+            proto = headers.get(b"x-forwarded-proto", b"").decode().lower()
+            scheme = scope.get("scheme", "http").lower()
+            is_secure = scheme == "https" or proto == "https"
+        secure_flag = "; Secure" if is_secure else ""
+        return (
+            f"{COOKIE_NAME}={token}; Path=/; HttpOnly; "
+            f"SameSite=Strict{secure_flag}; Max-Age={max_age}"
+        )
+
+    @staticmethod
+    def _with_cookie(send: Send, cookie: str) -> Send:
+        """Wrap *send* so the response carries an extra Set-Cookie header."""
+
+        async def send_with_cookie(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                message = dict(message)
+                message["headers"] = [
+                    *message.get("headers", []),
+                    (b"set-cookie", cookie.encode("latin-1")),
+                ]
+            await send(message)
+
+        return send_with_cookie
+
     @staticmethod
     def _login_page(next_url: str = "/", *, error: bool = False) -> str:
         error_html = '<p class="error">Invalid username or password.</p>' if error else ""
         return _LOGIN_TEMPLATE.replace("__ERROR_HTML__", error_html).replace(
-            "__NEXT_URL__", next_url.replace('"', "%22")
+            "__NEXT_URL__", html.escape(next_url, quote=True)
         )
 
     @staticmethod
@@ -447,39 +487,3 @@ class AuthMiddleware:
         except Exception:
             pw_ok = False
         return username_ok and pw_ok
-
-    def _ua_hash(self, user_agent: str) -> str:
-        """Return first 16 hex chars of HMAC(secret, user_agent)."""
-        return hmac.new(self._secret, user_agent.encode("utf-8"), hashlib.sha256).hexdigest()[:16]
-
-    def _make_cookie(self, user_agent: str) -> str:
-        ts = str(int(time.time()))
-        rnd = secrets.token_hex(8)
-        ua_hash = self._ua_hash(user_agent)
-        msg = f"{ts}.{rnd}.{ua_hash}".encode()
-        sig = hmac.new(self._secret, msg, hashlib.sha256).hexdigest()
-        return f"{ts}.{rnd}.{ua_hash}.{sig}"
-
-    def _valid_cookie(self, cookie_header: str, user_agent: str) -> bool:
-        for part in cookie_header.split(";"):
-            name, _, value = part.strip().partition("=")
-            if name.strip() == _COOKIE_NAME and self._verify_token(value.strip(), user_agent):
-                return True
-        return False
-
-    def _verify_token(self, token: str, user_agent: str) -> bool:
-        try:
-            parts = token.split(".", 3)
-            if len(parts) != 4:
-                return False
-            ts_str, rnd, ua_hash, sig = parts
-            ts = int(ts_str)
-            if time.time() - ts > _TTL:
-                return False
-            if not hmac.compare_digest(ua_hash, self._ua_hash(user_agent)):
-                return False
-            msg = f"{ts_str}.{rnd}.{ua_hash}".encode()
-            expected = hmac.new(self._secret, msg, hashlib.sha256).hexdigest()
-            return hmac.compare_digest(sig, expected)
-        except Exception:
-            return False

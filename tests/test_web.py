@@ -14,6 +14,7 @@ from sentinel.config import Settings
 from sentinel.printer.errors import PauseDebouncedError
 from sentinel.watcher.state import WatcherState
 from sentinel.web.app import create_app
+from sentinel.web.sessions import COOKIE_MAX_AGE
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -471,65 +472,56 @@ async def test_auth_enabled_rejects_wrong_password(auth_app: object) -> None:
     assert r.status_code in (401, 302)
 
 
-async def test_auth_enabled_accepts_valid_credentials(auth_app: object) -> None:
-    async with _client(auth_app) as c:
-        # First request with Basic auth returns a redirect + sets cookie
-        r = await c.get("/", auth=("admin", "testpass"), follow_redirects=False)
-    assert r.status_code == 302
-    assert "sentinel_session" in r.headers.get("set-cookie", "")
+async def _login(c: httpx.AsyncClient, **kwargs: object) -> httpx.Response:
+    """Submit the login form with the test credentials."""
+    return await c.post(
+        "/login",
+        data={"username": "admin", "password": "testpass", "next": "/"},
+        follow_redirects=False,
+        **kwargs,  # type: ignore[arg-type]
+    )
 
 
-async def test_auth_enabled_accepts_valid_credentials_preserves_query(auth_app: object) -> None:
+async def test_auth_enabled_accepts_valid_basic_credentials(auth_app: object) -> None:
+    """Basic auth authenticates the single request and creates no session."""
     async with _client(auth_app) as c:
-        r = await c.get("/?foo=bar&baz=qux", auth=("admin", "testpass"), follow_redirects=False)
-    assert r.status_code == 302
-    assert r.headers.get("location") == "/?foo=bar&baz=qux"
+        r = await c.get("/?foo=bar", auth=("admin", "testpass"), follow_redirects=False)
+    assert r.status_code == 200
+    assert "sentinel_session" not in r.headers.get("set-cookie", "")
+
+
+async def test_successful_basic_auth_does_not_count_toward_rate_limit(auth_app: object) -> None:
+    """A script polling with Basic auth must not lock itself out."""
+    async with _client(auth_app) as c:
+        for _ in range(12):
+            r = await c.get("/api/status", auth=("admin", "testpass"))
+            assert r.status_code != 429
 
 
 async def test_auth_cookie_secure_options(
     mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: AsyncMock
 ) -> None:
-    # 1. always
-    settings_always = _base_settings(
-        auth_username="admin", auth_password_bcrypt=_HASHED_PASS, auth_cookie_secure="always"
-    )
-    app_always = create_app(settings_always, db=mock_db, watcher=mock_watcher, camera=mock_camera)
-    async with _client(app_always) as c:
-        r = await c.get("/", auth=("admin", "testpass"), follow_redirects=False)
+    def make(mode: str) -> object:
+        settings = _base_settings(
+            auth_username="admin", auth_password_bcrypt=_HASHED_PASS, auth_cookie_secure=mode
+        )
+        return create_app(settings, db=mock_db, watcher=mock_watcher, camera=mock_camera)
+
+    async with _client(make("always")) as c:
+        r = await _login(c)
         assert "Secure" in r.headers.get("set-cookie", "")
 
-    # 2. never
-    settings_never = _base_settings(
-        auth_username="admin", auth_password_bcrypt=_HASHED_PASS, auth_cookie_secure="never"
-    )
-    app_never = create_app(settings_never, db=mock_db, watcher=mock_watcher, camera=mock_camera)
-    async with _client(app_never) as c:
-        # Check even with X-Forwarded-Proto: https
-        r = await c.get(
-            "/",
-            auth=("admin", "testpass"),
-            headers={"X-Forwarded-Proto": "https"},
-            follow_redirects=False,
-        )
+    async with _client(make("never")) as c:
+        r = await _login(c, headers={"X-Forwarded-Proto": "https"})
         assert "Secure" not in r.headers.get("set-cookie", "")
 
-    # 3. auto (default) - HTTP / no headers -> not Secure
-    settings_auto = _base_settings(
-        auth_username="admin", auth_password_bcrypt=_HASHED_PASS, auth_cookie_secure="auto"
-    )
-    app_auto = create_app(settings_auto, db=mock_db, watcher=mock_watcher, camera=mock_camera)
+    app_auto = make("auto")
     async with _client(app_auto) as c:
-        r = await c.get("/", auth=("admin", "testpass"), follow_redirects=False)
+        r = await _login(c)
         assert "Secure" not in r.headers.get("set-cookie", "")
 
-    # 4. auto (default) - HTTP + X-Forwarded-Proto: https -> Secure
     async with _client(app_auto) as c:
-        r = await c.get(
-            "/",
-            auth=("admin", "testpass"),
-            headers={"X-Forwarded-Proto": "https"},
-            follow_redirects=False,
-        )
+        r = await _login(c, headers={"X-Forwarded-Proto": "https"})
         assert "Secure" in r.headers.get("set-cookie", "")
 
 
@@ -749,29 +741,81 @@ async def test_auth_timing_oracle_checkpw_always_called(
 
 async def test_auth_cookie_grants_access(auth_app: object) -> None:
     async with _client(auth_app) as c:
-        r1 = await c.get("/", auth=("admin", "testpass"), follow_redirects=False)
-        cookie = r1.cookies.get("sentinel_session")
-        assert cookie is not None
-        # Use the cookie on the client instance
-        c.cookies.set("sentinel_session", cookie)
+        r1 = await _login(c)
+        assert r1.status_code == 302
+        set_cookie = r1.headers.get("set-cookie", "")
+        # Long-lived: the browser keeps it for the 400-day maximum.
+        assert f"Max-Age={COOKIE_MAX_AGE}" in set_cookie
         r2 = await c.get("/")
     assert r2.status_code == 200
 
 
-async def test_logout_clears_cookie(auth_app: object) -> None:
+async def test_session_survives_past_old_one_hour_ttl(
+    auth_app: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import time
+
+    real_time = time.time
     async with _client(auth_app) as c:
-        # First log in to get a cookie
-        r1 = await c.get("/", auth=("admin", "testpass"), follow_redirects=False)
-        cookie = r1.cookies.get("sentinel_session")
+        await _login(c)
+        monkeypatch.setattr("sentinel.web.sessions.time.time", lambda: real_time() + 30 * 86400)
+        r = await c.get("/")
+    assert r.status_code == 200
+    # Stale refresh (>1 day) re-issues the cookie with a fresh Max-Age.
+    assert f"Max-Age={COOKIE_MAX_AGE}" in r.headers.get("set-cookie", "")
+
+
+async def test_fresh_session_is_not_reissued_on_every_request(auth_app: object) -> None:
+    async with _client(auth_app) as c:
+        await _login(c)
+        r = await c.get("/")
+    assert r.status_code == 200
+    assert "set-cookie" not in r.headers
+
+
+async def test_logout_revokes_session_server_side(auth_app: object) -> None:
+    async with _client(auth_app) as c:
+        await _login(c)
+        cookie = c.cookies.get("sentinel_session")
         assert cookie is not None
 
-        # Call logout
         r2 = await c.post("/logout")
         assert r2.status_code == 200
-        # Check that the cookie is cleared
         set_cookie = r2.headers.get("set-cookie", "")
         assert "sentinel_session=" in set_cookie
-        assert "max-age=0" in set_cookie.lower() or "max_age=0" in set_cookie.lower()
+        assert "max-age=0" in set_cookie.lower()
+
+    # Replaying the old cookie (e.g. copied before logout) must no longer work.
+    async with _client(auth_app) as c2:
+        c2.cookies.set("sentinel_session", cookie)
+        r3 = await c2.get("/api/status")
+    assert r3.status_code == 401
+
+
+async def test_logout_form_redirects_browser_to_login(auth_app: object) -> None:
+    async with _client(auth_app) as c:
+        await _login(c)
+        r = await c.post("/logout", headers={"Accept": "text/html"}, follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"] == "/login"
+
+
+async def test_login_page_redirects_when_already_signed_in(auth_app: object) -> None:
+    async with _client(auth_app) as c:
+        await _login(c)
+        r = await c.get("/login?next=/api/status", follow_redirects=False)
+    assert r.status_code == 302
+    assert r.headers["location"] == "/api/status"
+
+
+async def test_dashboard_shows_logout_button_only_with_auth(app: object, auth_app: object) -> None:
+    async with _client(auth_app) as c:
+        await _login(c)
+        r = await c.get("/")
+    assert 'action="/logout"' in r.text
+    async with _client(app) as c:
+        r = await c.get("/")
+    assert 'action="/logout"' not in r.text
 
 
 async def test_auth_healthz_always_open(auth_app: object) -> None:
@@ -1145,66 +1189,6 @@ async def test_auth_bad_base64_sets_empty_credentials(auth_app: object) -> None:
     assert r.status_code == 401
 
 
-def _make_auth_middleware() -> object:
-    from sentinel.web.auth import AuthMiddleware
-
-    async def _dummy_app(scope: object, receive: object, send: object) -> None:
-        pass
-
-    return AuthMiddleware(
-        _dummy_app,
-        _base_settings(auth_username="admin", auth_password_bcrypt=_HASHED_PASS),
-        secret=b"\x00" * 32,
-    )
-
-
-def test_verify_token_wrong_part_count() -> None:
-    from sentinel.web.auth import AuthMiddleware
-
-    mw = _make_auth_middleware()
-    assert isinstance(mw, AuthMiddleware)
-    assert mw._verify_token("only.three.parts", "ua") is False
-
-
-def test_verify_token_expired() -> None:
-    import time
-
-    from sentinel.web.auth import _TTL, AuthMiddleware
-
-    mw = _make_auth_middleware()
-    assert isinstance(mw, AuthMiddleware)
-    old_ts = str(int(time.time()) - _TTL - 10)
-    # Build an expired token manually
-    import hashlib
-    import hmac
-    import secrets
-
-    rnd = secrets.token_hex(8)
-    ua_hash = mw._ua_hash("ua")
-    msg = f"{old_ts}.{rnd}.{ua_hash}".encode()
-    sig = hmac.new(mw._secret, msg, hashlib.sha256).hexdigest()
-    expired_token = f"{old_ts}.{rnd}.{ua_hash}.{sig}"
-    assert mw._verify_token(expired_token, "ua") is False
-
-
-def test_verify_token_ua_mismatch() -> None:
-    from sentinel.web.auth import AuthMiddleware
-
-    mw = _make_auth_middleware()
-    assert isinstance(mw, AuthMiddleware)
-    cookie = mw._make_cookie("original-ua")
-    assert mw._verify_token(cookie, "different-ua") is False
-
-
-def test_verify_token_garbage_raises_false() -> None:
-    from sentinel.web.auth import AuthMiddleware
-
-    mw = _make_auth_middleware()
-    assert isinstance(mw, AuthMiddleware)
-    # Four parts but ts is not an integer
-    assert mw._verify_token("notint.rnd.uah.sig", "ua") is False
-
-
 async def test_check_credentials_bcrypt_exception() -> None:
     """bcrypt.checkpw on a garbage hash must not raise; returns False."""
     from sentinel.config import Settings
@@ -1220,7 +1204,6 @@ async def test_check_credentials_bcrypt_exception() -> None:
             auth_username="admin",
             auth_password_bcrypt=_HASHED_PASS,
         ),
-        secret=b"\x00" * 32,
     )
     # Inject garbage hash directly to test middleware resilience to bcrypt exceptions
     mw._password_hash = "$garbage$not_a_real_hash"

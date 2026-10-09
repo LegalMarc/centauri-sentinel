@@ -12,7 +12,7 @@ import aiosqlite
 logger = logging.getLogger(__name__)
 
 _SCHEMA_SQL = (Path(__file__).parent / "schema.sql").read_text()
-CURRENT_VERSION = 7
+CURRENT_VERSION = 8
 
 # Tables to rename during v1 → v2 migration, in the order they should be
 # processed.  schema_version is renamed LAST so that an interrupted run can be

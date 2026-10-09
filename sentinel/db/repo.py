@@ -214,22 +214,51 @@ class Database:
         self._settings_cache[key] = value
 
     # ------------------------------------------------------------------
-    # Auth session secret
+    # Auth sessions (see sentinel/web/sessions.py)
     # ------------------------------------------------------------------
 
-    async def get_auth_secret(self) -> bytes | None:
-        """Return the persisted HMAC secret, or None if not yet generated."""
-        val = await self.get_setting("auth_cookie_secret")
-        if val is None:
-            return None
-        try:
-            return bytes.fromhex(val)
-        except ValueError:
-            return None
+    async def list_auth_sessions(self) -> list[tuple[str, int]]:
+        """Return (token_hash, refreshed_at) for every persisted session."""
+        async with (
+            self._read() as db,
+            db.execute("SELECT token_hash, refreshed_at FROM auth_sessions") as cur,
+        ):
+            rows = await cur.fetchall()
+        return [(str(r["token_hash"]), int(r["refreshed_at"])) for r in rows]
 
-    async def set_auth_secret(self, secret: bytes) -> None:
-        """Persist the HMAC secret so sessions survive restarts."""
-        await self.set_setting("auth_cookie_secret", secret.hex())
+    async def insert_auth_session(
+        self, token_hash: str, credential_fp: str, refreshed_at: int
+    ) -> None:
+        async with self._write() as db:
+            await db.execute(
+                "INSERT INTO auth_sessions (token_hash, credential_fp, refreshed_at)"
+                " VALUES (?, ?, ?)",
+                (token_hash, credential_fp, refreshed_at),
+            )
+
+    async def touch_auth_session(self, token_hash: str, refreshed_at: int) -> None:
+        async with self._write() as db:
+            await db.execute(
+                "UPDATE auth_sessions SET refreshed_at = ? WHERE token_hash = ?",
+                (refreshed_at, token_hash),
+            )
+
+    async def delete_auth_session(self, token_hash: str) -> None:
+        async with self._write() as db:
+            await db.execute("DELETE FROM auth_sessions WHERE token_hash = ?", (token_hash,))
+
+    async def prune_auth_sessions(self, credential_fp: str, refreshed_before: int) -> int:
+        """Delete sessions from other credentials or idle since *refreshed_before*."""
+        async with self._write() as db:
+            cursor = await db.execute(
+                "DELETE FROM auth_sessions WHERE credential_fp != ? OR refreshed_at < ?",
+                (credential_fp, refreshed_before),
+            )
+            # Also drop the HMAC secret used by the pre-v8 stateless cookies.
+            await db.execute("DELETE FROM runtime_settings WHERE key = 'auth_cookie_secret'")
+            removed = cursor.rowcount
+        self._settings_cache.pop("auth_cookie_secret", None)
+        return removed
 
     # ------------------------------------------------------------------
     # Watcher heartbeat

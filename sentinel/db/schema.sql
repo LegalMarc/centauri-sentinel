@@ -46,6 +46,14 @@ CREATE TABLE IF NOT EXISTS print_jobs (
     pauses_count        INTEGER NOT NULL DEFAULT 0
 );
 
+-- Dashboard login sessions. Only the SHA-256 of the cookie token is stored.
+CREATE TABLE IF NOT EXISTS auth_sessions (
+    token_hash      TEXT    PRIMARY KEY,
+    credential_fp   TEXT    NOT NULL,      -- fingerprint of the credentials that created it
+    created_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    refreshed_at    INTEGER NOT NULL       -- unix time the cookie was last (re)issued
+);
+
 CREATE INDEX IF NOT EXISTS idx_print_jobs_status ON print_jobs(status);
 CREATE INDEX IF NOT EXISTS idx_detection_events_confirmed ON detection_events(confirmed);
 CREATE INDEX IF NOT EXISTS idx_pause_history_result ON pause_history(result);
