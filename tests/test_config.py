@@ -382,35 +382,57 @@ def test_watcher_stall_seconds_valid() -> None:
 
 
 def test_watcher_stall_seconds_invalid() -> None:
-    for bad in (-1, 0, 9):
-        with pytest.raises(ValueError, match="WATCHER_STALL_SECONDS must be at least 10"):
-            Settings(watcher_stall_seconds=bad)
+    with pytest.raises(ValueError, match="WATCHER_STALL_SECONDS must be at least 0"):
+        Settings(watcher_stall_seconds=-1)
 
 
-def test_ml_confirm_count_upper_bound() -> None:
+def test_watcher_stall_seconds_below_minimum_clamps_up(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    for raw in ("0", "9"):
+        monkeypatch.setenv("WATCHER_STALL_SECONDS", raw)
+        with caplog.at_level("WARNING", logger="sentinel.config"):
+            assert Settings().watcher_stall_seconds == 10
+    assert "WATCHER_STALL_SECONDS" in caplog.text
+
+
+def test_ml_confirm_count_env_above_cap_clamps(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     from sentinel.config import ML_CONFIRM_COUNT_MAX
 
-    assert Settings(ml_confirm_count=ML_CONFIRM_COUNT_MAX).ml_confirm_count == 20
-    with pytest.raises(ValueError, match="ML_CONFIRM_COUNT must be at most 20"):
-        Settings(ml_confirm_count=ML_CONFIRM_COUNT_MAX + 1)
+    monkeypatch.setenv("ML_CONFIRM_COUNT", "25")
+    with caplog.at_level("WARNING", logger="sentinel.config"):
+        assert Settings().ml_confirm_count == ML_CONFIRM_COUNT_MAX
+    assert "ML_CONFIRM_COUNT" in caplog.text
+    monkeypatch.setenv("ML_CONFIRM_COUNT", str(ML_CONFIRM_COUNT_MAX))
+    assert Settings().ml_confirm_count == ML_CONFIRM_COUNT_MAX
+    with pytest.raises(ValueError, match="ML_CONFIRM_COUNT must be at least 1"):
+        Settings(ml_confirm_count=0)
 
 
-def test_ml_poll_interval_upper_bound() -> None:
+def test_ml_poll_interval_env_above_cap_clamps(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     from sentinel.config import ML_POLL_INTERVAL_MAX_SECONDS
 
-    s = Settings(ml_poll_interval_seconds=ML_POLL_INTERVAL_MAX_SECONDS)
-    assert s.ml_poll_interval_seconds == 300
-    with pytest.raises(ValueError, match="ML_POLL_INTERVAL_SECONDS must be at most 300"):
-        Settings(ml_poll_interval_seconds=86400)
+    monkeypatch.setenv("ML_POLL_INTERVAL_SECONDS", "86400")
+    with caplog.at_level("WARNING", logger="sentinel.config"):
+        assert Settings().ml_poll_interval_seconds == ML_POLL_INTERVAL_MAX_SECONDS
+    assert "ML_POLL_INTERVAL_SECONDS" in caplog.text
+    with pytest.raises(ValueError, match="ML_POLL_INTERVAL_SECONDS must be at least 1"):
+        Settings(ml_poll_interval_seconds=0)
 
 
-def test_detection_warmup_seconds_upper_bound() -> None:
+def test_detection_warmup_env_above_cap_clamps(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     from sentinel.config import DETECTION_WARMUP_MAX_SECONDS
 
-    s = Settings(detection_warmup_seconds=DETECTION_WARMUP_MAX_SECONDS)
-    assert s.detection_warmup_seconds == 3600
-    with pytest.raises(ValueError, match="DETECTION_WARMUP_SECONDS must be at most 3600"):
-        Settings(detection_warmup_seconds=86400)
+    monkeypatch.setenv("DETECTION_WARMUP_SECONDS", "7200")
+    with caplog.at_level("WARNING", logger="sentinel.config"):
+        assert Settings().detection_warmup_seconds == DETECTION_WARMUP_MAX_SECONDS
+    assert "DETECTION_WARMUP_SECONDS" in caplog.text
 
 
 def test_log_format_default() -> None:

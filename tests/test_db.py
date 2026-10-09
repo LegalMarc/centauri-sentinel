@@ -875,3 +875,38 @@ async def test_cancelled_write_rolls_back(db: Database) -> None:
     await db.set_setting("after_cancel", "ok")
     result = await db.get_setting("after_cancel")
     assert result == "ok"
+
+
+async def test_v7_database_upgrades_to_sessions_and_drops_old_secret(tmp_path: Path) -> None:
+    """An existing v7 DB (pre-sessions, with the HMAC cookie secret) upgrades cleanly."""
+    from sentinel.web.sessions import SessionStore, credential_fingerprint
+
+    path = str(tmp_path / "v7.db")
+    await migrate(path)
+    async with aiosqlite.connect(path) as conn:
+        await conn.execute("DROP TABLE auth_sessions")
+        await conn.execute("DELETE FROM schema_version")
+        await conn.execute("INSERT INTO schema_version (version) VALUES (7)")
+        await conn.execute(
+            "INSERT INTO runtime_settings (key, value) VALUES ('auth_cookie_secret', ?)",
+            ("00" * 32,),
+        )
+        await conn.commit()
+
+    db = Database(path)
+    await db.connect()
+    try:
+        store = SessionStore(credential_fingerprint("admin", "hash"), db)
+        await store.load()
+        token = await store.create()
+        assert store.is_valid(token)
+        assert await db.get_setting("auth_cookie_secret") is None
+    finally:
+        await db.close()
+
+    async with (
+        aiosqlite.connect(path) as conn,
+        conn.execute("SELECT version FROM schema_version ORDER BY version") as cur,
+    ):
+        versions = [row[0] for row in await cur.fetchall()]
+    assert versions == [7, CURRENT_VERSION]

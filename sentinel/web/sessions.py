@@ -124,6 +124,7 @@ class SessionStore:
     async def _evict_overflow(self) -> None:
         while len(self._sessions) > MAX_SESSIONS:
             oldest = min(self._sessions, key=lambda h: self._sessions[h].refreshed_at)
+            # Pop before awaiting so a concurrent create() cannot pick the same victim.
+            self._sessions.pop(oldest, None)
             if self._db is not None:
                 await self._db.delete_auth_session(oldest)
-            del self._sessions[oldest]

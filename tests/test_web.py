@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
@@ -823,6 +824,189 @@ async def test_auth_healthz_always_open(auth_app: object) -> None:
     async with _client(auth_app) as c:
         r = await c.get("/healthz")
     assert r.status_code == 200
+
+
+@pytest.mark.parametrize(
+    "bad_next",
+    [
+        "/\t/evil.example",
+        "/\n/evil.example",
+        "/\r/evil.example",
+        "/ /evil.example",
+        "/\x7f/evil.example",
+        "/ok\tpath",
+        "//evil.example",
+        "/\\evil.example",
+        "https://evil.example/",
+    ],
+)
+def test_safe_next_rejects_open_redirect_variants(bad_next: str) -> None:
+    from sentinel.web.auth import _safe_next
+
+    assert _safe_next(bad_next) == "/"
+
+
+def test_safe_next_keeps_normal_paths() -> None:
+    from sentinel.web.auth import _safe_next
+
+    assert _safe_next("/") == "/"
+    assert _safe_next("/api/status?foo=bar&x=%2F") == "/api/status?foo=bar&x=%2F"
+
+
+async def test_login_post_does_not_redirect_offsite_via_tab(auth_app: object) -> None:
+    async with _client(auth_app) as c:
+        r = await c.post(
+            "/login",
+            data={"username": "admin", "password": "testpass", "next": "/\t/evil.example"},
+            follow_redirects=False,
+        )
+    assert r.status_code == 302
+    assert r.headers["location"] == "/"
+
+
+async def test_signed_in_login_get_does_not_redirect_offsite_via_tab(auth_app: object) -> None:
+    async with _client(auth_app) as c:
+        await _login(c)
+        r = await c.get("/login?next=/%09/evil.example", follow_redirects=False)
+    assert r.status_code == 302
+    assert r.headers["location"] == "/"
+
+
+async def test_login_post_keeps_query_string_next(auth_app: object) -> None:
+    async with _client(auth_app) as c:
+        r = await c.post(
+            "/login",
+            data={"username": "admin", "password": "testpass", "next": "/api/status?a=1"},
+            follow_redirects=False,
+        )
+    assert r.headers["location"] == "/api/status?a=1"
+
+
+async def test_login_is_404_when_auth_disabled(app: object) -> None:
+    """With auth off there is nothing to sign in to, and no session rows may be minted."""
+    async with _client(app) as c:
+        r_get = await c.get("/login")
+        r_post = await c.post(
+            "/login",
+            data={"username": "", "password": "", "next": "/"},
+            follow_redirects=False,
+        )
+    assert r_get.status_code == 404
+    assert r_post.status_code == 404
+    assert "set-cookie" not in r_post.headers
+
+
+async def test_login_404_when_auth_disabled_still_checks_host(
+    mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: AsyncMock
+) -> None:
+    """DNS-rebinding protection runs before the auth-disabled /login 404."""
+    guarded = create_app(
+        _base_settings(external_bind_allowed=False),
+        db=mock_db,
+        watcher=mock_watcher,
+        camera=mock_camera,
+    )
+    async with _client(guarded) as c:
+        r = await c.get("/login", headers={"Host": "evil.example"})
+    assert r.status_code == 403
+
+
+async def test_basic_auth_cache_skips_bcrypt_within_ttl(
+    auth_app: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import time
+
+    calls: list[bytes] = []
+    real_checkpw = bcrypt.checkpw
+
+    def counting_checkpw(password: bytes, hashed: bytes) -> bool:
+        calls.append(password)
+        return real_checkpw(password, hashed)
+
+    monkeypatch.setattr("sentinel.web.auth.bcrypt.checkpw", counting_checkpw)
+    async with _client(auth_app) as c:
+        r1 = await c.get("/", auth=("admin", "testpass"))
+        r2 = await c.get("/", auth=("admin", "testpass"))
+        assert r1.status_code == r2.status_code == 200
+        assert len(calls) == 1
+
+        # Past the TTL the next request runs bcrypt again.
+        real_time = time.time
+        monkeypatch.setattr("sentinel.web.auth.time.time", lambda: real_time() + 61)
+        r3 = await c.get("/", auth=("admin", "testpass"))
+        assert r3.status_code == 200
+        assert len(calls) == 2
+
+
+async def test_basic_auth_cache_hit_bypasses_rate_limit(
+    auth_app: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("sentinel.web.auth._RATE_LIMIT_ATTEMPTS", 1)
+    async with _client(auth_app) as c:
+        assert (await c.get("/", auth=("admin", "testpass"))).status_code == 200
+        for _ in range(3):
+            assert (await c.get("/", auth=("admin", "testpass"))).status_code == 200
+
+
+async def test_basic_auth_wrong_password_is_never_cached(
+    auth_app: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[bytes] = []
+
+    def mock_checkpw(password: bytes, hashed: bytes) -> bool:
+        calls.append(password)
+        return False
+
+    monkeypatch.setattr("sentinel.web.auth.bcrypt.checkpw", mock_checkpw)
+    monkeypatch.setattr("sentinel.web.auth.asyncio.sleep", AsyncMock())
+    async with _client(auth_app) as c:
+        for _ in range(3):
+            r = await c.get("/", auth=("admin", "wrongpass"))
+            assert r.status_code == 401
+    assert len(calls) == 3
+
+
+async def test_basic_auth_cache_stores_digest_and_is_bounded(
+    mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: AsyncMock
+) -> None:
+    from sentinel.web.auth import _BASIC_CACHE_MAX, AuthMiddleware
+
+    mw = AuthMiddleware(
+        AsyncMock(), Settings(auth_username="admin", auth_password_bcrypt=_HASHED_PASS)
+    )
+    header = "Basic " + base64.b64encode(b"admin:testpass").decode()
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/",
+        "headers": [(b"host", b"test"), (b"authorization", header.encode())],
+    }
+    await mw(scope, AsyncMock(), AsyncMock())
+    assert all(isinstance(k, bytes) and len(k) == 32 for k in mw._basic_cache)
+    assert header.encode() not in mw._basic_cache
+    assert b"testpass" not in b"".join(mw._basic_cache)
+
+    for i in range(_BASIC_CACHE_MAX + 10):
+        mw._basic_cache_store(f"k{i}".encode())
+    assert len(mw._basic_cache) == _BASIC_CACHE_MAX
+    assert b"k0" not in mw._basic_cache
+
+
+async def test_logout_failure_returns_503_and_keeps_session(
+    auth_app: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def failing_revoke(self: object, token: str) -> None:
+        raise OSError("db is down")
+
+    async with _client(auth_app) as c:
+        await _login(c)
+        monkeypatch.setattr("sentinel.web.sessions.SessionStore.revoke", failing_revoke)
+        r = await c.post("/logout", headers={"Accept": "text/html"}, follow_redirects=False)
+        assert r.status_code == 503
+        assert r.text == "Logout failed, please try again."
+        assert "set-cookie" not in r.headers
+        # Fail closed: the session is still valid.
+        assert (await c.get("/")).status_code == 200
 
 
 # ---------------------------------------------------------------------------

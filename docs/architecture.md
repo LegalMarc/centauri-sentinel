@@ -93,10 +93,16 @@ printer with hot plastic in it.
 - **State follows the printer, not the intent.** The watcher moves to `PAUSED`
   only after the pause command is acknowledged, or after live status confirms
   the printer really is paused. A failed pause leaves it `ARMED` so the next
-  tick retries.
+  tick retries. If a failed or unacknowledged pause is followed within 60 seconds
+  by live status showing `paused`, that is Sentinel's own pause landing late: the
+  watcher takes ownership (so `AUTO_STOP_TIMEOUT_SECONDS` still applies), records
+  an `ok` `pause_history` row and sends no "paused externally" alert. A pause seen
+  later is the operator's and is never auto-stopped.
 - **The pause publish is shielded from cancellation.** A cancellation arriving
   mid-publish waits up to 15 seconds for the MQTT command to complete, and
-  shutdown awaits the watcher before closing the printer client.
+  shutdown awaits the watcher before closing the printer client. The compose
+  file sets `stop_grace_period: 30s` on the `sentinel` service so Docker's 10
+  second default does not SIGKILL the process during that wait.
 - **Fail closed on ML failure.** After `ML_CONSECUTIVE_FAILURE_THRESHOLD`
   consecutive ML errors, the printer is paused rather than left unwatched. The
   attempt is recorded in `pause_history` with source `ml_failure`.

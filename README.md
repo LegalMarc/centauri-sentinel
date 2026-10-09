@@ -104,8 +104,8 @@ Only `PRINTER_IP` is required. Everything else has a sane default.
 |---|---|---|
 | `ML_API_URL` | `http://obico-ml:3333` | Internal URL of the Obico ML container |
 | `ML_API_TOKEN_FILE` | `shared/token` | Path to the shared auth token (written by `token-init`); override to `/shared/token` when using Docker Compose |
-| `ML_CONFIRM_COUNT` | `3` | Consecutive positive frames before triggering a pause (1 – 20) |
-| `ML_POLL_INTERVAL_SECONDS` | `10` | Seconds between frame grabs (1 – 300) |
+| `ML_CONFIRM_COUNT` | `3` | Consecutive positive frames before triggering a pause (1 – 20; higher values are clamped to 20 with a warning) |
+| `ML_POLL_INTERVAL_SECONDS` | `10` | Seconds between frame grabs (1 – 300; higher values are clamped to 300 with a warning) |
 | `ML_SCORE_THRESHOLD` | `0.4` | Per-frame confidence threshold (0.0 – 1.0) |
 | `ML_CONSECUTIVE_FAILURE_THRESHOLD` | `10` | Consecutive ML API failures before disabling detection |
 | `ML_CALLBACK_HOST` | — | Override the hostname used in ML callback URLs (optional) |
@@ -114,9 +114,9 @@ Only `PRINTER_IP` is required. Everything else has a sane default.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `DETECTION_WARMUP_SECONDS` | `300` | Seconds after print start before arming (skips first-layer purge; 0 – 3600) |
+| `DETECTION_WARMUP_SECONDS` | `300` | Seconds after print start before arming (skips first-layer purge; 0 – 3600; higher values are clamped to 3600 with a warning) |
 | `DETECTION_ENABLED_DEFAULT` | `true` | Initial detection state — can be toggled at runtime via bot |
-| `WATCHER_STALL_SECONDS` | `60` | Heartbeat age that triggers a stall alert (minimum 10; raised automatically for long poll intervals) |
+| `WATCHER_STALL_SECONDS` | `60` | Heartbeat age that triggers a stall alert (minimum 10; lower non-negative values are raised to 10 with a warning; raised automatically for long poll intervals) |
 | `AUTO_STOP_TIMEOUT_SECONDS` | `0` | Auto-stop the print after this many seconds of being paused by Sentinel (0 to disable). Must be 0 or >= 60. |
 | `RESUME_COOLDOWN_SECONDS` | `5` | Minimum seconds between consecutive resumes |
 

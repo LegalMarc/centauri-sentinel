@@ -6,6 +6,7 @@ import so `python -m sentinel --help` works from ticket #1 onward.
 
 from __future__ import annotations
 
+import logging
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any
 
@@ -15,16 +16,29 @@ from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, Settings
 if TYPE_CHECKING:
     from pydantic.fields import FieldInfo
 
+logger = logging.getLogger(__name__)
+
 # Bounds for the operator-tunable detection knobs. Shared by the env-var
 # validators below and the POST /api/settings route so the two entry points
 # can never disagree. The upper caps stop a typo (e.g. 86400) from silently
-# switching monitoring off for a day.
+# switching monitoring off for a day. The API rejects values above a cap; the
+# env validators clamp them (with a warning) so an older .env that was valid
+# before the caps existed still starts the container.
 ML_CONFIRM_COUNT_MAX = 20
 ML_POLL_INTERVAL_MAX_SECONDS = 300
 DETECTION_WARMUP_MAX_SECONDS = 3600
 # heartbeat_interval_seconds() floors at 10 s; a lower stall threshold would be
 # meaningless (and 0 would flag every tick as stalled).
 WATCHER_STALL_MIN_SECONDS = 10
+
+
+def _clamp_high(name: str, value: int, cap: int) -> int:
+    """Clamp an env value above its cap, logging a warning instead of failing."""
+    if value > cap:
+        logger.warning("%s=%d exceeds the maximum; using %d", name, value, cap)
+        return cap
+    return value
+
 
 # ---------------------------------------------------------------------------
 # Secret stash — populated by model_post_init on the first Settings()
@@ -299,10 +313,7 @@ class Settings(BaseSettings):
         if v < 1:
             msg = "ML_CONFIRM_COUNT must be at least 1"
             raise ValueError(msg)
-        if v > ML_CONFIRM_COUNT_MAX:
-            msg = f"ML_CONFIRM_COUNT must be at most {ML_CONFIRM_COUNT_MAX}"
-            raise ValueError(msg)
-        return v
+        return _clamp_high("ML_CONFIRM_COUNT", v, ML_CONFIRM_COUNT_MAX)
 
     @field_validator("ml_consecutive_failure_threshold")
     @classmethod
@@ -318,10 +329,7 @@ class Settings(BaseSettings):
         if v < 1:
             msg = "ML_POLL_INTERVAL_SECONDS must be at least 1 second"
             raise ValueError(msg)
-        if v > ML_POLL_INTERVAL_MAX_SECONDS:
-            msg = f"ML_POLL_INTERVAL_SECONDS must be at most {ML_POLL_INTERVAL_MAX_SECONDS} seconds"
-            raise ValueError(msg)
-        return v
+        return _clamp_high("ML_POLL_INTERVAL_SECONDS", v, ML_POLL_INTERVAL_MAX_SECONDS)
 
     @field_validator("detection_warmup_seconds")
     @classmethod
@@ -329,17 +337,21 @@ class Settings(BaseSettings):
         if v < 0:
             msg = "DETECTION_WARMUP_SECONDS must be at least 0"
             raise ValueError(msg)
-        if v > DETECTION_WARMUP_MAX_SECONDS:
-            msg = f"DETECTION_WARMUP_SECONDS must be at most {DETECTION_WARMUP_MAX_SECONDS}"
-            raise ValueError(msg)
-        return v
+        return _clamp_high("DETECTION_WARMUP_SECONDS", v, DETECTION_WARMUP_MAX_SECONDS)
 
     @field_validator("watcher_stall_seconds")
     @classmethod
     def _validate_watcher_stall_seconds(cls, v: int) -> int:
-        if v < WATCHER_STALL_MIN_SECONDS:
-            msg = f"WATCHER_STALL_SECONDS must be at least {WATCHER_STALL_MIN_SECONDS}"
+        if v < 0:
+            msg = "WATCHER_STALL_SECONDS must be at least 0"
             raise ValueError(msg)
+        if v < WATCHER_STALL_MIN_SECONDS:
+            logger.warning(
+                "WATCHER_STALL_SECONDS=%d is below the minimum; using %d",
+                v,
+                WATCHER_STALL_MIN_SECONDS,
+            )
+            return WATCHER_STALL_MIN_SECONDS
         return v
 
     @field_validator("snapshot_cleanup_interval_seconds")

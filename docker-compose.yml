@@ -68,6 +68,9 @@ services:
       dockerfile: Dockerfile
     image: ghcr.io/legalmarc/centauri-sentinel:latest
     restart: unless-stopped
+    # The watcher waits up to 15 s for an in-flight pause command on shutdown;
+    # Docker's 10 s default would SIGKILL it first.
+    stop_grace_period: 30s
     depends_on:
       obico-ml:
         condition: service_healthy

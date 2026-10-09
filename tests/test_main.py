@@ -308,3 +308,118 @@ async def test_printer_cmd_refuses_pause_when_idle(capsys: pytest.CaptureFixture
     assert rc == 1
     printer.pause.assert_not_awaited()
     printer.close.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# Stored runtime settings are clamped to the API bounds at startup
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+async def real_db(tmp_path: Path):
+    from sentinel.db.migrate import migrate
+    from sentinel.db.repo import Database
+
+    path = str(tmp_path / "clamp.db")
+    await migrate(path)
+    db = Database(path)
+    await db.connect()
+    yield db
+    await db.close()
+
+
+async def test_clamp_stored_detection_settings_clamps_out_of_range(
+    real_db, caplog: pytest.LogCaptureFixture
+) -> None:
+    from sentinel.__main__ import _clamp_stored_detection_settings
+
+    await real_db.set_setting("ml_confirm_count", "50")
+    await real_db.set_setting("ml_poll_interval_seconds", "86400")
+    await real_db.set_setting("detection_warmup_seconds", "99999")
+    with caplog.at_level("WARNING", logger="sentinel.__main__"):
+        await _clamp_stored_detection_settings(real_db)
+
+    assert await real_db.get_setting("ml_confirm_count") == "20"
+    assert await real_db.get_setting("ml_poll_interval_seconds") == "300"
+    assert await real_db.get_setting("detection_warmup_seconds") == "3600"
+    assert "ml_confirm_count" in caplog.text
+
+
+async def test_clamp_stored_detection_settings_clamps_below_minimum(real_db) -> None:
+    from sentinel.__main__ import _clamp_stored_detection_settings
+
+    await real_db.set_setting("ml_confirm_count", "0")
+    await real_db.set_setting("ml_poll_interval_seconds", "-5")
+    await real_db.set_setting("detection_warmup_seconds", "-1")
+    await _clamp_stored_detection_settings(real_db)
+
+    assert await real_db.get_setting("ml_confirm_count") == "1"
+    assert await real_db.get_setting("ml_poll_interval_seconds") == "1"
+    assert await real_db.get_setting("detection_warmup_seconds") == "0"
+
+
+async def test_clamp_stored_detection_settings_leaves_valid_and_unset_alone(real_db) -> None:
+    from sentinel.__main__ import _clamp_stored_detection_settings
+
+    await real_db.set_setting("ml_confirm_count", "20")
+    await real_db.set_setting("ml_poll_interval_seconds", "not-a-number")
+    await _clamp_stored_detection_settings(real_db)
+
+    assert await real_db.get_setting("ml_confirm_count") == "20"
+    assert await real_db.get_setting("ml_poll_interval_seconds") == "not-a-number"
+    assert await real_db.get_setting("detection_warmup_seconds") is None
+
+
+@pytest.mark.asyncio
+async def test_run_clamps_stored_settings_at_startup() -> None:
+    args = argparse.Namespace(host="127.0.0.9", port=9999)
+
+    stored = {"ml_confirm_count": "99", "detection_enabled": "true"}
+    mock_db = AsyncMock()
+    mock_db.list_auth_sessions.return_value = []
+    mock_db.prune_auth_sessions.return_value = 0
+    mock_db.get_setting.side_effect = lambda key, default=None: stored.get(key, default)
+
+    mock_watcher = MagicMock()
+    mock_watcher.run_forever = AsyncMock()
+    closeable = MagicMock()
+    closeable.close = AsyncMock()
+
+    orig_env = dict(os.environ)
+    try:
+        with (
+            patch("sentinel.db.repo.Database", return_value=mock_db),
+            patch("sentinel.camera.mjpeg.MjpegGrabber", return_value=closeable),
+            patch("sentinel.printer.client.PrinterClient", return_value=closeable),
+            patch("sentinel.ml.client.MlClient", return_value=closeable),
+            patch("sentinel.watcher.loop.WatcherLoop", return_value=mock_watcher),
+            patch("sentinel.web.app.create_app"),
+            patch("sentinel.safety.check_external_bind"),
+            patch("uvicorn.Config"),
+            patch("uvicorn.Server") as mock_server_class,
+        ):
+            mock_server = MagicMock()
+            mock_server.serve = AsyncMock()
+            mock_server_class.return_value = mock_server
+            await _run(args)
+    finally:
+        os.environ.clear()
+        os.environ.update(orig_env)
+        from sentinel.config import get_settings
+
+        get_settings.cache_clear()
+
+    mock_db.set_setting.assert_any_call("ml_confirm_count", "20")
+
+
+def test_compose_sentinel_stop_grace_period_covers_pause_wait() -> None:
+    """The watcher waits up to 15 s for an in-flight pause on shutdown; Docker's
+    10 s default SIGKILL would cut that short."""
+    import re
+    from pathlib import Path as _Path
+
+    text = (_Path(__file__).parent.parent / "docker-compose.yml").read_text()
+    block = text[text.index("\n  sentinel:") :]
+    match = re.search(r"^    stop_grace_period:\s*(\d+)s\s*$", block, re.MULTILINE)
+    assert match is not None
+    assert int(match.group(1)) >= 20

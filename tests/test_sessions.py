@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 
 import pytest
@@ -121,3 +122,32 @@ async def test_overflow_evicts_least_recently_refreshed(monkeypatch: pytest.Monk
     assert not store.is_valid(first)
     assert store.is_valid(second)
     assert store.is_valid(third)
+
+
+async def test_concurrent_overflow_eviction_does_not_race(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two creates at the cap must not both evict (and then KeyError on) the same session."""
+    monkeypatch.setattr(sessions_mod, "MAX_SESSIONS", 2)
+    deleted: list[str] = []
+
+    class SlowDb:
+        async def insert_auth_session(self, *_: object) -> None:
+            return None
+
+        async def delete_auth_session(self, token_hash: str) -> None:
+            await asyncio.sleep(0.05)
+            deleted.append(token_hash)
+
+    store = SessionStore(FP, SlowDb())  # type: ignore[arg-type]
+    for _ in range(2):
+        await store.create()
+    oldest = min(store._sessions, key=lambda h: store._sessions[h].refreshed_at)
+    store._sessions[oldest].refreshed_at = 0
+
+    tokens = await asyncio.gather(store.create(), store.create())
+
+    assert len(store._sessions) == 2
+    assert all(store.is_valid(t) for t in tokens)
+    assert len(deleted) == 2
+    assert len(set(deleted)) == 2

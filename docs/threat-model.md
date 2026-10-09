@@ -35,7 +35,14 @@ stored, in the `auth_sessions` table, so a copied database cannot be replayed as
   just in the browser that clicked the button. Changing `AUTH_USERNAME` or the password signs
   every session out at the next restart.
 - **Scripts.** Non-browser clients may send HTTP Basic credentials on each request. That
-  authenticates the one request and creates no session.
+  authenticates the one request and creates no session. Credentials that passed the bcrypt
+  check are cached for 60 seconds (64 entries, keyed by the SHA-256 of the `Authorization`
+  header, never the plaintext), so a polling script does not pay bcrypt on every request.
+  Failures are never cached.
+- **Auth off.** `/login` answers 404, so a LAN host cannot mint session rows with the
+  placeholder credentials.
+- **Redirects.** The post-login `next` target must be a same-origin path. Anything with
+  `//`, a backslash, or a control character or space is replaced by `/`.
 - **Rate limit.** 10 failed credential attempts per client IP per minute. Successes reset it.
 - **Cookie flags.** `SameSite=Strict; HttpOnly`, plus `Secure` per `AUTH_COOKIE_SECURE`
   (`auto` adds it when the request arrived over HTTPS).

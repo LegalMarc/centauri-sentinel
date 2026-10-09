@@ -7,8 +7,51 @@ import asyncio
 import contextlib
 import logging
 import sys
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from sentinel.db.repo import Database
 
 logger = logging.getLogger(__name__)
+
+
+async def _clamp_stored_detection_settings(db: Database) -> None:
+    """Clamp stored runtime settings that fall outside the API bounds.
+
+    Values saved before the caps existed would otherwise stay in force and make
+    the dashboard form (whose inputs carry max=) unsubmittable. Non-numeric
+    values are left alone; the watcher already falls back from those.
+    """
+    from sentinel.config import (
+        DETECTION_WARMUP_MAX_SECONDS,
+        ML_CONFIRM_COUNT_MAX,
+        ML_POLL_INTERVAL_MAX_SECONDS,
+    )
+
+    bounds = {
+        "ml_confirm_count": (1, ML_CONFIRM_COUNT_MAX),
+        "ml_poll_interval_seconds": (1, ML_POLL_INTERVAL_MAX_SECONDS),
+        "detection_warmup_seconds": (0, DETECTION_WARMUP_MAX_SECONDS),
+    }
+    for key, (low, high) in bounds.items():
+        raw = await db.get_setting(key)
+        try:
+            value = int(raw) if raw is not None else None
+        except (ValueError, TypeError):
+            continue
+        if value is None:
+            continue
+        clamped = min(max(value, low), high)
+        if clamped != value:
+            logger.warning(
+                "Stored setting %s=%d is outside %d-%d; clamping to %d",
+                key,
+                value,
+                low,
+                high,
+                clamped,
+            )
+            await db.set_setting(key, str(clamped))
 
 
 def main() -> None:
@@ -291,6 +334,8 @@ async def _run(args: argparse.Namespace) -> None:
                 "detection_enabled",
                 "true" if settings.detection_enabled_default else "false",
             )
+
+        await _clamp_stored_detection_settings(db)
 
         db_printer_ip = await db.get_setting("printer_ip")
         if db_printer_ip:

@@ -54,6 +54,11 @@ _FAILED_PRINT_STATES = frozenset({"cancelled", "canceled", "error", "stopped"})
 # under a half-sent pause).
 _PAUSE_PUBLISH_CANCEL_WAIT_SECONDS = 15.0
 
+# After a pause attempt that raised, a "paused" status seen within this window
+# is taken to be that pause landing. Later, it is the operator's own pause and
+# must not be adopted (adoption makes it eligible for auto-stop).
+_UNCONFIRMED_PAUSE_ADOPT_WINDOW_SECONDS = 60.0
+
 
 # runtime_settings key: "false" when detection was already disabled at the start
 # of a snooze, so the snooze's expiry must not re-enable it.
@@ -126,6 +131,13 @@ class WatcherLoop:
         # True while OFFLINE/STALLED was entered from PAUSED, so the eventual
         # return to ARMED/WARMUP still runs the PAUSED-exit handling.
         self._interrupted_from_paused = False
+        # Set to the pause_history source ("auto" or "ml_failure") when a pause
+        # command ended "unacknowledged" or "failed": the printer may have paused
+        # anyway. If the next status shows it paused, that is our pause landing
+        # late, not an external one.
+        # (pause_history source, monotonic time) of the last pause attempt that
+        # raised; see _UNCONFIRMED_PAUSE_ADOPT_WINDOW_SECONDS.
+        self._pause_outcome_unknown: tuple[str, float] | None = None
 
     @property
     def state(self) -> WatcherState:
@@ -164,6 +176,7 @@ class WatcherLoop:
         self._confirm_count = 0
         self._pause_failure_alerted = False
         self._ml_failure_alerted = False
+        self._pause_outcome_unknown = None
 
     @property
     def dispatcher(self) -> NotificationDispatcher:
@@ -658,11 +671,31 @@ class WatcherLoop:
                     )
                 else:
                     prev_s = self.state
-                    logger.info("Printer paused externally — transitioning PAUSED")
-                    self.state = WatcherState.PAUSED
-                    self._reset_detection_episode()
-                    if prev_s not in (WatcherState.OFFLINE, WatcherState.STALLED) and getattr(
-                        self._settings, "notify_on_print_paused", True
+                    # Consume before the reset below clears it.
+                    unknown = self._pause_outcome_unknown
+                    self._pause_outcome_unknown = None
+                    unknown_source = (
+                        unknown[0]
+                        if unknown is not None
+                        and time.monotonic() - unknown[1] <= _UNCONFIRMED_PAUSE_ADOPT_WINDOW_SECONDS
+                        else None
+                    )
+                    if unknown_source is not None:
+                        logger.warning(
+                            "Printer reports paused after an unconfirmed Sentinel pause — "
+                            "treating it as our pause, not an external one"
+                        )
+                        self._mark_paused_by_sentinel()
+                        self._reset_detection_episode()
+                        await self._record_pause_row(unknown_source, True)
+                    else:
+                        logger.info("Printer paused externally — transitioning PAUSED")
+                        self.state = WatcherState.PAUSED
+                        self._reset_detection_episode()
+                    if (
+                        unknown_source is None
+                        and prev_s not in (WatcherState.OFFLINE, WatcherState.STALLED)
+                        and getattr(self._settings, "notify_on_print_paused", True)
                     ):
                         jpeg = await self._safe_grab_jpeg()
                         self._dispatcher.dispatch_external_pause(jpeg)
@@ -736,6 +769,8 @@ class WatcherLoop:
                     )
                 outcome = await self._publish_pause(verify_on_error=True)
                 await self._record_pause_row("ml_failure", outcome == "ok")
+                if outcome in ("unacknowledged", "failed"):
+                    self._pause_outcome_unknown = ("ml_failure", time.monotonic())
                 if outcome == "ok":
                     self._confirm_count = 0
                     self._ml_error_count = 0
@@ -818,6 +853,13 @@ class WatcherLoop:
         try:
             await asyncio.shield(inner)
         except asyncio.CancelledError:
+            task = asyncio.current_task()
+            if inner.cancelled() and task is not None and task.cancelling() == 0:
+                # The pause call itself ended cancelled while the watcher is not
+                # being cancelled: a failed pause, not a shutdown. Re-raising
+                # would end the watcher loop silently.
+                logger.error("Printer pause was cancelled internally; treating as failed")
+                return "failed"
             if not inner.done():
                 await asyncio.wait({inner}, timeout=_PAUSE_PUBLISH_CANCEL_WAIT_SECONDS)
             if inner.done() and not inner.cancelled() and inner.exception() is None:
@@ -878,6 +920,7 @@ class WatcherLoop:
         self.state = WatcherState.PAUSED
         self._paused_since = datetime.now(tz=UTC)
         self._paused_by_sentinel = True
+        self._pause_outcome_unknown = None
 
     async def _record_pause_row(self, source: str, ok: bool) -> None:
         try:
@@ -920,6 +963,8 @@ class WatcherLoop:
 
         outcome = await self._publish_pause()
         pause_ok = outcome == "ok"
+        if outcome in ("unacknowledged", "failed"):
+            self._pause_outcome_unknown = ("auto", time.monotonic())
         if outcome == "debounced":
             # Restore the streak so the next high-score tick retries the
             # pause immediately instead of waiting for N more frames.

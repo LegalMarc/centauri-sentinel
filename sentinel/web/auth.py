@@ -7,7 +7,9 @@ If auth_enabled=True:
     the cookie is re-issued on use so the browser never ages it out.
   - Browsers without a session are redirected to the /login form.
   - Non-browser clients may send HTTP Basic credentials on each request.
-    That authenticates the single request and creates no session.
+    That authenticates the single request and creates no session; credentials
+    that passed bcrypt are cached briefly (by digest) to spare repeat checks.
+  - /login answers 404 when auth is disabled.
   - POST /logout revokes the session server-side and clears the cookie.
 
 Internal routes (/__internal_snapshot/*) are always exempt.
@@ -19,9 +21,11 @@ import asyncio
 import base64
 import collections
 import contextlib
+import hashlib
 import hmac
 import html
 import ipaddress
+import logging
 import time
 from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, quote
@@ -43,6 +47,8 @@ if TYPE_CHECKING:
 
     from sentinel.config import Settings
 
+logger = logging.getLogger(__name__)
+
 # Hard cap on the /login form body. This middleware wraps LimitUploadSizeMiddleware
 # (it is registered later, so it is the outer layer) and handles /login itself,
 # so the 1 MB app-level limit never sees the login body. A real login form is a
@@ -53,6 +59,11 @@ _MAX_LOGIN_BODY_BYTES = 64 * 1024
 _RATE_LIMIT_ATTEMPTS = 10
 _RATE_LIMIT_WINDOW_S = 60.0
 _RATE_LIMIT_MAX_IPS = 1000
+
+# Successful Basic credentials are remembered briefly so a script polling the API
+# does not pay a bcrypt check (~250 ms of CPU) on every request.
+_BASIC_CACHE_TTL_S = 60.0
+_BASIC_CACHE_MAX = 64
 
 
 class _BodyTooLargeError(Exception):
@@ -128,8 +139,17 @@ def _resolve_client_ip(
 
 
 def _safe_next(raw: str) -> str:
-    """Return *raw* if it is a same-origin path, else "/" (prevents open redirects)."""
-    if raw.startswith("/") and not raw.startswith("//") and "\\" not in raw:
+    """Return *raw* if it is a same-origin path, else "/" (prevents open redirects).
+
+    Control characters and spaces are rejected too: browsers strip tab, CR and LF
+    from URLs (WHATWG), so ``/\t/evil.example`` would resolve to ``//evil.example``.
+    """
+    if (
+        raw.startswith("/")
+        and not raw.startswith("//")
+        and "\\" not in raw
+        and all(ord(c) > 0x20 and ord(c) != 0x7F for c in raw)
+    ):
         return raw
     return "/"
 
@@ -154,6 +174,9 @@ class AuthMiddleware:
         # source addresses cannot grow it without limit.
         self._auth_attempts: collections.OrderedDict[str, list[float]] = collections.OrderedDict()
         self._auth_cookie_secure = settings.auth_cookie_secure
+        # SHA-256 of the raw Authorization header -> expiry time, for Basic
+        # credentials that already passed bcrypt. Only the digest is kept.
+        self._basic_cache: collections.OrderedDict[bytes, float] = collections.OrderedDict()
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -202,8 +225,12 @@ class AuthMiddleware:
             return
 
         # /login is exempt from CSRF and auth checks (it IS the auth endpoint).
-        # DNS-rebinding protection above still applies.
+        # DNS-rebinding protection above still applies. With auth off there is
+        # nothing to sign in to, and the dummy credentials must not mint sessions.
         if path == "/login" and scope.get("method") in ("GET", "POST"):
+            if not self._enabled:
+                await Response(status_code=404, content="Not Found")(scope, receive, send)
+                return
             await self._handle_login(scope, receive, send, headers)
             return
 
@@ -245,6 +272,10 @@ class AuthMiddleware:
 
         auth_header = headers.get(b"authorization", b"").decode()
         if auth_header.startswith("Basic "):
+            cache_key = hashlib.sha256(auth_header.encode()).digest()
+            if self._basic_cache_hit(cache_key):
+                await self._app(scope, receive, send)
+                return
             client_ip = _resolve_client_ip(scope, headers, self._settings.trust_proxies)
             if self._rate_limited(client_ip):
                 response = Response(status_code=429, content="Too Many Requests")
@@ -257,6 +288,7 @@ class AuthMiddleware:
                 username = password = ""
             if await self._check_credentials(username, password):
                 self._auth_attempts.pop(client_ip, None)
+                self._basic_cache_store(cache_key)
                 await self._app(scope, receive, send)
                 return
             await asyncio.sleep(0.5)
@@ -341,7 +373,19 @@ class AuthMiddleware:
         token: str | None,
     ) -> None:
         if token:
-            await self._sessions.revoke(token)
+            try:
+                await self._sessions.revoke(token)
+            except Exception:
+                # Fail closed: the session is still valid, so keep the cookie
+                # and tell the user instead of pretending they are signed out.
+                logger.exception("Logout failed: could not revoke session")
+                response = Response(
+                    status_code=503,
+                    content="Logout failed, please try again.",
+                    media_type="text/plain",
+                )
+                await response(scope, receive, send)
+                return
         clear = self._session_cookie(scope, headers, "", max_age=0)
         if "text/html" in headers.get(b"accept", b"").decode():
             # A form submit from the dashboard: land on the login page.
@@ -401,6 +445,23 @@ class AuthMiddleware:
         while len(self._auth_attempts) > _RATE_LIMIT_MAX_IPS:
             self._auth_attempts.popitem(last=False)
         return limited
+
+    def _basic_cache_hit(self, key: bytes) -> bool:
+        """True if *key* names Basic credentials that passed bcrypt within the TTL."""
+        expires = self._basic_cache.get(key)
+        if expires is None:
+            return False
+        if expires <= time.time():
+            del self._basic_cache[key]
+            return False
+        return True
+
+    def _basic_cache_store(self, key: bytes) -> None:
+        """Remember a successful Basic credential; oldest entries drop past the cap."""
+        self._basic_cache[key] = time.time() + _BASIC_CACHE_TTL_S
+        self._basic_cache.move_to_end(key)
+        while len(self._basic_cache) > _BASIC_CACHE_MAX:
+            self._basic_cache.popitem(last=False)
 
     @staticmethod
     def _session_token(headers: dict[bytes, bytes]) -> str | None:

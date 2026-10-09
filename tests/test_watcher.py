@@ -561,7 +561,7 @@ async def test_loop_swallows_unexpected_exceptions() -> None:
     assert call_count == 2  # loop executed twice despite exception on first
 
 
-async def test_cancelled_before_pause_does_not_set_paused_state() -> None:
+async def test_internally_cancelled_pause_does_not_set_paused_state() -> None:
     watcher, _, _, _, _ = await _make_watcher()
 
     async def _raise_cancelled() -> None:
@@ -570,8 +570,9 @@ async def test_cancelled_before_pause_does_not_set_paused_state() -> None:
     watcher._printer = MagicMock()
     watcher._printer.pause = _raise_cancelled
 
-    with pytest.raises(asyncio.CancelledError):
-        await watcher._on_confirmed_detection(MlResult(score=0.9), b"\xff\xd8\xff\xd9")
+    # The pause call ended cancelled but the watcher itself was not cancelled:
+    # a failed pause, so no CancelledError escapes and the state stays put.
+    await watcher._on_confirmed_detection(MlResult(score=0.9), b"\xff\xd8\xff\xd9")
 
     assert watcher.state != WatcherState.PAUSED
 
@@ -1241,7 +1242,7 @@ async def test_on_confirmed_detection_cleanup_oserror(monkeypatch: pytest.Monkey
     await watcher._on_confirmed_detection(MlResult(score=0.9), b"jpeg")
 
 
-async def test_on_confirmed_detection_pause_cancelled() -> None:
+async def test_on_confirmed_detection_pause_internally_cancelled() -> None:
     watcher, printer, _camera, _ml, _db = await _make_watcher()
 
     async def mock_pause():
@@ -1249,9 +1250,9 @@ async def test_on_confirmed_detection_pause_cancelled() -> None:
 
     printer.pause = AsyncMock(side_effect=mock_pause)
 
-    with pytest.raises(asyncio.CancelledError):
-        await watcher._on_confirmed_detection(MlResult(score=0.9), b"")
+    await watcher._on_confirmed_detection(MlResult(score=0.9), b"")
     assert watcher.state == WatcherState.IDLE
+    assert (watcher._pause_outcome_unknown or ("",))[0] == "auto"
 
 
 async def test_on_confirmed_detection_pause_exception() -> None:
@@ -2872,3 +2873,204 @@ async def test_startup_with_expired_snooze_respects_detection_intent() -> None:
 
     assert (await db.get_setting("detection_enabled")) == "false"
     assert (await db.get_setting("snooze_until_utc")) == "0"
+
+
+# ---------------------------------------------------------------------------
+# Unknown pause outcome: a pause that failed or went unacknowledged but really
+# took effect must not later read as an external pause
+# ---------------------------------------------------------------------------
+
+
+async def test_unacked_pause_then_paused_status_is_sentinel_owned() -> None:
+    from sentinel.printer.errors import PrinterCommandUnacknowledgedError
+
+    dispatcher = _make_dispatcher()
+    watcher, printer, _camera, _ml, db = await _make_watcher(
+        printer_status=_printing_status(), ml_score=0.9, dispatcher=dispatcher
+    )
+    watcher._settings = _one_confirm_settings()
+    printer.pause = AsyncMock(side_effect=PrinterCommandUnacknowledgedError("no ack"))
+    await watcher.tick()
+    assert watcher.state == WatcherState.ARMED
+    assert (watcher._pause_outcome_unknown or ("",))[0] == "auto"
+
+    printer.status = AsyncMock(return_value=_paused_status())
+    await watcher.tick()
+
+    assert watcher.state == WatcherState.PAUSED
+    assert watcher._paused_by_sentinel is True
+    assert watcher._pause_outcome_unknown is None
+    dispatcher.dispatch_external_pause.assert_not_called()
+    rows = await db.get_recent_pauses(limit=10)
+    assert [(r["source"], r["result"]) for r in rows] == [("auto", "ok"), ("auto", "error")]
+
+
+async def test_paused_long_after_failed_pause_is_external_not_adopted() -> None:
+    """Past the adopt window a pause is the operator's: alert it, never auto-stop it."""
+    dispatcher = _make_dispatcher()
+    watcher, printer, _camera, _ml, _db = await _make_watcher(
+        printer_status=_printing_status(), ml_score=0.9, dispatcher=dispatcher
+    )
+    watcher._settings = _one_confirm_settings()
+    printer.pause = AsyncMock(side_effect=Exception("MQTT down"))
+    await watcher.tick()
+    assert watcher._pause_outcome_unknown is not None
+    source, _ts = watcher._pause_outcome_unknown
+    watcher._pause_outcome_unknown = (source, time.monotonic() - 3600)
+
+    printer.status = AsyncMock(return_value=_paused_status())
+    await watcher.tick()
+
+    assert watcher.state == WatcherState.PAUSED
+    assert watcher._paused_by_sentinel is False
+    dispatcher.dispatch_external_pause.assert_called_once()
+
+
+async def test_failed_pause_then_paused_status_is_sentinel_owned() -> None:
+    dispatcher = _make_dispatcher()
+    watcher, printer, _camera, _ml, db = await _make_watcher(
+        printer_status=_printing_status(), ml_score=0.9, dispatcher=dispatcher
+    )
+    watcher._settings = _one_confirm_settings()
+    printer.pause = AsyncMock(side_effect=Exception("MQTT down"))
+    await watcher.tick()
+    assert (watcher._pause_outcome_unknown or ("",))[0] == "auto"
+
+    printer.status = AsyncMock(return_value=_paused_status())
+    await watcher.tick()
+
+    assert watcher.state == WatcherState.PAUSED
+    assert watcher._paused_by_sentinel is True
+    dispatcher.dispatch_external_pause.assert_not_called()
+    rows = await db.get_recent_pauses(limit=10)
+    assert rows[0]["result"] == "ok"
+
+
+async def test_unacked_pause_then_paused_status_lets_auto_stop_escalate() -> None:
+    from sentinel.printer.errors import PrinterCommandUnacknowledgedError
+
+    settings = Settings(
+        printer_ip="10.0.0.1",
+        printer_access_code="test",
+        detection_warmup_seconds=0,
+        ml_confirm_count=1,
+        ml_score_threshold=0.4,
+        ml_poll_interval_seconds=10,
+        watcher_stall_seconds=60,
+        auto_stop_timeout_seconds=60,
+    )
+    watcher, printer, _camera, _ml, _db = await _make_watcher(
+        settings=settings, printer_status=_printing_status(), ml_score=0.9
+    )
+    printer.pause = AsyncMock(side_effect=PrinterCommandUnacknowledgedError("no ack"))
+    await watcher.tick()
+    printer.status = AsyncMock(return_value=_paused_status())
+    await watcher.tick()
+    assert watcher._paused_by_sentinel is True
+    printer.stop.assert_not_called()
+
+    watcher._paused_since = datetime.now(tz=UTC) - timedelta(seconds=120)
+    await watcher.tick()
+    printer.stop.assert_called_once()
+
+
+async def test_ml_failclosed_unacked_pause_then_paused_status_records_ml_failure_ok() -> None:
+    from sentinel.printer.errors import PrinterCommandUnacknowledgedError
+
+    settings = Settings(
+        printer_ip="10.0.0.1",
+        printer_access_code="test",
+        detection_warmup_seconds=0,
+        ml_consecutive_failure_threshold=1,
+        ml_confirm_count=3,
+        ml_score_threshold=0.4,
+        ml_poll_interval_seconds=10,
+        watcher_stall_seconds=60,
+    )
+    dispatcher = _make_dispatcher()
+    watcher, printer, _camera, ml, db = await _make_watcher(
+        settings=settings, printer_status=_printing_status(), dispatcher=dispatcher
+    )
+    ml.detect = AsyncMock(return_value=MlResult(score=0.0, error=True))
+    printer.pause = AsyncMock(side_effect=PrinterCommandUnacknowledgedError("no ack"))
+    await watcher.tick()
+    assert watcher.state == WatcherState.ARMED
+    assert (watcher._pause_outcome_unknown or ("",))[0] == "ml_failure"
+
+    printer.status = AsyncMock(return_value=_paused_status())
+    await watcher.tick()
+
+    assert watcher.state == WatcherState.PAUSED
+    assert watcher._paused_by_sentinel is True
+    dispatcher.dispatch_external_pause.assert_not_called()
+    rows = await db.get_recent_pauses(limit=10)
+    assert [(r["source"], r["result"]) for r in rows] == [
+        ("ml_failure", "ok"),
+        ("ml_failure", "error"),
+    ]
+
+
+async def test_genuine_external_pause_without_prior_failure_still_alerts() -> None:
+    dispatcher = _make_dispatcher()
+    watcher, printer, _camera, _ml, db = await _make_watcher(
+        printer_status=_printing_status(), dispatcher=dispatcher
+    )
+    watcher._settings = _one_confirm_settings()
+    await watcher.tick()
+    assert watcher.state == WatcherState.ARMED
+    assert watcher._pause_outcome_unknown is None
+
+    printer.status = AsyncMock(return_value=_paused_status())
+    await watcher.tick()
+
+    assert watcher.state == WatcherState.PAUSED
+    assert watcher._paused_by_sentinel is False
+    dispatcher.dispatch_external_pause.assert_called_once()
+    assert await db.get_recent_pauses(limit=10) == []
+
+
+async def test_successful_pause_clears_unknown_outcome_flag() -> None:
+    watcher, printer, _camera, _ml, _db = await _make_watcher(
+        printer_status=_printing_status(), ml_score=0.9
+    )
+    watcher._settings = _one_confirm_settings()
+    printer.pause = AsyncMock(side_effect=Exception("MQTT down"))
+    await watcher.tick()
+    assert (watcher._pause_outcome_unknown or ("",))[0] == "auto"
+
+    printer.pause = AsyncMock(return_value=None)
+    await watcher.tick()
+    assert watcher.state == WatcherState.PAUSED
+    assert watcher._pause_outcome_unknown is None
+
+
+async def test_episode_reset_clears_unknown_outcome_flag() -> None:
+    watcher, printer, camera, _ml, _db = await _make_watcher(
+        printer_status=_printing_status(), ml_score=0.9
+    )
+    watcher._settings = _one_confirm_settings()
+    printer.pause = AsyncMock(side_effect=Exception("MQTT down"))
+    await watcher.tick()
+    assert (watcher._pause_outcome_unknown or ("",))[0] == "auto"
+
+    camera.grab = AsyncMock(side_effect=RuntimeError("boom"))
+    await watcher.tick()
+    assert watcher._pause_outcome_unknown is None
+
+
+async def test_internally_cancelled_pause_is_failed_not_a_watcher_exit() -> None:
+    """printer.pause() ending cancelled while the watcher is not being cancelled
+    must report 'failed' rather than re-raising out of the watcher loop."""
+    watcher, printer, _camera, _ml, _db = await _make_watcher(
+        printer_status=_printing_status(), ml_score=0.9
+    )
+    watcher._settings = _one_confirm_settings()
+    printer.pause = AsyncMock(side_effect=asyncio.CancelledError())
+
+    outcome = await watcher._publish_pause()
+    assert outcome == "failed"
+
+    # And through the tick: no CancelledError, watcher stays ARMED for a retry.
+    await watcher.tick()
+    assert watcher.state == WatcherState.ARMED
+    assert (watcher._pause_outcome_unknown or ("",))[0] == "auto"
