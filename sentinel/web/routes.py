@@ -409,6 +409,9 @@ def make_router(
             await watcher.printer.resume()
             from sentinel.watcher.state import WatcherState
 
+            # Also covers an unacknowledged pause that landed while the watcher is
+            # still ARMED, where the transition below is a no-op.
+            watcher.note_operator_resume()
             # Atomic check-and-set: avoids racing a concurrent watchdog/tick
             # write that could otherwise silently clobber this resume action.
             await watcher.external_transition(

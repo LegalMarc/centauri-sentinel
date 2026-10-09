@@ -54,8 +54,9 @@ _FAILED_PRINT_STATES = frozenset({"cancelled", "canceled", "error", "stopped"})
 # under a half-sent pause).
 _PAUSE_PUBLISH_CANCEL_WAIT_SECONDS = 15.0
 
-# After a pause attempt that raised, a "paused" status seen within this window
-# is taken to be that pause landing. Later, it is the operator's own pause and
+# After a pause attempt with an unknown outcome (published but unacknowledged, or
+# cancelled mid-flight), a "paused" status seen within this window is taken to be
+# that pause landing. Later, it is the operator's own pause and
 # must not be adopted (adoption makes it eligible for auto-stop).
 _UNCONFIRMED_PAUSE_ADOPT_WINDOW_SECONDS = 60.0
 
@@ -137,7 +138,8 @@ class WatcherLoop:
         # that pause landing late, not an external one. Never set for "failed"
         # (rejected or never published, so it cannot land). Cleared by a
         # successful pause, IDLE, a job change, leaving PAUSED, an operator
-        # pause (note_operator_pause) and the adoption/external branch.
+        # pause or resume (note_operator_pause / note_operator_resume) and the
+        # adoption/external branch.
         self._pause_outcome_unknown: tuple[str, float] | None = None
 
     @property
@@ -187,6 +189,21 @@ class WatcherLoop:
         a pause eligible for auto-stop).
         """
         self._pause_outcome_unknown = None
+
+    def note_operator_resume(self) -> None:
+        """Record that the operator resumed (web or Telegram).
+
+        The state setter only handles a PAUSED -> ARMED transition. When an
+        unacknowledged pause actually landed, the watcher is still ARMED until its
+        next tick, so the operator's resume cannot change state. Without this hook
+        the confirm streak, the failure-alert guard and the unknown-outcome marker
+        survive, and the next high frame re-pauses at once as a silent retry.
+        Resets the detection episode, drops the marker and anchors the post-resume
+        cooldown, exactly as the PAUSED -> ARMED path does (idempotent with it).
+        """
+        self._reset_detection_episode()
+        self._pause_outcome_unknown = None
+        self._last_resume_time = time.monotonic()
 
     @property
     def dispatcher(self) -> NotificationDispatcher:

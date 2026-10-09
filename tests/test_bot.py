@@ -275,6 +275,23 @@ async def test_cmd_resume_calls_printer() -> None:
     assert "resumed" in update.message.reply_text.call_args[0][0].lower()
 
 
+async def test_cmd_resume_notes_operator_resume_on_watcher() -> None:
+    """The hook runs even when the watcher is ARMED and the transition is a no-op."""
+    printer = AsyncMock()
+    handler = _make_handler(printer=printer)
+    handler._watcher.state = WatcherState.ARMED
+    await handler.cmd_resume(_make_update(), None)
+    handler._watcher.note_operator_resume.assert_called_once_with()
+
+
+async def test_cmd_resume_failure_does_not_note_operator_resume() -> None:
+    printer = AsyncMock()
+    printer.resume.side_effect = RuntimeError("mqtt down")
+    handler = _make_handler(printer=printer)
+    await handler.cmd_resume(_make_update(), None)
+    handler._watcher.note_operator_resume.assert_not_called()
+
+
 async def test_cmd_resume_uses_external_transition() -> None:
     """Resume must go through the atomic external_transition helper, not a direct
     state assignment, so a concurrent watchdog write can't be silently clobbered."""
@@ -441,6 +458,13 @@ async def test_callback_resume_uses_external_transition_and_refreshes_status() -
         WatcherState.ARMED, from_states=(WatcherState.PAUSED, WatcherState.STALLED)
     )
     handler._watcher.get_fresh_status.assert_called_once_with(force=True)
+
+
+async def test_callback_resume_notes_operator_resume_on_watcher() -> None:
+    handler = _make_handler(printer=AsyncMock())
+    handler._watcher.state = WatcherState.ARMED
+    await handler.handle_callback(_make_update(callback_data="resume"), None)
+    handler._watcher.note_operator_resume.assert_called_once_with()
 
 
 async def test_callback_stop_sets_pending() -> None:

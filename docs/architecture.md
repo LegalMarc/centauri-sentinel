@@ -117,8 +117,12 @@ printer with hot plastic in it.
   until Docker's SIGKILL, skipping the watcher unwind and `db.checkpoint()`.
   5 + 15 seconds fits inside the 30-second grace period. `SentinelServer` also
   stops uvicorn from re-raising SIGTERM after `serve()` returns, which would kill
-  the process (exit 143) before that sequence ran. A second signal forces uvicorn
-  out of its graceful wait.
+  the process (exit 143) before that sequence ran. A second signal sets uvicorn's
+  `force_exit`, which cancels remaining connections and tasks; it does not
+  shorten the wait on an open `/stream`, which the 5-second timeout bounds.
+  Outside Docker a second Ctrl+C during the watcher's 15-second unwind reaches
+  asyncio's own SIGINT handler, which cancels main and skips `bot.stop()` and the
+  client closes (`db.checkpoint()` still runs).
 - **Fail closed on ML failure.** After `ML_CONSECUTIVE_FAILURE_THRESHOLD`
   consecutive ML errors, the printer is paused rather than left unwatched. The
   attempt is recorded in `pause_history` with source `ml_failure`.

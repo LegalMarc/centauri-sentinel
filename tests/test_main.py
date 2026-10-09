@@ -367,12 +367,26 @@ async def test_clamp_stored_detection_settings_clamps_float_strings(real_db) -> 
 
     await real_db.set_setting("ml_poll_interval_seconds", "86400.5")
     await real_db.set_setting("ml_confirm_count", "-0.5")
-    await real_db.set_setting("detection_warmup_seconds", "120.5")  # in range: untouched
+    await real_db.set_setting("detection_warmup_seconds", "120.5")  # in range, still floored
     await _clamp_stored_detection_settings(real_db)
 
     assert await real_db.get_setting("ml_poll_interval_seconds") == "300"
     assert await real_db.get_setting("ml_confirm_count") == "1"
-    assert await real_db.get_setting("detection_warmup_seconds") == "120.5"
+    assert await real_db.get_setting("detection_warmup_seconds") == "120"
+
+
+async def test_clamp_stored_detection_settings_normalizes_in_range_non_integers(real_db) -> None:
+    """The dashboard int()s these, so an in-range "10.5" must not stay stored."""
+    from sentinel.__main__ import _clamp_stored_detection_settings
+
+    await real_db.set_setting("ml_confirm_count", "10.5")
+    await real_db.set_setting("ml_poll_interval_seconds", "7.0")
+    await real_db.set_setting("detection_warmup_seconds", "0.9")
+    await _clamp_stored_detection_settings(real_db)
+
+    assert await real_db.get_setting("ml_confirm_count") == "10"
+    assert await real_db.get_setting("ml_poll_interval_seconds") == "7"
+    assert await real_db.get_setting("detection_warmup_seconds") == "0"
 
 
 async def test_clamp_stored_detection_settings_leaves_nan_alone(real_db) -> None:

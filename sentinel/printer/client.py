@@ -338,9 +338,10 @@ class PrinterClient:
 
         _last_pause_at is only kept when a pause may have reached the printer, so
         a failed attempt does not block the next retry. A pause that was published
-        but never acked (PrinterCommandUnacknowledgedError) keeps the anchor:
-        the printer may have paused, so the next pause() is debounced and callers
-        check the live status instead of re-publishing immediately.
+        but never acked (PrinterCommandUnacknowledgedError) or was cancelled
+        mid-flight keeps the anchor: the printer may have paused, so the next
+        pause() is debounced and callers check the live status instead of
+        re-publishing immediately.
         """
         now = time.monotonic()
         if now - self._last_pause_at < _PAUSE_DEBOUNCE_S:
@@ -352,14 +353,15 @@ class PrinterClient:
         self._last_pause_at = now
         try:
             await self._with_retry(lambda: self._send_command(CC2_CMD_PAUSE_PRINT))
-        except PrinterCommandUnacknowledgedError:
+        except (PrinterCommandUnacknowledgedError, asyncio.CancelledError):
             # Restart the window from now: the ack wait itself can take most of it.
+            # A cancelled publish is also an unknown outcome (the command may have
+            # reached the printer), so it keeps the debounce like an unacked one.
             self._last_pause_at = time.monotonic()
             raise
         except BaseException:
-            # BaseException (not Exception) so a mid-publish asyncio.CancelledError
-            # also rolls back the anchor — it's a BaseException in Python 3.8+, and
-            # skipping the rollback here would leave _last_pause_at set as though a
+            # BaseException (not Exception) so any other failure rolls back the
+            # anchor too: leaving it set would debounce the next retry as though a
             # pause were successfully published when nothing was actually sent.
             self._last_pause_at = 0.0
             raise

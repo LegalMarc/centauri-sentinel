@@ -20,8 +20,10 @@ async def _clamp_stored_detection_settings(db: Database) -> None:
     """Clamp stored runtime settings that fall outside the API bounds.
 
     Values saved before the caps existed would otherwise stay in force and make
-    the dashboard form (whose inputs carry max=) unsubmittable. Non-numeric
-    values are left alone; the watcher already falls back from those.
+    the dashboard form (whose inputs carry max=) unsubmittable. In-range
+    non-integers ("10.5") are rewritten as integers because the dashboard
+    int()s them. Non-numeric values are left alone; the watcher already falls
+    back from those.
     """
     from sentinel.config import (
         DETECTION_WARMUP_MAX_SECONDS,
@@ -47,6 +49,7 @@ async def _clamp_stored_detection_settings(db: Database) -> None:
         if math.isnan(value):
             continue
         clamped = min(max(value, low), high)
+        normalized = str(int(clamped))
         if clamped != value:
             logger.warning(
                 "Stored setting %s=%s is outside %d-%d; clamping to %d",
@@ -56,7 +59,15 @@ async def _clamp_stored_detection_settings(db: Database) -> None:
                 high,
                 clamped,
             )
-            await db.set_setting(key, str(int(clamped)))
+        elif normalized != raw:
+            # In range but not an integer string ("10.5"): the dashboard reads
+            # these with int(), which would 500 on it.
+            logger.warning(
+                "Stored setting %s=%s is not an integer; storing %s", key, raw, normalized
+            )
+        else:
+            continue
+        await db.set_setting(key, normalized)
 
 
 def main() -> None:

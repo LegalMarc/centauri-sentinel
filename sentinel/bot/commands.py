@@ -306,6 +306,9 @@ class BotCommandHandler:
         assert update.message is not None
         try:
             await self._printer.resume()
+            # Also covers an unacknowledged pause that landed while the watcher is
+            # still ARMED, where the transition below is a no-op.
+            self._watcher.note_operator_resume()
             await self._watcher.external_transition(
                 WatcherState.ARMED, from_states=(WatcherState.PAUSED, WatcherState.STALLED)
             )
@@ -415,6 +418,8 @@ class BotCommandHandler:
         if data == "resume":
             try:
                 await self._printer.resume()
+                # See cmd_resume: the transition is a no-op while still ARMED.
+                self._watcher.note_operator_resume()
                 await self._watcher.external_transition(
                     WatcherState.ARMED, from_states=(WatcherState.PAUSED, WatcherState.STALLED)
                 )

@@ -2877,7 +2877,7 @@ async def test_startup_with_expired_snooze_respects_detection_intent() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Unknown pause outcome: a pause that failed or went unacknowledged but really
+# Unknown pause outcome: a pause that went unacknowledged but really
 # took effect must not later read as an external pause
 # ---------------------------------------------------------------------------
 
@@ -2927,6 +2927,59 @@ async def test_paused_long_after_unacked_pause_is_external_not_adopted() -> None
     assert watcher.state == WatcherState.PAUSED
     assert watcher._paused_by_sentinel is False
     dispatcher.dispatch_external_pause.assert_called_once()
+
+
+async def test_operator_resume_after_unacked_pause_landed_starts_fresh_episode() -> None:
+    """Pause landed unacked, the watcher is still ARMED, and the operator resumes.
+
+    external_transition(from PAUSED/STALLED) is a no-op there, so note_operator_resume
+    must reset the episode, drop the marker and set the resume cooldown. The next
+    high frame is then held back instead of silently re-pausing as a retry.
+    """
+    from sentinel.printer.errors import PrinterCommandUnacknowledgedError
+
+    dispatcher = _make_dispatcher()
+    watcher, printer, _camera, _ml, _db = await _make_watcher(
+        printer_status=_printing_status(), ml_score=0.9, dispatcher=dispatcher
+    )
+    watcher._settings = _one_confirm_settings()
+    printer.pause = AsyncMock(side_effect=PrinterCommandUnacknowledgedError("no ack"))
+    await watcher.tick()
+    assert watcher.state == WatcherState.ARMED
+    assert watcher._pause_outcome_unknown is not None
+    assert watcher._pause_failure_alerted is True
+    assert dispatcher.dispatch_detection.call_count == 1
+
+    applied = await watcher.external_transition(
+        WatcherState.ARMED, from_states=(WatcherState.PAUSED, WatcherState.STALLED)
+    )
+    assert applied is False  # the no-op the hook exists for
+    watcher.note_operator_resume()
+
+    assert watcher._pause_outcome_unknown is None
+    assert watcher._pause_failure_alerted is False
+    assert watcher._confirm_count == 0
+    assert time.monotonic() - watcher._last_resume_time < 5.0
+
+    # Printer resumed; a high frame inside the cooldown must not re-pause.
+    printer.pause = AsyncMock(return_value=None)
+    await watcher.tick()
+    printer.pause.assert_not_awaited()
+    assert watcher.state == WatcherState.ARMED
+
+
+async def test_operator_resume_hook_is_idempotent_with_paused_to_armed() -> None:
+    """PAUSED -> ARMED already sets the cooldown; the hook must not disturb it."""
+    watcher, _printer, _camera, _ml, _db = await _make_watcher(printer_status=_paused_status())
+    watcher.state = WatcherState.PAUSED
+    watcher.note_operator_resume()
+    assert await watcher.external_transition(
+        WatcherState.ARMED, from_states=(WatcherState.PAUSED, WatcherState.STALLED)
+    )
+    assert watcher.state == WatcherState.ARMED
+    assert watcher._pause_outcome_unknown is None
+    assert watcher._pause_failure_alerted is False
+    assert time.monotonic() - watcher._last_resume_time < 5.0
 
 
 async def test_failed_pause_then_paused_status_is_external_not_adopted() -> None:

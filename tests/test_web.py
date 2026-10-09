@@ -1696,6 +1696,7 @@ async def test_control_resume_success(
     assert r.json()["status"] == "ok"
     printer.resume.assert_called_once()
     assert mock_watcher.state == WatcherState.ARMED
+    mock_watcher.note_operator_resume.assert_called_once_with()
 
 
 async def test_control_resume_uses_external_transition(

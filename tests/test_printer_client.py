@@ -886,13 +886,12 @@ async def test_pause_failure_does_not_lock_debounce() -> None:
     assert client._last_pause_at == pytest.approx(0.0)
 
 
-async def test_pause_cancelled_resets_debounce_anchor() -> None:
-    """A pause() cancelled mid-publish must roll back _last_pause_at.
+async def test_pause_cancelled_keeps_debounce_anchor() -> None:
+    """A pause() cancelled mid-publish has an unknown outcome, so it keeps the anchor.
 
-    CancelledError is a BaseException, not an Exception, in Python 3.8+; the
-    rollback's except clause must be broad enough to catch it so the anchor
-    isn't left set as though a pause were successfully published when
-    nothing actually went out.
+    Like PrinterCommandUnacknowledgedError, the command may have reached the
+    printer; rolling the anchor back would let the next tick re-publish at once.
+    Other failures (see test_pause_failure_does_not_lock_debounce) still reset it.
     """
     client = PrinterClient(_SETTINGS)
 
@@ -905,7 +904,9 @@ async def test_pause_cancelled_resets_debounce_anchor() -> None:
     ):
         await client.pause()
 
-    assert client._last_pause_at == pytest.approx(0.0)
+    assert client._last_pause_at > 0.0
+    with pytest.raises(PauseDebouncedError):
+        await client.pause()
 
 
 async def test_pause_concurrent_calls_debounced() -> None:

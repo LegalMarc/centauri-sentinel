@@ -28,8 +28,15 @@ class SentinelServer(uvicorn.Server):
     re-raises every captured signal, so SIGTERM kills the process (exit 143)
     before the watcher has unwound its in-flight pause or the database has been
     checkpointed. Here the first signal only sets ``should_exit``; a second one
-    sets ``force_exit`` to cut the graceful wait short. Exiting stays with
+    sets ``force_exit``, which makes uvicorn cancel remaining connections and tasks
+    instead of waiting for them. It does not shorten the wait on an open
+    ``/stream``: uvicorn (Python 3.12) still awaits ``wait_closed()``, and
+    ``GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS`` is what bounds that. Exiting stays with
     ``_run``, which runs its shutdown sequence to the end.
+
+    Outside Docker, once serve() returns SIGINT reverts to asyncio.Runner's
+    handler, so a second Ctrl+C during the watcher's 15 s unwind cancels main and
+    skips ``bot.stop()`` and the client closes (``db.checkpoint()`` still runs).
     """
 
     @contextlib.contextmanager

@@ -134,5 +134,7 @@ class SessionStore:
                 except Exception:
                     # Best effort: the in-memory eviction stands (the session is
                     # already invalid) and a leftover row is trimmed on next load.
+                    # Accepted risk: if the delete fails the row can revive the
+                    # evicted session after a restart (under the cap).
                     # Raising here would 500 a login whose session was created.
                     logger.warning("Failed to delete evicted login session", exc_info=True)
