@@ -143,12 +143,14 @@ def _safe_next(raw: str) -> str:
 
     Control characters and spaces are rejected too: browsers strip tab, CR and LF
     from URLs (WHATWG), so ``/\t/evil.example`` would resolve to ``//evil.example``.
+    Non-ASCII is rejected as well: the value goes into a Location header, which
+    is Latin-1 encoded, so it would turn a successful login into a 500.
     """
     if (
         raw.startswith("/")
         and not raw.startswith("//")
         and "\\" not in raw
-        and all(ord(c) > 0x20 and ord(c) != 0x7F for c in raw)
+        and all(c.isascii() and ord(c) > 0x20 and ord(c) != 0x7F for c in raw)
     ):
         return raw
     return "/"

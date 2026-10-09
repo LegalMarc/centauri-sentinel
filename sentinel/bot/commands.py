@@ -260,6 +260,9 @@ class BotCommandHandler:
         assert update.message is not None
         from sentinel.printer.errors import PauseDebouncedError
 
+        # An operator pause, whatever its outcome, is never Sentinel's own late
+        # pause: drop the marker first so it cannot be adopted (and auto-stopped).
+        self._watcher.note_operator_pause()
         try:
             await self._printer.pause()
         except PauseDebouncedError:

@@ -561,6 +561,59 @@ async def test_lost_ack_publishes_command_exactly_once(method_name: str) -> None
     assert len(fake.command_publishes) == 1
 
 
+class _CommandPublishFails(_FakeCommandClient):
+    """Fake whose command publish raises ``errors`` in turn, then behaves normally."""
+
+    def __init__(self, *errors: Exception) -> None:
+        super().__init__()
+        self._errors = list(errors)
+        self.command_attempts = 0
+
+    async def publish(self, topic: str, payload_str: str) -> None:
+        if topic.endswith("/api_request"):
+            self.command_attempts += 1
+            if self._errors:
+                raise self._errors.pop(0)
+        await super().publish(topic, payload_str)
+
+
+def _cm_for(fake: _FakeCommandClient) -> AsyncMock:
+    cm = AsyncMock()
+    cm.__aenter__ = AsyncMock(return_value=fake)
+    cm.__aexit__ = AsyncMock(return_value=False)
+    return cm
+
+
+async def test_publish_timeout_waiting_for_on_publish_is_not_republished() -> None:
+    """aiomqtt's publish() already handed the packet to paho when its wait for
+    on_publish times out: the command may be on the wire, so it is 'maybe sent'."""
+    fake = _CommandPublishFails(aiomqtt.MqttError("Operation timed out"))
+    with (
+        patch("sentinel.printer.client._RETRY_WAIT", tenacity.wait_fixed(0.01)),
+        patch("sentinel.printer.client.aiomqtt.Client", return_value=_cm_for(fake)),
+        pytest.raises(PrinterCommandUnacknowledgedError),
+    ):
+        client = PrinterClient(_SETTINGS)
+        client._serial_number = "SN1"
+        await client.pause()
+    assert fake.command_attempts == 1
+
+
+async def test_publish_refused_synchronously_by_paho_is_retried() -> None:
+    """MqttCodeError means paho refused the publish before queueing anything
+    (no socket / queue full): it definitely was not sent, so a retry is safe."""
+    fake = _CommandPublishFails(aiomqtt.MqttCodeError(4, "Could not publish message"))
+    with (
+        patch("sentinel.printer.client._RETRY_WAIT", tenacity.wait_fixed(0.01)),
+        patch("sentinel.printer.client.aiomqtt.Client", return_value=_cm_for(fake)),
+    ):
+        client = PrinterClient(_SETTINGS)
+        client._serial_number = "SN1"
+        await client.pause()
+    assert fake.command_attempts == 2
+    assert len(fake.command_publishes) == 1  # only the retry reached the (fake) wire
+
+
 async def test_session_drop_after_publish_is_not_republished() -> None:
     """A connection error while waiting for the ack is also 'sent, outcome unknown'."""
     cm, fake = _make_command_client(drop_ack=True)

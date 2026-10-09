@@ -131,12 +131,13 @@ class WatcherLoop:
         # True while OFFLINE/STALLED was entered from PAUSED, so the eventual
         # return to ARMED/WARMUP still runs the PAUSED-exit handling.
         self._interrupted_from_paused = False
-        # Set to the pause_history source ("auto" or "ml_failure") when a pause
-        # command ended "unacknowledged" or "failed": the printer may have paused
-        # anyway. If the next status shows it paused, that is our pause landing
-        # late, not an external one.
-        # (pause_history source, monotonic time) of the last pause attempt that
-        # raised; see _UNCONFIRMED_PAUSE_ADOPT_WINDOW_SECONDS.
+        # (pause_history source, monotonic time) of a pause attempt whose outcome
+        # is genuinely unknown ("unacknowledged": the printer may have acted on
+        # it). A "paused" status within _UNCONFIRMED_PAUSE_ADOPT_WINDOW_SECONDS is
+        # that pause landing late, not an external one. Never set for "failed"
+        # (rejected or never published, so it cannot land). Cleared by a
+        # successful pause, IDLE, a job change, leaving PAUSED, an operator
+        # pause (note_operator_pause) and the adoption/external branch.
         self._pause_outcome_unknown: tuple[str, float] | None = None
 
     @property
@@ -162,6 +163,7 @@ class WatcherLoop:
             # New context: a failed-pause episode from before the pause must
             # not make the next failure look like a silent retry.
             self._reset_detection_episode()
+            self._pause_outcome_unknown = None
         if value not in _INTERRUPT_STATES:
             self._interrupted_from_paused = False
         self._state = value
@@ -176,6 +178,14 @@ class WatcherLoop:
         self._confirm_count = 0
         self._pause_failure_alerted = False
         self._ml_failure_alerted = False
+
+    def note_operator_pause(self) -> None:
+        """Record that the operator paused (web or Telegram).
+
+        Drops any unknown-outcome pause marker so a later "paused" status is
+        never mistaken for Sentinel's own late pause and adopted (adoption makes
+        a pause eligible for auto-stop).
+        """
         self._pause_outcome_unknown = None
 
     @property
@@ -526,6 +536,7 @@ class WatcherLoop:
                 logger.info("Printer idle — transitioning IDLE")
             self.state = WatcherState.IDLE
             self._reset_detection_episode()
+            self._pause_outcome_unknown = None
             self._ml_error_count = 0
 
             # Record print end if a job was active
@@ -622,6 +633,7 @@ class WatcherLoop:
             self._alerted_new_print = False
             # Reset detection counters so job A's streak does not carry into job B
             self._reset_detection_episode()
+            self._pause_outcome_unknown = None
             self._ml_error_count = 0
 
         # Start job tracking if not already active
@@ -671,7 +683,7 @@ class WatcherLoop:
                     )
                 else:
                     prev_s = self.state
-                    # Consume before the reset below clears it.
+                    # Single use: adopted or external, the marker is spent.
                     unknown = self._pause_outcome_unknown
                     self._pause_outcome_unknown = None
                     unknown_source = (
@@ -769,7 +781,7 @@ class WatcherLoop:
                     )
                 outcome = await self._publish_pause(verify_on_error=True)
                 await self._record_pause_row("ml_failure", outcome == "ok")
-                if outcome in ("unacknowledged", "failed"):
+                if outcome == "unacknowledged":
                     self._pause_outcome_unknown = ("ml_failure", time.monotonic())
                 if outcome == "ok":
                     self._confirm_count = 0
@@ -836,10 +848,13 @@ class WatcherLoop:
         paused; otherwise the watcher stays ARMED and the next tick retries.
 
         Returns "ok", "debounced" (suppressed and the printer is still printing),
-        "unacknowledged" (sent, but the printer never confirmed it) or "failed"
-        (the command was not sent or the printer rejected it). With verify_on_error, a raised command
-        is followed by a live status check and counts as "ok" if the printer is
-        in fact paused (the ML fail-closed path, which has no detection to retry).
+        "unacknowledged" (the outcome is unknown: the command was sent but never
+        confirmed, or the call was cancelled mid-flight) or "failed" (the command
+        was never published or the printer rejected it, so it cannot land). Only
+        "unacknowledged" arms the late-pause adoption marker. With
+        verify_on_error, a raised command is followed by a live status check and
+        counts as "ok" if the printer is in fact paused (the ML fail-closed path,
+        which has no detection to retry).
         """
 
         async def _publish() -> None:
@@ -858,8 +873,9 @@ class WatcherLoop:
                 # The pause call itself ended cancelled while the watcher is not
                 # being cancelled: a failed pause, not a shutdown. Re-raising
                 # would end the watcher loop silently.
-                logger.error("Printer pause was cancelled internally; treating as failed")
-                return "failed"
+                # The command may or may not have reached the printer.
+                logger.error("Printer pause was cancelled internally; outcome unknown")
+                return "unacknowledged"
             if not inner.done():
                 await asyncio.wait({inner}, timeout=_PAUSE_PUBLISH_CANCEL_WAIT_SECONDS)
             if inner.done() and not inner.cancelled() and inner.exception() is None:
@@ -963,7 +979,7 @@ class WatcherLoop:
 
         outcome = await self._publish_pause()
         pause_ok = outcome == "ok"
-        if outcome in ("unacknowledged", "failed"):
+        if outcome == "unacknowledged":
             self._pause_outcome_unknown = ("auto", time.monotonic())
         if outcome == "debounced":
             # Restore the streak so the next high-score tick retries the
@@ -986,9 +1002,9 @@ class WatcherLoop:
             self._confirm_count = consecutive_count
             if not is_retry:
                 self._dispatcher.dispatch_text(
-                    "⚠️ Pause command sent during failure detection, but the printer did "
-                    "not confirm it. Check the printer. The watcher remains armed and will "
-                    "retry if failure is still detected."
+                    "⚠️ The printer did not confirm the pause command during failure "
+                    "detection, so it may or may not have taken effect. Check the printer. "
+                    "The watcher remains armed and will retry if failure is still detected."
                 )
 
         self._pause_failure_alerted = not pause_ok

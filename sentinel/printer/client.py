@@ -656,12 +656,22 @@ class PrinterClient:
                 )
                 await self._await_registration(messages, register_resp_topic)
 
-                # 2) The actual command, confirmed by its ack.
-                await client.publish(
-                    request_topic,
-                    json.dumps({"id": cmd_id, "method": method, "params": params or {}}),
-                )
+                # 2) The actual command, confirmed by its ack. Flag it as published
+                # BEFORE awaiting: aiomqtt's publish() hands the packet to paho and
+                # then waits for on_publish, so a timeout or dropped link there
+                # means "maybe sent" and must never be retried.
                 command_published = True
+                try:
+                    await client.publish(
+                        request_topic,
+                        json.dumps({"id": cmd_id, "method": method, "params": params or {}}),
+                    )
+                except aiomqtt.MqttCodeError:
+                    # aiomqtt raises this only when paho refuses the publish
+                    # synchronously (no socket, queue full): nothing was queued
+                    # or sent, so the retry layer may safely try again.
+                    command_published = False
+                    raise
                 return await self._await_command_ack(messages, response_topic, cmd_id)
         except PrinterCommandError:
             raise  # explicit rejection by the printer: not a lost ack

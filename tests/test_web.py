@@ -838,6 +838,9 @@ async def test_auth_healthz_always_open(auth_app: object) -> None:
         "//evil.example",
         "/\\evil.example",
         "https://evil.example/",
+        # Non-ASCII cannot be Latin-1 encoded into the Location header.
+        "/\u2713",
+        "/caf\u00e9\u2014menu",
     ],
 )
 def test_safe_next_rejects_open_redirect_variants(bad_next: str) -> None:
@@ -868,6 +871,18 @@ async def test_signed_in_login_get_does_not_redirect_offsite_via_tab(auth_app: o
     async with _client(auth_app) as c:
         await _login(c)
         r = await c.get("/login?next=/%09/evil.example", follow_redirects=False)
+    assert r.status_code == 302
+    assert r.headers["location"] == "/"
+
+
+async def test_login_post_non_ascii_next_falls_back_to_root(auth_app: object) -> None:
+    """A non-ASCII next cannot go in the Latin-1 Location header: no 500 after login."""
+    async with _client(auth_app) as c:
+        r = await c.post(
+            "/login",
+            data={"username": "admin", "password": "testpass", "next": "/\u2713"},
+            follow_redirects=False,
+        )
     assert r.status_code == 302
     assert r.headers["location"] == "/"
 
@@ -1661,6 +1676,7 @@ async def test_control_pause_success(
     assert r.json()["status"] == "ok"
     printer.pause.assert_called_once()
     mock_db.record_pause.assert_called_once_with(source="web", result="ok")
+    mock_watcher.note_operator_pause.assert_called_once_with()
 
 
 async def test_control_resume_success(

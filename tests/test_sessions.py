@@ -151,3 +151,49 @@ async def test_concurrent_overflow_eviction_does_not_race(
     assert all(store.is_valid(t) for t in tokens)
     assert len(deleted) == 2
     assert len(set(deleted)) == 2
+
+
+async def test_eviction_survives_db_delete_failure(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A failed row delete must not turn a successful login into a 500."""
+    monkeypatch.setattr(sessions_mod, "MAX_SESSIONS", 1)
+
+    class FailingDeleteDb:
+        async def insert_auth_session(self, *_: object) -> None:
+            return None
+
+        async def delete_auth_session(self, _token_hash: str) -> None:
+            raise RuntimeError("database is locked")
+
+    store = SessionStore(FP, FailingDeleteDb())  # type: ignore[arg-type]
+    first = await store.create()
+    store._sessions[sessions_mod._hash_token(first)].refreshed_at = 0
+    with caplog.at_level("WARNING", logger="sentinel.web.sessions"):
+        second = await store.create()  # evicts `first`, delete fails, must not raise
+
+    assert not store.is_valid(first)  # in-memory eviction stands
+    assert store.is_valid(second)
+    assert "Failed to delete evicted login session" in caplog.text
+
+
+async def test_load_enforces_max_sessions(db_path: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    db = await _open(db_path)
+    store = SessionStore(FP, db)
+    tokens = [await store.create() for _ in range(3)]
+    for age, token in enumerate(tokens):  # tokens[0] is the least recently refreshed
+        store._sessions[sessions_mod._hash_token(token)].refreshed_at = 1000 + age
+        await db.touch_auth_session(sessions_mod._hash_token(token), 1000 + age)
+    await db.close()
+
+    monkeypatch.setattr(sessions_mod, "MAX_SESSIONS", 2)
+    monkeypatch.setattr(sessions_mod, "COOKIE_MAX_AGE", 10**12)  # keep the old rows
+    db = await _open(db_path)
+    reloaded = SessionStore(FP, db)
+    await reloaded.load()
+
+    assert not reloaded.is_valid(tokens[0])
+    assert reloaded.is_valid(tokens[1])
+    assert reloaded.is_valid(tokens[2])
+    assert len(await db.list_auth_sessions()) == 2  # the row was deleted too
+    await db.close()

@@ -256,6 +256,13 @@ async def test_cmd_pause_calls_printer() -> None:
     assert "paused" in update.message.reply_text.call_args[0][0].lower()
 
 
+async def test_cmd_pause_marks_operator_pause_on_watcher() -> None:
+    """An operator /pause must not be adopted as a late Sentinel pause."""
+    handler = _make_handler(printer=AsyncMock())
+    await handler.cmd_pause(_make_update(), None)
+    handler._watcher.note_operator_pause.assert_called_once_with()
+
+
 async def test_cmd_resume_calls_printer() -> None:
     printer = AsyncMock()
     handler = _make_handler(printer=printer)

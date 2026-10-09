@@ -363,6 +363,9 @@ def make_router(
             raise HTTPException(status_code=503, detail="Service not initialised")
         from sentinel.printer.errors import PauseDebouncedError
 
+        # An operator pause, whatever its outcome, is never Sentinel's own late
+        # pause: drop the marker first so it cannot be adopted (and auto-stopped).
+        watcher.note_operator_pause()
         try:
             await watcher.printer.pause()
         except PauseDebouncedError:

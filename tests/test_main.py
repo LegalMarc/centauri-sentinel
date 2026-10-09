@@ -48,7 +48,7 @@ async def test_main_cli_overrides() -> None:
             patch("sentinel.web.app.create_app"),
             patch("sentinel.safety.check_external_bind"),
             patch("uvicorn.Config") as mock_config,
-            patch("uvicorn.Server") as mock_server_class,
+            patch("sentinel.server.SentinelServer") as mock_server_class,
         ):
             mock_server = MagicMock()
             mock_server.serve = AsyncMock()
@@ -60,6 +60,9 @@ async def test_main_cli_overrides() -> None:
             call_kwargs = mock_config.call_args[1]
             assert call_kwargs["host"] == "127.0.0.9"
             assert call_kwargs["port"] == 9999
+            # An open /stream connection must not hold shutdown past the
+            # compose stop_grace_period.
+            assert call_kwargs["timeout_graceful_shutdown"] == 5
     finally:
         os.environ.clear()
         os.environ.update(orig_env)
@@ -150,7 +153,7 @@ async def test_main_shutdown_waits_for_watcher_before_closing_printer() -> None:
             patch("sentinel.web.app.create_app"),
             patch("sentinel.safety.check_external_bind"),
             patch("uvicorn.Config"),
-            patch("uvicorn.Server") as mock_server_class,
+            patch("sentinel.server.SentinelServer") as mock_server_class,
         ):
             mock_server = MagicMock()
             mock_server.serve = AsyncMock()  # returns at once -> triggers shutdown
@@ -358,6 +361,29 @@ async def test_clamp_stored_detection_settings_clamps_below_minimum(real_db) -> 
     assert await real_db.get_setting("detection_warmup_seconds") == "0"
 
 
+async def test_clamp_stored_detection_settings_clamps_float_strings(real_db) -> None:
+    """The watcher reads these with float(), so "86400.5" is in force and must be clamped."""
+    from sentinel.__main__ import _clamp_stored_detection_settings
+
+    await real_db.set_setting("ml_poll_interval_seconds", "86400.5")
+    await real_db.set_setting("ml_confirm_count", "-0.5")
+    await real_db.set_setting("detection_warmup_seconds", "120.5")  # in range: untouched
+    await _clamp_stored_detection_settings(real_db)
+
+    assert await real_db.get_setting("ml_poll_interval_seconds") == "300"
+    assert await real_db.get_setting("ml_confirm_count") == "1"
+    assert await real_db.get_setting("detection_warmup_seconds") == "120.5"
+
+
+async def test_clamp_stored_detection_settings_leaves_nan_alone(real_db) -> None:
+    from sentinel.__main__ import _clamp_stored_detection_settings
+
+    await real_db.set_setting("ml_poll_interval_seconds", "nan")
+    await _clamp_stored_detection_settings(real_db)
+
+    assert await real_db.get_setting("ml_poll_interval_seconds") == "nan"
+
+
 async def test_clamp_stored_detection_settings_leaves_valid_and_unset_alone(real_db) -> None:
     from sentinel.__main__ import _clamp_stored_detection_settings
 
@@ -396,7 +422,7 @@ async def test_run_clamps_stored_settings_at_startup() -> None:
             patch("sentinel.web.app.create_app"),
             patch("sentinel.safety.check_external_bind"),
             patch("uvicorn.Config"),
-            patch("uvicorn.Server") as mock_server_class,
+            patch("sentinel.server.SentinelServer") as mock_server_class,
         ):
             mock_server = MagicMock()
             mock_server.serve = AsyncMock()

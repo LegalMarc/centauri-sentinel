@@ -93,16 +93,32 @@ printer with hot plastic in it.
 - **State follows the printer, not the intent.** The watcher moves to `PAUSED`
   only after the pause command is acknowledged, or after live status confirms
   the printer really is paused. A failed pause leaves it `ARMED` so the next
-  tick retries. If a failed or unacknowledged pause is followed within 60 seconds
-  by live status showing `paused`, that is Sentinel's own pause landing late: the
-  watcher takes ownership (so `AUTO_STOP_TIMEOUT_SECONDS` still applies), records
-  an `ok` `pause_history` row and sends no "paused externally" alert. A pause seen
-  later is the operator's and is never auto-stopped.
+  tick retries.
+- **Only an unknown outcome can be adopted.** A pause is "unknown" when the
+  command was published but never acknowledged, or the call was cancelled
+  mid-flight, so the printer may have acted on it. If live status shows `paused`
+  within 60 seconds of that, it is Sentinel's own pause landing late: the watcher
+  takes ownership (so `AUTO_STOP_TIMEOUT_SECONDS` still applies), records an `ok`
+  `pause_history` row and sends no "paused externally" alert. A `failed` pause
+  (rejected by the printer or never published) cannot land, so it never arms
+  adoption and a later pause is external. The marker is cleared by a successful
+  pause, the job ending or changing, a resume, and the adoption itself. Camera
+  errors and disabled detection leave it alone. An operator pause from the web
+  API or Telegram `/pause` clears it first, and any pause seen outside the window
+  is the operator's. Neither is ever adopted or auto-stopped.
 - **The pause publish is shielded from cancellation.** A cancellation arriving
   mid-publish waits up to 15 seconds for the MQTT command to complete, and
   shutdown awaits the watcher before closing the printer client. The compose
   file sets `stop_grace_period: 30s` on the `sentinel` service so Docker's 10
   second default does not SIGKILL the process during that wait.
+- **Shutdown always runs to the end.** uvicorn runs with
+  `timeout_graceful_shutdown=5` (`sentinel/server.py`), because an open dashboard
+  `/stream` connection never closes on its own and would otherwise stall shutdown
+  until Docker's SIGKILL, skipping the watcher unwind and `db.checkpoint()`.
+  5 + 15 seconds fits inside the 30-second grace period. `SentinelServer` also
+  stops uvicorn from re-raising SIGTERM after `serve()` returns, which would kill
+  the process (exit 143) before that sequence ran. A second signal forces uvicorn
+  out of its graceful wait.
 - **Fail closed on ML failure.** After `ML_CONSECUTIVE_FAILURE_THRESHOLD`
   consecutive ML errors, the printer is paused rather than left unwatched. The
   attempt is recorded in `pause_history` with source `ml_failure`.
@@ -117,8 +133,11 @@ printer with hot plastic in it.
 - **Commands must be acknowledged, and are published once.** An unacknowledged
   command raises `PrinterCommandUnacknowledgedError` rather than reporting
   success. It is never re-published by the client's retry loop, because the
-  printer may already have acted on it. Retries cover only connecting and
-  registering. An unacknowledged pause keeps the 30-second debounce, so the
+  printer may already have acted on it. That includes a publish that timed out
+  waiting for the broker's confirmation: the packet was already handed to the
+  socket. Only a publish paho refused synchronously (`MqttCodeError`: no socket,
+  queue full) counts as not sent and stays retryable. Retries otherwise cover
+  only connecting and registering. An unacknowledged pause keeps the 30-second debounce, so the
   next tick checks live status before sending anything again.
 
 ## Notification fan-out

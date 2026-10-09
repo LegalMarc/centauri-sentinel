@@ -77,6 +77,8 @@ class SessionStore:
             logger.info("Dropped %d stale login session(s)", removed)
         rows = await self._db.list_auth_sessions()
         self._sessions = {token_hash: _Session(refreshed_at) for token_hash, refreshed_at in rows}
+        # Rows written before (or outside) the cap: trim to it, oldest first.
+        await self._evict_overflow()
 
     async def create(self) -> str:
         """Create a session and return the raw cookie token."""
@@ -127,4 +129,10 @@ class SessionStore:
             # Pop before awaiting so a concurrent create() cannot pick the same victim.
             self._sessions.pop(oldest, None)
             if self._db is not None:
-                await self._db.delete_auth_session(oldest)
+                try:
+                    await self._db.delete_auth_session(oldest)
+                except Exception:
+                    # Best effort: the in-memory eviction stands (the session is
+                    # already invalid) and a leftover row is trimmed on next load.
+                    # Raising here would 500 a login whose session was created.
+                    logger.warning("Failed to delete evicted login session", exc_info=True)

@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import contextlib
 import logging
+import math
 import sys
 from typing import TYPE_CHECKING
 
@@ -35,23 +36,27 @@ async def _clamp_stored_detection_settings(db: Database) -> None:
     }
     for key, (low, high) in bounds.items():
         raw = await db.get_setting(key)
+        if raw is None:
+            continue
+        # The watcher reads these with float(), so a stored "86400.5" is in force
+        # and must be clamped too. nan has no sensible clamp and is left alone.
         try:
-            value = int(raw) if raw is not None else None
+            value = float(raw)
         except (ValueError, TypeError):
             continue
-        if value is None:
+        if math.isnan(value):
             continue
         clamped = min(max(value, low), high)
         if clamped != value:
             logger.warning(
-                "Stored setting %s=%d is outside %d-%d; clamping to %d",
+                "Stored setting %s=%s is outside %d-%d; clamping to %d",
                 key,
-                value,
+                raw,
                 low,
                 high,
                 clamped,
             )
-            await db.set_setting(key, str(clamped))
+            await db.set_setting(key, str(int(clamped)))
 
 
 def main() -> None:
@@ -259,6 +264,7 @@ async def _run(args: argparse.Namespace) -> None:
     from sentinel.notify.telegram import TelegramNotifier
     from sentinel.printer.client import PrinterClient
     from sentinel.safety import check_external_bind
+    from sentinel.server import GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS, SentinelServer
     from sentinel.watcher.loop import WatcherLoop
     from sentinel.web.app import create_app
     from sentinel.web.sessions import SessionStore, credential_fingerprint
@@ -383,8 +389,14 @@ async def _run(args: argparse.Namespace) -> None:
             internal_token=internal_token,
         )
 
-        config = uvicorn.Config(app, host=host, port=port, log_level=settings.log_level.lower())
-        server = uvicorn.Server(config)
+        config = uvicorn.Config(
+            app,
+            host=host,
+            port=port,
+            log_level=settings.log_level.lower(),
+            timeout_graceful_shutdown=GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS,
+        )
+        server = SentinelServer(config)
 
         bot: BotRunner | None = None
         if telegram is not None:
