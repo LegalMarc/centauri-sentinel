@@ -221,6 +221,14 @@ async def test_auth_session_insert_list_touch_delete(db: Database) -> None:
     assert await db.list_auth_sessions() == [("h1", 300)]
 
 
+async def test_delete_all_auth_sessions_returns_count(db: Database) -> None:
+    assert await db.delete_all_auth_sessions() == 0
+    await db.insert_auth_session("h1", "fp", 100)
+    await db.insert_auth_session("h2", "fp-other", 200)
+    assert await db.delete_all_auth_sessions() == 2
+    assert await db.list_auth_sessions() == []
+
+
 async def test_prune_auth_sessions_drops_other_credentials_and_idle(db: Database) -> None:
     await db.insert_auth_session("current", "fp-new", 1000)
     await db.insert_auth_session("old-creds", "fp-old", 1000)

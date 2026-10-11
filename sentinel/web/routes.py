@@ -123,6 +123,13 @@ def make_router(
             settings.watcher_stall_seconds, await _current_poll_interval()
         )
 
+    async def _ml_failure_auto_stop() -> bool:
+        """Whether an ML-outage pause counts toward auto-stop: runtime override, else config."""
+        default = str(settings.ml_failure_auto_stop).lower()
+        if db is None:
+            return settings.ml_failure_auto_stop
+        return await db.get_setting("ml_failure_auto_stop", default) == "true"
+
     @router.get("/", response_class=HTMLResponse)
     async def status_page(request: Request) -> Response:
         if db is None or templates is None or watcher is None:
@@ -141,6 +148,7 @@ def make_router(
             ml_score_threshold_str,
             ml_poll_interval_str,
             detection_warmup_str,
+            ml_failure_auto_stop_str,
         ) = await asyncio.gather(
             db.get_recent_detections(limit=10),
             db.get_recent_pauses(limit=10),
@@ -152,6 +160,7 @@ def make_router(
             db.get_setting("ml_score_threshold", str(settings.ml_score_threshold)),
             db.get_setting("ml_poll_interval_seconds", str(settings.ml_poll_interval_seconds)),
             db.get_setting("detection_warmup_seconds", str(settings.detection_warmup_seconds)),
+            db.get_setting("ml_failure_auto_stop", str(settings.ml_failure_auto_stop).lower()),
         )
 
         detection_enabled = detection_enabled_str == "true"
@@ -174,6 +183,8 @@ def make_router(
             if detection_warmup_str is not None
             else settings.detection_warmup_seconds
         )
+
+        ml_failure_auto_stop = ml_failure_auto_stop_str == "true"
 
         from sentinel import __version__
 
@@ -280,6 +291,7 @@ def make_router(
                 "last_ml_score_stale": last_ml_score_stale,
                 "ml_poll_interval_seconds": ml_poll_interval_seconds,
                 "detection_warmup_seconds": detection_warmup_seconds,
+                "ml_failure_auto_stop": ml_failure_auto_stop,
                 "version": __version__,
                 "auth_enabled": settings.auth_enabled,
             },
@@ -306,6 +318,7 @@ def make_router(
             "last_ml_score_age": _format_age(last_ml_score_age_s),
             "last_ml_score_stale": last_ml_score_age_s is not None
             and last_ml_score_age_s > stall_seconds,
+            "ml_failure_auto_stop": await _ml_failure_auto_stop(),
         }
 
         # Sentinel's own MJPEG probe (same signal /readyz uses), not the printer's
@@ -505,6 +518,7 @@ def make_router(
             ml_score_threshold = body.get("ml_score_threshold")
             ml_poll_interval_seconds = body.get("ml_poll_interval_seconds")
             detection_warmup_seconds = body.get("detection_warmup_seconds")
+            ml_failure_auto_stop = body.get("ml_failure_auto_stop")
 
             new_ip: str | None = None
             if printer_ip is not None:
@@ -565,6 +579,14 @@ def make_router(
                         f"{DETECTION_WARMUP_MAX_SECONDS} seconds",
                     )
                 writes["detection_warmup_seconds"] = str(detection_warmup_seconds_val)
+
+            if ml_failure_auto_stop is not None:
+                # Strict bool: int("false") style coercion would turn "false" into True.
+                if not isinstance(ml_failure_auto_stop, bool):
+                    raise HTTPException(
+                        status_code=400, detail="ml_failure_auto_stop must be true or false"
+                    )
+                writes["ml_failure_auto_stop"] = "true" if ml_failure_auto_stop else "false"
 
             # All fields are valid: apply.
             if new_ip is not None:

@@ -118,6 +118,7 @@ Only `PRINTER_IP` is required. Everything else has a sane default.
 | `DETECTION_ENABLED_DEFAULT` | `true` | Initial detection state — can be toggled at runtime via bot |
 | `WATCHER_STALL_SECONDS` | `60` | Heartbeat age that triggers a stall alert (minimum 10; lower non-negative values are raised to 10 with a warning; raised automatically for long poll intervals) |
 | `AUTO_STOP_TIMEOUT_SECONDS` | `0` | Auto-stop the print after this many seconds of being paused by Sentinel (0 to disable). Must be 0 or >= 60. |
+| `ML_FAILURE_AUTO_STOP` | `false` | Whether a pause caused only by the ML service being down (fail-closed) counts toward `AUTO_STOP_TIMEOUT_SECONDS`. Off by default: an ML outage is not evidence the print failed, and a stop is irreversible. Overridable at runtime from the dashboard settings tab. |
 | `RESUME_COOLDOWN_SECONDS` | `5` | Minimum seconds between consecutive resumes |
 
 ### Notifications (general)

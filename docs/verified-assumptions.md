@@ -177,6 +177,13 @@ silence; Sentinel opens a fresh registered session per command) and a
 subscription to `api_status` on the command session (Sentinel's separate
 status listener covers it).
 
+**Open question: client-slot capacity.** Sentinel registers fresh ids on every
+command, so how many registrations the firmware keeps, whether a repeated id pair is
+accepted, and how long a refused slot takes to free up are unmeasured. Run
+`python -m sentinel.diagnostics mqtt-slots` against the printer to measure them (registration
+only, no print command; see `docs/troubleshooting.md`, "MQTT client slots exhausted") and
+record the results here.
+
 **Terminal print states.** `print_status.state` is Klipper's string:
 `standby | printing | paused | complete | cancelled | error`. The value is
 `complete`, not `completed`; the watcher now accepts both and falls back to

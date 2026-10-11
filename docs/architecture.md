@@ -126,14 +126,22 @@ printer with hot plastic in it.
 - **Fail closed on ML failure.** After `ML_CONSECUTIVE_FAILURE_THRESHOLD`
   consecutive ML errors, the printer is paused rather than left unwatched. The
   attempt is recorded in `pause_history` with source `ml_failure`.
+- **An ML outage never leads to a stop by default.** The watcher remembers the
+  source of each Sentinel-owned pause (`auto` detection or `ml_failure`,
+  including when a late-landing pause is adopted). Auto-stop skips `ml_failure`
+  pauses unless `ML_FAILURE_AUTO_STOP` (or the dashboard override, runtime key
+  `ml_failure_auto_stop`, read each time the check runs) is true, because the
+  ML service being down is not evidence the print failed and a stop is
+  irreversible. Such a pause stays paused until the operator resumes or stops it.
 - **Retries are silent, alerts are not.** When a pause keeps failing, the
   command is retried every tick but the operator is alerted once per episode,
   with one snapshot and one detection row. Every attempt is still written to
   `pause_history`.
 - **Stop is never automatic without a timeout.** `AUTO_STOP_TIMEOUT_SECONDS`
-  defaults to `0`, meaning disabled. When set, a Sentinel-initiated pause that
-  outlives it escalates to a stop, and the escalation stays eligible to retry
-  until a stop actually succeeds.
+  defaults to `0`, meaning disabled. When set, a Sentinel-initiated detection
+  pause that outlives it escalates to a stop (an `ml_failure` pause only if
+  `ML_FAILURE_AUTO_STOP` is on, see above), and the escalation stays eligible to
+  retry until a stop actually succeeds.
 - **Commands must be acknowledged, and are published once.** An unacknowledged
   command raises `PrinterCommandUnacknowledgedError` rather than reporting
   success. It is never re-published by the client's retry loop, because the

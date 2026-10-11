@@ -10,7 +10,11 @@ If auth_enabled=True:
     That authenticates the single request and creates no session; credentials
     that passed bcrypt are cached briefly (by digest) to spare repeat checks.
   - /login answers 404 when auth is disabled.
-  - POST /logout revokes the session server-side and clears the cookie.
+  - POST /logout revokes the session server-side and clears the cookie;
+    POST /logout-all (authenticated callers only) revokes every session.
+  - An unauthenticated browser fetch()/<img> request gets a JSON 401 with no
+    WWW-Authenticate header (which would trigger the native Basic popup);
+    only clients with no browser signal get the Basic challenge.
 
 Internal routes (/__internal_snapshot/*) are always exempt.
 """
@@ -54,6 +58,15 @@ logger = logging.getLogger(__name__)
 # so the 1 MB app-level limit never sees the login body. A real login form is a
 # few hundred bytes; anything larger is an unauthenticated memory-exhaustion attempt.
 _MAX_LOGIN_BODY_BYTES = 64 * 1024
+
+# Request headers only a browser sends. Their presence means the 401 must not
+# carry a Basic challenge (see AuthMiddleware._unauthenticated_response).
+_BROWSER_HEADERS = (
+    b"sec-fetch-mode",
+    b"sec-fetch-site",
+    b"sec-fetch-dest",
+    b"x-requested-with",
+)
 
 # Failed-credential rate limit: attempts per client IP per window.
 _RATE_LIMIT_ATTEMPTS = 10
@@ -265,7 +278,12 @@ class AuthMiddleware:
             await self._handle_logout(scope, receive, send, headers, token)
             return
 
+        logout_all = path == "/logout-all" and scope.get("method") == "POST"
+
         if token and self._sessions.is_valid(token):
+            if logout_all:
+                await self._handle_logout_all(scope, receive, send, headers)
+                return
             if self._sessions.needs_refresh(token):
                 await self._sessions.refresh(token)
                 send = self._with_cookie(send, self._session_cookie(scope, headers, token))
@@ -273,44 +291,69 @@ class AuthMiddleware:
             return
 
         auth_header = headers.get(b"authorization", b"").decode()
+        basic_ok = False
         if auth_header.startswith("Basic "):
             cache_key = hashlib.sha256(auth_header.encode()).digest()
             if self._basic_cache_hit(cache_key):
+                basic_ok = True
+            else:
+                client_ip = _resolve_client_ip(scope, headers, self._settings.trust_proxies)
+                if self._rate_limited(client_ip):
+                    response = Response(status_code=429, content="Too Many Requests")
+                    await response(scope, receive, send)
+                    return
+                try:
+                    decoded = base64.b64decode(auth_header[6:]).decode()
+                    username, _, password = decoded.partition(":")
+                except Exception:
+                    username = password = ""
+                if await self._check_credentials(username, password):
+                    self._auth_attempts.pop(client_ip, None)
+                    self._basic_cache_store(cache_key)
+                    basic_ok = True
+                else:
+                    await asyncio.sleep(0.5)
+        if basic_ok:
+            if logout_all:
+                await self._handle_logout_all(scope, receive, send, headers)
+            else:
                 await self._app(scope, receive, send)
-                return
-            client_ip = _resolve_client_ip(scope, headers, self._settings.trust_proxies)
-            if self._rate_limited(client_ip):
-                response = Response(status_code=429, content="Too Many Requests")
-                await response(scope, receive, send)
-                return
-            try:
-                decoded = base64.b64decode(auth_header[6:]).decode()
-                username, _, password = decoded.partition(":")
-            except Exception:
-                username = password = ""
-            if await self._check_credentials(username, password):
-                self._auth_attempts.pop(client_ip, None)
-                self._basic_cache_store(cache_key)
-                await self._app(scope, receive, send)
-                return
-            await asyncio.sleep(0.5)
+            return
 
-        # Redirect browsers to the login form; return 401 for API clients.
-        accept = headers.get(b"accept", b"").decode()
-        if "text/html" in accept:
+        await self._unauthenticated_response(scope, headers, token)(scope, receive, send)
+
+    def _unauthenticated_response(
+        self, scope: Scope, headers: dict[bytes, bytes], token: str | None
+    ) -> Response:
+        """The reply for a request with no valid session or Basic credentials.
+
+        Page navigations are sent to the login form. Anything else a browser
+        makes (fetch polling, <img> streams) gets a JSON 401 WITHOUT a
+        WWW-Authenticate header, because that header makes the browser pop up its
+        native Basic-auth dialog instead of our login page. Only clients with no
+        browser signal (curl, scripts) get the Basic challenge.
+        """
+        if "text/html" in headers.get(b"accept", b"").decode():
             qs = scope.get("query_string", b"").decode()
+            path: str = scope.get("path", "")
             next_val = f"{path}?{qs}" if qs else path
-            response = Response(
+            return Response(
                 status_code=302,
                 headers={"Location": f"/login?next={quote(next_val, safe='/')}"},
             )
-        else:
-            response = Response(
+        # A session cookie that no longer validates means a browser whose
+        # session was revoked; the Sec-Fetch-* headers cover every modern browser.
+        if token or any(name in headers for name in _BROWSER_HEADERS):
+            return Response(
                 status_code=401,
-                headers={"WWW-Authenticate": 'Basic realm="centauri-sentinel"'},
-                content="Unauthorized",
+                content='{"error":"unauthenticated","login":"/login"}',
+                media_type="application/json",
             )
-        await response(scope, receive, send)
+        return Response(
+            status_code=401,
+            headers={"WWW-Authenticate": 'Basic realm="centauri-sentinel"'},
+            content="Unauthorized",
+        )
 
     # ------------------------------------------------------------------
     # /login and /logout
@@ -397,6 +440,35 @@ class AuthMiddleware:
         else:
             response = Response(
                 content='{"status": "ok"}',
+                media_type="application/json",
+                headers={"Set-Cookie": clear},
+            )
+        await response(scope, receive, send)
+
+    async def _handle_logout_all(
+        self, scope: Scope, receive: Receive, send: Send, headers: dict[bytes, bytes]
+    ) -> None:
+        """Revoke every session. Only reached once the caller is authenticated."""
+        try:
+            revoked = await self._sessions.revoke_all()
+        except Exception:
+            # Fail closed, as /logout does: the sessions are still valid.
+            logger.exception("Logout-all failed: could not revoke sessions")
+            response = Response(
+                status_code=503,
+                content="Logout failed, please try again.",
+                media_type="text/plain",
+            )
+            await response(scope, receive, send)
+            return
+        clear = self._session_cookie(scope, headers, "", max_age=0)
+        if "text/html" in headers.get(b"accept", b"").decode():
+            response = Response(
+                status_code=303, headers={"Location": "/login", "Set-Cookie": clear}
+            )
+        else:
+            response = Response(
+                content=f'{{"status": "ok", "revoked": {revoked}}}',
                 media_type="application/json",
                 headers={"Set-Cookie": clear},
             )

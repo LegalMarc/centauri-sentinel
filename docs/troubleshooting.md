@@ -128,6 +128,45 @@ detection is confirmed.
 
 ---
 
+## MQTT client slots exhausted (`too many clients`)
+
+**Symptom:** Pause, resume or stop fail with `registration rejected: too many clients
+connected to the printer`, while status and detection still work. The printer
+touchscreen or the official app may also refuse new connections.
+
+**Cause (suspected, not yet measured):** every command opens a short MQTT session and
+registers with a fresh `client_id`/`request_id` (`PrinterClient._send_command`). If the
+firmware keeps each registration for minutes after the session closes, a burst of commands
+fills its client table and later registrations are refused until the old ones expire.
+
+**Measure it on the real printer.** Open the Coolify terminal on the `sentinel` service
+(the container has the printer's `PRINTER_IP` and `PRINTER_ACCESS_CODE`) and run, **while
+the printer is idle**:
+
+```bash
+python -m sentinel.diagnostics mqtt-slots
+python -m sentinel.diagnostics mqtt-slots --max 20 --expiry-wait 900
+```
+
+The tool registers only. It never sends pause, resume, stop or any print command, but it
+does occupy client slots until they expire, so do not run it mid-print. It prints a
+warning, a human summary and a final JSON line. In order, it:
+
+1. learns the printer serial from the status topic, as the client does;
+2. registers one id pair twice on two separate sessions and reports whether the repeat is
+   accepted (if yes, the client could reuse one id instead of consuming a slot per command);
+3. registers up to `--max` (default 12) fresh id pairs, each on its own short session that
+   disconnects after the response, and stops at the first refusal;
+4. with `--expiry-wait SECONDS` and a refusal, retries a fresh registration every 30 s
+   until one succeeds or the wait ends, and reports how long that took (resolution 30 s).
+
+Exit 0 means the measurement ran. Exit 1 means it could not (printer unreachable, wrong
+access code, no status push); the JSON line then holds an `error` field. Settings come from
+the environment, so a printer IP changed from the dashboard (stored in the database) is not
+picked up: set `PRINTER_IP` to match.
+
+---
+
 ## Watcher appears stalled (`WATCHER_STALL_SECONDS` alert fires)
 
 **Symptom:** You receive a "watcher stalled" notification. Watcher state is not updating.

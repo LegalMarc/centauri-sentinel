@@ -141,6 +141,9 @@ class Settings(BaseSettings):
     detection_enabled_default: bool = True
     watcher_stall_seconds: int = 60
     auto_stop_timeout_seconds: int = 0
+    # An ML outage is not evidence the print failed and a stop is irreversible,
+    # so a fail-closed pause does not count toward auto-stop unless opted in.
+    ml_failure_auto_stop: bool = False
     snapshot_cleanup_interval_seconds: int = 3600
     snapshot_retention_limit: int = 50
     event_retention_days: int = 0  # 0 = unlimited; otherwise prune rows older than this

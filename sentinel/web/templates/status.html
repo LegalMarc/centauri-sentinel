@@ -1182,10 +1182,26 @@ footer a {
         </dl>
       </div>
 
+      <div class="form-group form-group-full">
+        <label class="form-label" for="input-ml-failure-auto-stop">
+          <input type="checkbox" id="input-ml-failure-auto-stop" name="ml_failure_auto_stop"{% if ml_failure_auto_stop %} checked{% endif %}>
+          Count an ML-outage pause toward auto-stop
+        </label>
+        <dl class="form-help">
+          <dt>Purpose:</dt>
+          <dd>When the ML service is down, Sentinel pauses the print for safety. Off (default): that pause is never auto-stopped. On: it is cancelled after AUTO_STOP_TIMEOUT_SECONDS like a detection pause.</dd>
+        </dl>
+      </div>
+
       <div class="form-group form-group-full" style="display: flex; justify-content: flex-end; margin-top: 0.5rem;">
         <button type="submit" class="btn btn-success">💾 Save Settings</button>
       </div>
     </form>
+    {% if auth_enabled %}
+    <form method="post" action="/logout-all" style="margin-top: 1rem;">
+      <button type="submit" class="btn btn-secondary">Log out all devices</button>
+    </form>
+    {% endif %}
   </div>
 </div>
 
@@ -1249,6 +1265,18 @@ function switchTab(tabId) {
 }
 const storedTab = localStorage.getItem('sentinel_active_tab');
 if (storedTab) { switchTab(storedTab); }
+// Every fetch goes through here: a 401 means the session is gone, so go to the
+// login page (a bare 401 would leave the polling silently failing).
+function sentinelFetch(url, opts) {
+  const headers = new Headers((opts && opts.headers) || {});
+  headers.set('X-Requested-With', 'sentinel');
+  return fetch(url, { ...opts, headers }).then(res => {
+    if (res.status === 401) {
+      location.href = '/login?next=' + encodeURIComponent(location.pathname + location.search);
+    }
+    return res;
+  });
+}
 function showToast(message, type) {
   const toast = document.createElement("div");
   toast.className = `toast toast-${type}`;
@@ -1261,7 +1289,7 @@ function showToast(message, type) {
   }, 3000);
 }
 function sendControl(action) {
-  fetch(`/api/control/${action}`, { method: 'POST' })
+  sentinelFetch(`/api/control/${action}`, { method: 'POST' })
     .then(res => {
       if (res.ok) { showToast(`Print ${action} command sent successfully`, "success"); }
       else { showToast(`Failed to send ${action} command`, "danger"); }
@@ -1273,7 +1301,7 @@ function snoozeDetection() {
   const seconds = parseInt(durationSelect.value, 10);
   const text = durationSelect.options[durationSelect.selectedIndex].text;
 
-  fetch('/api/control/snooze', {
+  sentinelFetch('/api/control/snooze', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ seconds: seconds })
@@ -1297,7 +1325,7 @@ function confirmStop() {
     stopCountdown = null;
     btn.textContent = "⏹️ Stopping...";
     btn.disabled = true;
-    fetch('/api/control/stop', { method: 'POST' })
+    sentinelFetch('/api/control/stop', { method: 'POST' })
       .then(res => {
         if (res.ok) { showToast("Print stop command executed", "success"); }
         else { showToast("Failed to stop print", "danger"); resetStopButton(); }
@@ -1350,16 +1378,18 @@ function saveSettings(event) {
   const ml_confirm_count = parseInt(document.getElementById("input-ml-confirm-count").value, 10);
   const ml_poll_interval_seconds = parseInt(document.getElementById("input-ml-poll-interval").value, 10);
   const detection_warmup_seconds = parseInt(document.getElementById("input-detection-warmup").value, 10);
+  const ml_failure_auto_stop = document.getElementById("input-ml-failure-auto-stop").checked;
 
   const payload = {
     printer_ip,
     ml_score_threshold,
     ml_confirm_count,
     ml_poll_interval_seconds,
-    detection_warmup_seconds
+    detection_warmup_seconds,
+    ml_failure_auto_stop
   };
 
-  fetch('/api/settings', {
+  sentinelFetch('/api/settings', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload)
@@ -1397,6 +1427,9 @@ function formatTime(seconds) {
 }
 
 function handleCameraError() {
+  // An <img> cannot read its status code: probe the API so an expired session
+  // lands on the login page instead of a permanent "camera unavailable".
+  sentinelFetch('/api/printer').catch(() => {});
   const img = document.getElementById("camera-feed-img");
   const placeholder = document.getElementById("camera-offline-placeholder");
   if (img && placeholder) {
@@ -1406,7 +1439,7 @@ function handleCameraError() {
 }
 
 function updateLiveStats() {
-  fetch('/api/printer')
+  sentinelFetch('/api/printer')
     .then(res => {
       if (!res.ok) throw new Error("Failed to fetch printer status");
       return res.json();
@@ -1629,7 +1662,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const btn = document.getElementById("btn-clear-data");
     btn.disabled = true;
     btn.textContent = "🗑️ Clearing...";
-    fetch('/api/data/clear', { method: 'DELETE' })
+    sentinelFetch('/api/data/clear', { method: 'DELETE' })
       .then(res => {
         if (res.ok) {
           showToast("All history cleared successfully", "success");

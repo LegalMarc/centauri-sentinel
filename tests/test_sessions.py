@@ -197,3 +197,45 @@ async def test_load_enforces_max_sessions(db_path: str, monkeypatch: pytest.Monk
     assert reloaded.is_valid(tokens[2])
     assert len(await db.list_auth_sessions()) == 2  # the row was deleted too
     await db.close()
+
+
+async def test_revoke_all_clears_memory_and_database(db_path: str) -> None:
+    db = await _open(db_path)
+    store = SessionStore(FP, db)
+    tokens = [await store.create() for _ in range(3)]
+
+    assert await store.revoke_all() == 3
+
+    assert not any(store.is_valid(t) for t in tokens)
+    assert await db.list_auth_sessions() == []
+    await db.close()
+
+    db = await _open(db_path)
+    reloaded = SessionStore(FP, db)
+    await reloaded.load()
+    assert not any(reloaded.is_valid(t) for t in tokens)
+    await db.close()
+
+
+async def test_revoke_all_memory_only_store() -> None:
+    store = SessionStore(FP)
+    token = await store.create()
+    assert await store.revoke_all() == 1
+    assert not store.is_valid(token)
+    assert await store.revoke_all() == 0
+
+
+async def test_revoke_all_db_failure_keeps_sessions(db_path: str) -> None:
+    db = await _open(db_path)
+    store = SessionStore(FP, db)
+    token = await store.create()
+
+    async def boom() -> int:
+        raise OSError("db is down")
+
+    db.delete_all_auth_sessions = boom  # type: ignore[method-assign]
+    with pytest.raises(OSError):
+        await store.revoke_all()
+
+    assert store.is_valid(token)  # fail closed: still valid in both places
+    await db.close()

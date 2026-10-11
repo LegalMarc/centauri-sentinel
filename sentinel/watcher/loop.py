@@ -114,6 +114,9 @@ class WatcherLoop:
         self._current_filename: str | None = None
         self._paused_since: datetime | None = None
         self._paused_by_sentinel: bool = False
+        # pause_history source of the current Sentinel-owned pause ("auto" detection
+        # or "ml_failure"); only meaningful while _paused_by_sentinel is True.
+        self._pause_source: str = "auto"
         self._auto_stop_notified: bool = False
         self._alerted_new_print: bool = False
         self._last_heartbeat_time = 0.0
@@ -466,7 +469,11 @@ class WatcherLoop:
                     except (ValueError, TypeError):
                         auto_stop_timeout = 0
 
-                    if auto_stop_timeout > 0 and pause_duration > auto_stop_timeout:
+                    if (
+                        auto_stop_timeout > 0
+                        and pause_duration > auto_stop_timeout
+                        and await self._auto_stop_allowed()
+                    ):
                         if not self._auto_stop_notified:
                             logger.warning(
                                 "Auto-stop timeout reached (%.0f s) — "
@@ -714,7 +721,7 @@ class WatcherLoop:
                             "Printer reports paused after an unconfirmed Sentinel pause — "
                             "treating it as our pause, not an external one"
                         )
-                        self._mark_paused_by_sentinel()
+                        self._mark_paused_by_sentinel(unknown_source)
                         self._reset_detection_episode()
                         await self._record_pause_row(unknown_source, True)
                     else:
@@ -796,7 +803,7 @@ class WatcherLoop:
                         "🚨 Sentinel ML service is failing continuously. "
                         "Pausing printer for safety."
                     )
-                outcome = await self._publish_pause(verify_on_error=True)
+                outcome = await self._publish_pause(source="ml_failure", verify_on_error=True)
                 await self._record_pause_row("ml_failure", outcome == "ok")
                 if outcome == "unacknowledged":
                     self._pause_outcome_unknown = ("ml_failure", time.monotonic())
@@ -852,7 +859,7 @@ class WatcherLoop:
             self._pause_failure_alerted = False
 
     async def _publish_pause(
-        self, *, verify_on_error: bool = False
+        self, *, source: str = "auto", verify_on_error: bool = False
     ) -> Literal["ok", "debounced", "failed", "unacknowledged"]:
         """Publish a pause and, on success, move to PAUSED. The only place the
         watcher sends a pause command (detection and ML fail-closed both use it).
@@ -871,7 +878,9 @@ class WatcherLoop:
         "unacknowledged" arms the late-pause adoption marker. With
         verify_on_error, a raised command is followed by a live status check and
         counts as "ok" if the printer is in fact paused (the ML fail-closed path,
-        which has no detection to retry).
+        which has no detection to retry). *source* is the pause_history source
+        ("auto" or "ml_failure") recorded on the Sentinel-owned pause, which decides
+        whether auto-stop may escalate it.
         """
 
         async def _publish() -> None:
@@ -896,7 +905,7 @@ class WatcherLoop:
             if not inner.done():
                 await asyncio.wait({inner}, timeout=_PAUSE_PUBLISH_CANCEL_WAIT_SECONDS)
             if inner.done() and not inner.cancelled() and inner.exception() is None:
-                self._mark_paused_by_sentinel()
+                self._mark_paused_by_sentinel(source)
             else:
                 logger.critical("Watcher cancelled before printer pause completed")
             raise
@@ -921,7 +930,7 @@ class WatcherLoop:
 
             if printer_is_paused:
                 logger.info("Debounced pause: printer confirmed paused — transitioning PAUSED")
-                self._mark_paused_by_sentinel()
+                self._mark_paused_by_sentinel(source)
                 return "ok"
             logger.warning(
                 "Debounced pause: printer still printing — staying ARMED, will retry next tick"
@@ -935,7 +944,7 @@ class WatcherLoop:
                 try:
                     live_status = await self._printer.status()
                     if live_status.print_state == "paused":
-                        self._mark_paused_by_sentinel()
+                        self._mark_paused_by_sentinel(source)
                         return "ok"
                 except Exception:
                     logger.warning(
@@ -946,14 +955,26 @@ class WatcherLoop:
                 return "unacknowledged"
             return "failed"
 
-        self._mark_paused_by_sentinel()
+        self._mark_paused_by_sentinel(source)
         return "ok"
 
-    def _mark_paused_by_sentinel(self) -> None:
+    def _mark_paused_by_sentinel(self, source: str = "auto") -> None:
         self.state = WatcherState.PAUSED
         self._paused_since = datetime.now(tz=UTC)
         self._paused_by_sentinel = True
+        self._pause_source = source
         self._pause_outcome_unknown = None
+
+    async def _auto_stop_allowed(self) -> bool:
+        """False for an ML-outage pause unless the operator opted in to stopping on it.
+
+        The runtime setting is read each time so a dashboard change applies at once.
+        """
+        if self._pause_source != "ml_failure":
+            return True
+        default = bool(getattr(self._settings, "ml_failure_auto_stop", False))
+        raw = await self._db.get_setting("ml_failure_auto_stop", str(default).lower())
+        return raw == "true"
 
     async def _record_pause_row(self, source: str, ok: bool) -> None:
         try:

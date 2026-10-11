@@ -2685,3 +2685,314 @@ async def test_status_page_tick_age_stale_uses_effective_threshold(
     assert healthy.status_code == 200
     assert stale.status_code == 200
     assert healthy.text != stale.text
+
+
+# ---------------------------------------------------------------------------
+# Unauthenticated browser requests must never trigger the native Basic popup
+# ---------------------------------------------------------------------------
+
+_BROWSER_SIGNALS = [
+    {"Sec-Fetch-Mode": "cors"},
+    {"Sec-Fetch-Site": "same-origin"},
+    {"Sec-Fetch-Dest": "image"},
+    {"X-Requested-With": "sentinel"},
+]
+
+
+@pytest.mark.parametrize("signal", _BROWSER_SIGNALS)
+async def test_unauthenticated_browser_fetch_gets_json_401_without_challenge(
+    auth_app: object, signal: dict[str, str]
+) -> None:
+    async with _client(auth_app) as c:
+        r = await c.get("/api/printer", headers=signal)
+    assert r.status_code == 401
+    assert "www-authenticate" not in r.headers
+    assert r.headers["content-type"].startswith("application/json")
+    assert r.json() == {"error": "unauthenticated", "login": "/login"}
+
+
+@pytest.mark.parametrize("path", ["/stream", "/snapshot"])
+async def test_unauthenticated_image_request_gets_no_basic_popup(
+    auth_app: object, path: str
+) -> None:
+    async with _client(auth_app) as c:
+        r = await c.get(
+            path,
+            headers={"Sec-Fetch-Dest": "image", "Sec-Fetch-Mode": "no-cors", "Accept": "image/*"},
+        )
+    assert r.status_code == 401
+    assert "www-authenticate" not in r.headers
+
+
+async def test_stale_session_cookie_gets_json_401_without_challenge(auth_app: object) -> None:
+    """A revoked session's cookie marks the client as a browser even with no Sec-Fetch headers."""
+    async with _client(auth_app) as c:
+        await _login(c)
+        cookie = c.cookies.get("sentinel_session")
+        await c.post("/logout")
+    async with _client(auth_app) as c2:
+        c2.cookies.set("sentinel_session", cookie)
+        r = await c2.get("/api/printer")
+    assert r.status_code == 401
+    assert "www-authenticate" not in r.headers
+    assert r.json()["login"] == "/login"
+
+
+async def test_unauthenticated_script_still_gets_basic_challenge(auth_app: object) -> None:
+    async with _client(auth_app) as c:
+        r = await c.get("/api/printer", headers={"Accept": "application/json"})
+    assert r.status_code == 401
+    assert r.headers["www-authenticate"].startswith("Basic")
+
+
+async def test_top_level_navigation_still_redirects_to_login(auth_app: object) -> None:
+    async with _client(auth_app) as c:
+        r = await c.get(
+            "/?tab=settings",
+            headers={
+                "Accept": "text/html,application/xhtml+xml",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Dest": "document",
+            },
+            follow_redirects=False,
+        )
+    assert r.status_code == 302
+    assert r.headers["location"] == "/login?next=/%3Ftab%3Dsettings"
+
+
+async def test_wrong_basic_credentials_from_browser_get_no_challenge(auth_app: object) -> None:
+    async with _client(auth_app) as c:
+        r = await c.get("/api/printer", auth=("admin", "wrong"), headers={"Sec-Fetch-Mode": "cors"})
+    assert r.status_code == 401
+    assert "www-authenticate" not in r.headers
+
+
+async def test_browser_signals_do_not_block_valid_session(auth_app: object) -> None:
+    async with _client(auth_app) as c:
+        await _login(c)
+        r = await c.get("/api/printer", headers={"Sec-Fetch-Mode": "cors"})
+    assert r.status_code == 200
+
+
+def test_dashboard_template_redirects_to_login_on_401() -> None:
+    """The page's fetch wrapper and the camera <img> probe both go through sentinelFetch."""
+    from pathlib import Path
+
+    import sentinel.web as web_pkg
+
+    html = (Path(web_pkg.__file__).parent / "templates" / "status.html").read_text()
+    assert "function sentinelFetch" in html
+    assert "res.status === 401" in html
+    assert "'/login?next=' + encodeURIComponent(location.pathname + location.search)" in html
+    # Every network call uses the wrapper; the only raw fetch() is inside it.
+    import re
+
+    assert len(re.findall(r"(?<![A-Za-z])fetch\(", html)) == 1
+    handler = html[html.index("function handleCameraError") :]
+    assert "sentinelFetch('/api/printer')" in handler.split("function updateLiveStats")[0]
+
+
+# ---------------------------------------------------------------------------
+# POST /logout-all
+# ---------------------------------------------------------------------------
+
+
+async def test_logout_all_revokes_every_session(auth_app: object) -> None:
+    async with _client(auth_app) as laptop, _client(auth_app) as phone:
+        await _login(laptop)
+        await _login(phone)
+        phone_cookie = phone.cookies.get("sentinel_session")
+        assert (await phone.get("/api/printer")).status_code == 200
+
+        r = await laptop.post("/logout-all")
+        assert r.status_code == 200
+        assert r.json() == {"status": "ok", "revoked": 2}
+        set_cookie = r.headers.get("set-cookie", "")
+        assert "sentinel_session=" in set_cookie
+        assert "max-age=0" in set_cookie.lower()
+
+        # The other browser's cookie no longer works, nor does a replayed copy.
+        assert (await phone.get("/api/printer")).status_code == 401
+    async with _client(auth_app) as replay:
+        replay.cookies.set("sentinel_session", phone_cookie)
+        assert (await replay.get("/api/printer")).status_code == 401
+
+
+async def test_logout_all_form_redirects_browser_to_login(auth_app: object) -> None:
+    async with _client(auth_app) as c:
+        await _login(c)
+        r = await c.post("/logout-all", headers={"Accept": "text/html"}, follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"] == "/login"
+    assert "max-age=0" in r.headers["set-cookie"].lower()
+
+
+async def test_logout_all_with_basic_auth_revokes_sessions(auth_app: object) -> None:
+    async with _client(auth_app) as browser, _client(auth_app) as script:
+        await _login(browser)
+        r = await script.post("/logout-all", auth=("admin", "testpass"))
+        assert r.status_code == 200
+        assert r.json() == {"status": "ok", "revoked": 1}
+        assert (await browser.get("/api/printer")).status_code == 401
+
+
+async def test_logout_all_requires_authentication(auth_app: object) -> None:
+    async with _client(auth_app) as victim, _client(auth_app) as anon:
+        await _login(victim)
+        r = await anon.post("/logout-all")
+        assert r.status_code == 401
+        assert r.headers["www-authenticate"].startswith("Basic")
+        r = await anon.post("/logout-all", auth=("admin", "wrong"))
+        assert r.status_code == 401
+        # Nobody was signed out by the unauthenticated attempts.
+        assert (await victim.get("/api/printer")).status_code == 200
+
+
+async def test_logout_all_enforces_csrf_origin(auth_app: object) -> None:
+    async with _client(auth_app) as c:
+        await _login(c)
+        r = await c.post("/logout-all", headers={"Origin": "http://evil.example"})
+        assert r.status_code == 403
+        assert (await c.get("/api/printer")).status_code == 200
+
+
+async def test_logout_all_get_does_not_revoke(auth_app: object) -> None:
+    async with _client(auth_app) as c:
+        await _login(c)
+        r = await c.get("/logout-all")
+        assert r.status_code in (404, 405)
+        assert (await c.get("/api/printer")).status_code == 200
+
+
+async def test_logout_all_is_404_when_auth_disabled(app: object) -> None:
+    async with _client(app) as c:
+        r = await c.post("/logout-all")
+    assert r.status_code == 404
+
+
+async def test_logout_all_failure_returns_503_and_keeps_sessions(
+    auth_app: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def failing_revoke_all(self: object) -> int:
+        raise OSError("db is down")
+
+    async with _client(auth_app) as c:
+        await _login(c)
+        monkeypatch.setattr("sentinel.web.sessions.SessionStore.revoke_all", failing_revoke_all)
+        r = await c.post("/logout-all", headers={"Accept": "text/html"}, follow_redirects=False)
+        assert r.status_code == 503
+        assert "set-cookie" not in r.headers
+        assert (await c.get("/api/printer")).status_code == 200
+
+
+async def test_dashboard_shows_logout_all_button_only_with_auth(
+    app: object, auth_app: object
+) -> None:
+    async with _client(auth_app) as c:
+        await _login(c)
+        r = await c.get("/")
+    assert 'action="/logout-all"' in r.text
+    async with _client(app) as c:
+        r = await c.get("/")
+    assert 'action="/logout-all"' not in r.text
+
+
+# ---------------------------------------------------------------------------
+# ml_failure_auto_stop setting
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("stored", "config", "expected"),
+    [(None, False, False), (None, True, True), ("true", False, True), ("false", True, False)],
+)
+async def test_api_printer_reports_ml_failure_auto_stop(
+    mock_db: AsyncMock,
+    mock_watcher: MagicMock,
+    mock_camera: AsyncMock,
+    stored: str | None,
+    config: bool,
+    expected: bool,
+) -> None:
+    mock_db.get_setting.side_effect = lambda key, default=None: (
+        stored if key == "ml_failure_auto_stop" and stored is not None else default
+    )
+    app_state = create_app(
+        _base_settings(ml_failure_auto_stop=config),
+        db=mock_db,
+        watcher=mock_watcher,
+        camera=mock_camera,
+    )
+    async with _client(app_state) as c:
+        r = await c.get("/api/printer")
+    assert r.json()["ml_failure_auto_stop"] is expected
+
+
+@pytest.mark.parametrize(("stored", "checked"), [("true", True), ("false", False)])
+async def test_status_page_checkbox_reflects_ml_failure_auto_stop(
+    mock_db: AsyncMock,
+    mock_watcher: MagicMock,
+    mock_camera: AsyncMock,
+    stored: str,
+    checked: bool,
+) -> None:
+    mock_db.get_setting.side_effect = lambda key, default=None: (
+        stored if key == "ml_failure_auto_stop" else default
+    )
+    app_state = create_app(_base_settings(), db=mock_db, watcher=mock_watcher, camera=mock_camera)
+    async with _client(app_state) as c:
+        r = await c.get("/")
+    assert r.status_code == 200
+    tag = r.text[r.text.index('id="input-ml-failure-auto-stop"') :].split(">")[0]
+    assert ("checked" in tag) is checked
+
+
+@pytest.mark.parametrize(("sent", "stored"), [(True, "true"), (False, "false")])
+async def test_post_settings_ml_failure_auto_stop_round_trip(
+    mock_db: AsyncMock,
+    mock_watcher: MagicMock,
+    mock_camera: AsyncMock,
+    sent: bool,
+    stored: str,
+) -> None:
+    values: dict[str, str] = {}
+
+    async def set_setting(key: str, value: str) -> None:
+        values[key] = value
+
+    mock_db.set_setting.side_effect = set_setting
+    mock_db.get_setting.side_effect = lambda key, default=None: values.get(key, default)
+    mock_watcher.printer = AsyncMock()
+    app_state = create_app(_base_settings(), db=mock_db, watcher=mock_watcher, camera=mock_camera)
+    async with _client(app_state) as c:
+        r = await c.post("/api/settings", json={"ml_failure_auto_stop": sent})
+        assert r.status_code == 200
+        assert values == {"ml_failure_auto_stop": stored}
+        assert (await c.get("/api/printer")).json()["ml_failure_auto_stop"] is sent
+
+
+@pytest.mark.parametrize("bad", ["true", "false", 1, 0, "yes", [True]])
+async def test_post_settings_ml_failure_auto_stop_rejects_non_boolean(
+    mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: AsyncMock, bad: object
+) -> None:
+    mock_watcher.printer = AsyncMock()
+    app_state = create_app(_base_settings(), db=mock_db, watcher=mock_watcher, camera=mock_camera)
+    async with _client(app_state) as c:
+        # Paired with a valid field: validate-then-apply must write neither.
+        r = await c.post("/api/settings", json={"ml_confirm_count": 5, "ml_failure_auto_stop": bad})
+    assert r.status_code == 400
+    assert "ml_failure_auto_stop" in r.json()["detail"]
+    mock_db.set_setting.assert_not_called()
+
+
+async def test_post_settings_rejected_field_blocks_ml_failure_auto_stop(
+    mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: AsyncMock
+) -> None:
+    mock_watcher.printer = AsyncMock()
+    app_state = create_app(_base_settings(), db=mock_db, watcher=mock_watcher, camera=mock_camera)
+    async with _client(app_state) as c:
+        r = await c.post(
+            "/api/settings", json={"ml_confirm_count": 0, "ml_failure_auto_stop": True}
+        )
+    assert r.status_code == 400
+    mock_db.set_setting.assert_not_called()

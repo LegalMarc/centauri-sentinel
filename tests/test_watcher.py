@@ -3197,3 +3197,127 @@ async def test_internally_cancelled_pause_is_failed_not_a_watcher_exit() -> None
     await watcher.tick()
     assert watcher.state == WatcherState.ARMED
     assert (watcher._pause_outcome_unknown or ("",))[0] == "auto"
+
+
+# ---------------------------------------------------------------------------
+# ml_failure_auto_stop: an ML-outage pause does not auto-stop unless opted in
+# ---------------------------------------------------------------------------
+
+
+def _auto_stop_settings(**overrides: Any) -> Settings:
+    fields: dict[str, Any] = {
+        "printer_ip": "10.0.0.1",
+        "printer_access_code": "test",
+        "detection_warmup_seconds": 0,
+        "ml_consecutive_failure_threshold": 1,
+        "ml_confirm_count": 1,
+        "ml_score_threshold": 0.4,
+        "watcher_stall_seconds": 60,
+        "resume_cooldown_seconds": 0,
+        "auto_stop_timeout_seconds": 60,
+    }
+    fields.update(overrides)
+    return Settings(**fields)
+
+
+async def _ml_failure_paused_watcher(
+    settings: Settings,
+) -> tuple[WatcherLoop, MagicMock, Database]:
+    """A watcher paused by the ML fail-closed path, with the pause already past the timeout."""
+    watcher, printer, _camera, ml, db = await _make_watcher(
+        settings=settings, printer_status=_printing_status()
+    )
+    ml.detect = AsyncMock(return_value=MlResult(score=0.0, error=True))
+    await watcher.tick()
+    assert watcher.state == WatcherState.PAUSED
+    assert watcher._pause_source == "ml_failure"
+    watcher._paused_since = datetime.now(tz=UTC) - timedelta(seconds=120)
+    printer.status = AsyncMock(return_value=_paused_status())
+    return watcher, printer, db
+
+
+async def test_ml_failure_pause_is_not_auto_stopped_by_default() -> None:
+    watcher, printer, _db = await _ml_failure_paused_watcher(_auto_stop_settings())
+
+    await watcher._tick()
+    await watcher._tick()
+
+    printer.stop.assert_not_called()
+    watcher._dispatcher.dispatch_text.assert_called_once()  # only the fail-closed alert
+    assert watcher._paused_by_sentinel is True  # still ours, just not stop-eligible
+
+
+async def test_ml_failure_pause_auto_stops_when_runtime_setting_enabled() -> None:
+    watcher, printer, db = await _ml_failure_paused_watcher(_auto_stop_settings())
+    await db.set_setting("ml_failure_auto_stop", "true")
+
+    await watcher._tick()
+
+    printer.stop.assert_called_once()
+    assert watcher._paused_by_sentinel is False
+
+
+async def test_ml_failure_pause_auto_stops_when_config_enabled() -> None:
+    watcher, printer, _db = await _ml_failure_paused_watcher(
+        _auto_stop_settings(ml_failure_auto_stop=True)
+    )
+
+    await watcher._tick()
+
+    printer.stop.assert_called_once()
+
+
+async def test_ml_failure_runtime_setting_overrides_config_and_applies_live() -> None:
+    watcher, printer, db = await _ml_failure_paused_watcher(
+        _auto_stop_settings(ml_failure_auto_stop=True)
+    )
+    await db.set_setting("ml_failure_auto_stop", "false")
+    await watcher._tick()
+    printer.stop.assert_not_called()
+
+    # Flipped on the dashboard while the pause is already in progress.
+    await db.set_setting("ml_failure_auto_stop", "true")
+    await watcher._tick()
+    printer.stop.assert_called_once()
+
+
+async def test_detection_pause_still_auto_stops_with_ml_failure_default() -> None:
+    watcher, printer, _camera, _ml, _db = await _make_watcher(
+        settings=_auto_stop_settings(), printer_status=_printing_status(), ml_score=0.9
+    )
+    await watcher.tick()
+    assert watcher.state == WatcherState.PAUSED
+    assert watcher._pause_source == "auto"
+    watcher._paused_since = datetime.now(tz=UTC) - timedelta(seconds=120)
+    printer.status = AsyncMock(return_value=_paused_status())
+
+    await watcher._tick()
+
+    printer.stop.assert_called_once()
+
+
+@pytest.mark.parametrize(("source", "stops"), [("ml_failure", False), ("auto", True)])
+async def test_adopted_late_pause_keeps_its_source_for_auto_stop(source: str, stops: bool) -> None:
+    """An unacknowledged pause that lands late is adopted with the source it was sent for."""
+    from sentinel.printer.errors import PrinterCommandUnacknowledgedError
+
+    watcher, printer, _camera, ml, _db = await _make_watcher(
+        settings=_auto_stop_settings(),
+        printer_status=_printing_status(),
+        ml_score=0.9,
+    )
+    if source == "ml_failure":
+        ml.detect = AsyncMock(return_value=MlResult(score=0.0, error=True))
+    printer.pause = AsyncMock(side_effect=PrinterCommandUnacknowledgedError("no ack"))
+    await watcher.tick()
+    assert (watcher._pause_outcome_unknown or ("",))[0] == source
+
+    printer.status = AsyncMock(return_value=_paused_status())
+    await watcher.tick()
+    assert watcher.state == WatcherState.PAUSED
+    assert watcher._paused_by_sentinel is True
+    assert watcher._pause_source == source
+
+    watcher._paused_since = datetime.now(tz=UTC) - timedelta(seconds=120)
+    await watcher._tick()
+    assert (printer.stop.call_count == 1) is stops

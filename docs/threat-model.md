@@ -32,8 +32,20 @@ stored, in the `auth_sessions` table, so a copied database cannot be replayed as
   is re-issued with a 400-day `Max-Age` (the browser maximum) at most once a day while in use,
   so an active browser stays signed in indefinitely. A session unused for 400 days is pruned.
 - **Revocation.** Log out deletes the session row, so the cookie stops working everywhere, not
-  just in the browser that clicked the button. Changing `AUTH_USERNAME` or the password signs
-  every session out at the next restart.
+  just in the browser that clicked the button. **Log out all devices** (button on the settings
+  tab, `POST /logout-all`) deletes every session row at once. It requires a valid session or
+  Basic credentials, applies the same CSRF origin check as other POSTs, answers 303 to `/login`
+  for browsers or `{"status":"ok","revoked":N}` otherwise, 503 if the database delete fails
+  (nothing is revoked), and 404 when auth is off. Changing `AUTH_USERNAME` or the password
+  signs every session out at the next restart.
+- **Unauthenticated responses.** A top-level navigation (`Accept: text/html`) is redirected to
+  `/login?next=...`. Any other request that looks like it came from a browser (a `Sec-Fetch-Mode`,
+  `Sec-Fetch-Site` or `Sec-Fetch-Dest` header, `X-Requested-With`, or a `sentinel_session`
+  cookie that no longer validates) gets `401` with JSON `{"error":"unauthenticated","login":"/login"}`
+  and no `WWW-Authenticate` header, so the dashboard's background `fetch()` polling and its
+  `<img>` requests to `/stream` and `/snapshot` can never raise the browser's native Basic-auth
+  popup. The dashboard's fetch wrapper turns that 401 into a redirect to `/login`. Only clients
+  with none of those signals (curl, scripts) receive `401` with the `Basic` challenge.
 - **Scripts.** Non-browser clients may send HTTP Basic credentials on each request. That
   authenticates the one request and creates no session. Credentials that passed the bcrypt
   check are cached for 60 seconds (64 entries, keyed by the SHA-256 of the `Authorization`
@@ -48,8 +60,8 @@ stored, in the `auth_sessions` table, so a copied database cannot be replayed as
   (`auto` adds it when the request arrived over HTTPS).
 
 Accepted risk: a long-lived session on a lost or shared device stays valid until it is logged
-out from that device or the password is rotated. There is no "log out everywhere" button yet;
-rotating the password is the way to revoke all sessions.
+out, **Log out all devices** is used from another signed-in browser, or the password is rotated.
+There is no per-session list yet.
 
 **Safety guard:** If `EXTERNAL_BIND_ALLOWED` is `false` (default) and the service detects it
 is reachable on a non-loopback interface without auth configured, it refuses to start. This
@@ -150,6 +162,6 @@ To protect user privacy and limit disk space consumption, the system enforces th
 ## v0.2 candidates
 
 - Add ML-reachability ping to `/readyz`.
-- "Log out all devices" button and a session list on the dashboard.
+- A session list on the dashboard (revoke one device instead of all).
 - Audit log: record all bot commands and who sent them to the database.
 - Evaluate MQTT 5 TLS for Carbon 2 when firmware support lands.

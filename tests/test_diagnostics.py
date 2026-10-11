@@ -1,0 +1,360 @@
+"""Tests for sentinel/diagnostics.py (the mqtt-slots client-slot probe).
+
+A fake broker stands in for the printer: it accepts a fixed number of distinct
+client registrations, then answers "too many clients", mirroring the firmware
+behaviour the tool is meant to measure. No real MQTT connection is made.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import aiomqtt
+import pytest
+
+from sentinel import diagnostics
+from sentinel.config import Settings
+
+_SETTINGS = Settings(printer_ip="10.0.0.1", printer_access_code="secret")
+_SERIAL = "F0113TEST"
+
+
+def _message(topic: str, payload: dict[str, Any]) -> MagicMock:
+    msg = MagicMock()
+    msg.topic = topic
+    msg.payload = json.dumps(payload).encode()
+    return msg
+
+
+class _FakeBroker:
+    """Printer stand-in shared by every session opened through ``aiomqtt.Client``."""
+
+    def __init__(
+        self,
+        *,
+        capacity: int = 3,
+        accept_reused_ids: bool = True,
+        free_after_rejections: int | None = None,
+        register_error: str | None = None,
+        drop_register: bool = False,
+        connect_error: Exception | None = None,
+    ) -> None:
+        self.capacity = capacity
+        self.accept_reused_ids = accept_reused_ids
+        self.free_after_rejections = free_after_rejections
+        self.register_error = register_error
+        self.drop_register = drop_register
+        self.connect_error = connect_error
+        self.slots: set[str] = set()
+        self.rejections = 0
+        self.sessions = 0
+        self.disconnects = 0
+        self.published: list[tuple[str, dict[str, Any]]] = []
+        self.identifiers: list[str] = []
+
+    def client(self, **kwargs: Any) -> _FakeSession:
+        self.identifiers.append(kwargs["identifier"])
+        return _FakeSession(self)
+
+    def register_answer(self, client_id: str) -> str:
+        if self.register_error is not None:
+            return self.register_error
+        if client_id in self.slots:
+            return "ok" if self.accept_reused_ids else "fail"
+        if len(self.slots) >= self.capacity:
+            self.rejections += 1
+            if (
+                self.free_after_rejections is not None
+                and self.rejections >= self.free_after_rejections
+            ):
+                self.slots.clear()  # the registrations expired
+            return "too many clients"
+        self.slots.add(client_id)
+        return "ok"
+
+
+class _FakeSession:
+    def __init__(self, broker: _FakeBroker) -> None:
+        self._broker = broker
+        self._queue: list[MagicMock] = []
+        self.subscribed: list[str] = []
+
+    async def __aenter__(self) -> _FakeSession:
+        if self._broker.connect_error is not None:
+            raise self._broker.connect_error
+        self._broker.sessions += 1
+        return self
+
+    async def __aexit__(self, *exc: object) -> bool:
+        self._broker.disconnects += 1
+        return False
+
+    async def subscribe(self, topic: str) -> None:
+        self.subscribed.append(topic)
+        if topic == "elegoo/+/api_status":
+            self._queue.append(
+                _message(f"elegoo/{_SERIAL}/api_status", {"method": 6000, "result": {}})
+            )
+
+    async def publish(self, topic: str, payload_str: str) -> None:
+        payload = json.loads(payload_str)
+        self._broker.published.append((topic, payload))
+        if topic.endswith("/api_register") and not self._broker.drop_register:
+            sn, request_id = topic.split("/")[1], payload["request_id"]
+            self._queue.append(
+                _message(
+                    f"elegoo/{sn}/{request_id}/register_response",
+                    {
+                        "client_id": payload["client_id"],
+                        "error": self._broker.register_answer(payload["client_id"]),
+                    },
+                )
+            )
+
+    @property
+    def messages(self) -> _FakeSession:
+        return self
+
+    def __aiter__(self) -> _FakeSession:
+        return self
+
+    async def __anext__(self) -> MagicMock:
+        while not self._queue:
+            await asyncio.sleep(0.005)
+        return self._queue.pop(0)
+
+
+def _patched(broker: _FakeBroker) -> Any:
+    return patch("sentinel.diagnostics.aiomqtt.Client", side_effect=broker.client)
+
+
+@pytest.fixture(autouse=True)
+def _fast(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(diagnostics, "_EXPIRY_POLL_S", 0.01)
+    monkeypatch.setattr(diagnostics, "CC2_REGISTRATION_TIMEOUT_S", 0.05)
+
+
+# ---------------------------------------------------------------------------
+# Building blocks
+# ---------------------------------------------------------------------------
+
+
+async def test_discover_serial_reads_status_topic() -> None:
+    broker = _FakeBroker()
+    with _patched(broker):
+        serial = await diagnostics.discover_serial("10.0.0.1", 1883, "secret")
+    assert serial == _SERIAL
+    assert broker.published == []  # listening only
+
+
+async def test_discover_serial_times_out_without_status_push(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(diagnostics, "_SERIAL_TIMEOUT_S", 0.05)
+    broker = _FakeBroker()
+    session = _FakeSession(broker)
+    session.subscribe = AsyncMock()  # type: ignore[method-assign]
+    with (
+        patch("sentinel.diagnostics.aiomqtt.Client", return_value=session),
+        pytest.raises(Exception, match="no status push"),
+    ):
+        await diagnostics.discover_serial("10.0.0.1", 1883, "secret")
+
+
+@pytest.mark.parametrize(
+    ("broker_kwargs", "outcome"),
+    [
+        ({}, "ok"),
+        ({"capacity": 0}, "too many clients"),
+        ({"register_error": "fail"}, "fail"),
+        ({"drop_register": True}, "timeout"),
+        ({"connect_error": aiomqtt.MqttError("refused")}, "connect_error"),
+        ({"connect_error": OSError("unreachable")}, "connect_error"),
+    ],
+)
+async def test_register_once_classifies_every_answer(
+    broker_kwargs: dict[str, Any], outcome: str
+) -> None:
+    broker = _FakeBroker(**broker_kwargs)
+    reader = diagnostics.PrinterClient(_SETTINGS)
+    with _patched(broker):
+        result = await diagnostics.register_once(
+            "10.0.0.1", 1883, "secret", _SERIAL, "0cliabc123", "req1", reader=reader, t0=0.0
+        )
+    assert result.outcome == outcome
+    assert result.ok is (outcome == "ok")
+    if outcome == "fail":
+        assert "'fail'" in result.detail
+
+
+async def test_register_once_mirrors_the_clients_registration_session() -> None:
+    broker = _FakeBroker()
+    reader = diagnostics.PrinterClient(_SETTINGS)
+    with _patched(broker):
+        await diagnostics.register_once(
+            "10.0.0.1", 1883, "secret", _SERIAL, "0cliabc123", "req1", reader=reader, t0=0.0
+        )
+    assert broker.identifiers == ["0cliabc123"]
+    assert broker.published == [
+        (
+            f"elegoo/{_SERIAL}/api_register",
+            {"client_id": "0cliabc123", "request_id": "req1"},
+        )
+    ]
+    assert broker.disconnects == 1  # one short session, closed after the response
+
+
+# ---------------------------------------------------------------------------
+# The experiments
+# ---------------------------------------------------------------------------
+
+
+async def test_fresh_ids_stop_at_first_rejection() -> None:
+    broker = _FakeBroker(capacity=4)
+    with _patched(broker):
+        report = await diagnostics.run_mqtt_slots(_SETTINGS, max_registrations=12)
+
+    fresh = report["fresh"]
+    # The reuse test already holds one slot; 3 more fresh ones fit, then the refusal.
+    assert fresh["accepted_before_rejection"] == 3
+    assert fresh["rejected"] is True
+    assert fresh["rejection"]["outcome"] == "too many clients"
+    assert [r["outcome"] for r in fresh["results"]] == ["ok", "ok", "ok", "too many clients"]
+    assert len({r["client_id"] for r in fresh["results"]}) == 4  # fresh ids every time
+    assert len({r["request_id"] for r in fresh["results"]}) == 4
+    assert report["serial"] == _SERIAL
+
+
+async def test_fresh_ids_report_no_rejection_up_to_max() -> None:
+    broker = _FakeBroker(capacity=99)
+    with _patched(broker):
+        report = await diagnostics.run_mqtt_slots(_SETTINGS, max_registrations=5)
+    assert report["fresh"]["rejected"] is False
+    assert report["fresh"]["accepted_before_rejection"] == 5
+    assert len(report["fresh"]["results"]) == 5
+
+
+@pytest.mark.parametrize(
+    ("accept_reused", "verdict_start"),
+    [(True, "accepted"), (False, "rejected: fail")],
+)
+async def test_reuse_test_registers_one_pair_on_two_sessions(
+    accept_reused: bool, verdict_start: str
+) -> None:
+    broker = _FakeBroker(capacity=99, accept_reused_ids=accept_reused)
+    with _patched(broker):
+        report = await diagnostics.run_mqtt_slots(_SETTINGS, max_registrations=1)
+
+    reuse = report["reuse"]
+    assert reuse["verdict"].startswith(verdict_start)
+    assert reuse["first"]["client_id"] == reuse["second"]["client_id"]
+    assert reuse["first"]["request_id"] == reuse["second"]["request_id"]
+    assert reuse["first"]["outcome"] == "ok"
+    assert (reuse["second"]["outcome"] == "ok") is accept_reused
+
+
+async def test_reuse_is_inconclusive_when_slots_were_already_full() -> None:
+    broker = _FakeBroker(capacity=0)
+    with _patched(broker):
+        report = await diagnostics.run_mqtt_slots(_SETTINGS, max_registrations=3)
+    assert report["reuse"]["verdict"].startswith("inconclusive")
+    assert report["fresh"]["accepted_before_rejection"] == 0
+
+
+async def test_expiry_wait_retries_until_a_slot_frees_up() -> None:
+    broker = _FakeBroker(capacity=2, free_after_rejections=4)
+    with _patched(broker):
+        report = await diagnostics.run_mqtt_slots(
+            _SETTINGS, max_registrations=12, expiry_wait_s=5.0
+        )
+
+    expiry = report["expiry"]
+    assert expiry["recovered"] is True
+    # Rejection 1 ends the fresh test; retries hit rejections 2-4 (the 4th frees the
+    # slots), then the fifth attempt succeeds.
+    assert expiry["attempts"] == 4
+    assert expiry["since_rejection_s"] >= 0
+    assert expiry["since_first_registration_s"] >= expiry["since_rejection_s"]
+
+
+async def test_expiry_wait_gives_up_after_the_wait() -> None:
+    broker = _FakeBroker(capacity=1)
+    with _patched(broker):
+        report = await diagnostics.run_mqtt_slots(
+            _SETTINGS, max_registrations=12, expiry_wait_s=0.1
+        )
+    expiry = report["expiry"]
+    assert expiry["recovered"] is False
+    assert expiry["attempts"] >= 1
+    assert expiry["since_rejection_s"] is None
+
+
+async def test_expiry_not_measured_without_wait_or_without_rejection() -> None:
+    broker = _FakeBroker(capacity=1)
+    with _patched(broker):
+        assert (await diagnostics.run_mqtt_slots(_SETTINGS, max_registrations=5))["expiry"] is None
+    broker = _FakeBroker(capacity=99)
+    with _patched(broker):
+        report = await diagnostics.run_mqtt_slots(_SETTINGS, max_registrations=2, expiry_wait_s=5)
+    assert report["expiry"] is None
+
+
+async def test_only_registrations_are_ever_published() -> None:
+    """The tool must never send pause/resume/stop or any command to api_request."""
+    broker = _FakeBroker(capacity=3, free_after_rejections=3)
+    with _patched(broker):
+        await diagnostics.run_mqtt_slots(_SETTINGS, max_registrations=12, expiry_wait_s=5)
+
+    assert broker.published
+    assert all(topic.endswith("/api_register") for topic, _ in broker.published)
+    assert all(set(payload) == {"client_id", "request_id"} for _, payload in broker.published)
+    assert all("method" not in payload for _, payload in broker.published)
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+
+def test_cli_prints_warning_summary_and_json_line(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PRINTER_IP", "10.0.0.1")
+    monkeypatch.setenv("PRINTER_ACCESS_CODE", "secret")
+    broker = _FakeBroker(capacity=3)
+    with _patched(broker):
+        code = diagnostics.main(["mqtt-slots", "--max", "6"])
+
+    out = capsys.readouterr().out
+    lines = out.strip().splitlines()
+    assert code == 0
+    assert lines[0].startswith("WARNING")
+    assert "Run it while the printer is idle" in out
+    assert "Fresh ids: 2 accepted, then 'too many clients'" in out
+    report = json.loads(lines[-1])
+    assert report["fresh"]["accepted_before_rejection"] == 2
+    assert report["serial"] == _SERIAL
+
+
+def test_cli_reports_failure_as_json_and_exit_code_1(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PRINTER_IP", "10.0.0.1")
+    monkeypatch.setenv("PRINTER_ACCESS_CODE", "secret")
+    broker = _FakeBroker(connect_error=OSError("unreachable"))
+    with _patched(broker):
+        code = diagnostics.main(["mqtt-slots"])
+
+    out = capsys.readouterr().out.strip().splitlines()
+    assert code == 1
+    assert out[-2].startswith("FAIL: OSError")
+    assert "error" in json.loads(out[-1])
+
+
+def test_cli_requires_a_subcommand() -> None:
+    with pytest.raises(SystemExit) as exc:
+        diagnostics.main([])
+    assert exc.value.code == 2

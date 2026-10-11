@@ -132,6 +132,13 @@ def test_auto_stop_timeout_default_is_zero() -> None:
     assert s.auto_stop_timeout_seconds == 0
 
 
+def test_ml_failure_auto_stop_defaults_off_and_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An ML outage is not evidence the print failed: auto-stop on it is opt-in."""
+    assert Settings(printer_access_code="x").ml_failure_auto_stop is False
+    monkeypatch.setenv("ML_FAILURE_AUTO_STOP", "true")
+    assert Settings(printer_access_code="x").ml_failure_auto_stop is True
+
+
 def test_db_path_default() -> None:
     s = Settings()
     assert s.db_path == "data/sentinel.db"

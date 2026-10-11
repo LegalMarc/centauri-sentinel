@@ -247,6 +247,12 @@ class Database:
         async with self._write() as db:
             await db.execute("DELETE FROM auth_sessions WHERE token_hash = ?", (token_hash,))
 
+    async def delete_all_auth_sessions(self) -> int:
+        """Delete every login session; returns the number of rows removed."""
+        async with self._write() as db:
+            cursor = await db.execute("DELETE FROM auth_sessions")
+            return cursor.rowcount
+
     async def prune_auth_sessions(self, credential_fp: str, refreshed_before: int) -> int:
         """Delete sessions from other credentials or idle since *refreshed_before*."""
         async with self._write() as db:
