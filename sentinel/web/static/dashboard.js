@@ -107,7 +107,7 @@ function render(d) {
   const printing = ps === "printing", paused = ps === "paused";
   const done = ps === "completed" || ps === "complete";
   $("job-state").textContent = d.printer_state || ps;
-  const file = d.filename || "No job loaded";
+  const file = d.filename && d.filename !== "—" ? d.filename : "No job loaded";
   $("job-file").textContent = file;
   $("job-file").title = d.filename || "";
   const progress = done ? 100 : Math.max(0, Math.min(100, Number(d.progress) || 0));
@@ -230,6 +230,7 @@ function onStop() {
   const btn = $("btn-stop"), label = $("stop-label");
   if (btn.disabled) return;
   if (stopArmed) {
+    if (Date.now() - stopArmed.at < 600) return;
     clearInterval(stopArmed.timer);
     stopArmed = null;
     btn.classList.remove("arming");
@@ -242,6 +243,7 @@ function onStop() {
   btn.classList.add("arming");
   label.textContent = `Confirm stop · ${left}`;
   stopArmed = {
+    at: Date.now(),
     timer: setInterval(() => {
       left -= 1;
       if (left <= 0) {
@@ -298,8 +300,8 @@ function validateInput(input) {
 }
 function saveSettings(event) {
   if (event) event.preventDefault();
-  const form = $("settings-form");
-  const inputs = [...form.querySelectorAll(".input")];
+  // form.elements includes the printer address, which joins via form="settings-form".
+  const inputs = [...$("settings-form").elements].filter((el) => el.classList.contains("input"));
   const allValid = inputs.map(validateInput).every(Boolean);
   if (!allValid) { toast("Fix the highlighted fields first", "warning"); return; }
   const payload = {
@@ -308,8 +310,12 @@ function saveSettings(event) {
     ml_confirm_count: parseInt($("input-ml-confirm-count").value, 10),
     ml_poll_interval_seconds: parseInt($("input-ml-poll-interval").value, 10),
     detection_warmup_seconds: parseInt($("input-detection-warmup").value, 10),
-    ml_failure_auto_stop: !!$("input-ml-failure-auto-stop").checked,
   };
+  // Without the component bundle the toggle has no state; omit the field
+  // rather than overwrite a saved "on" with false.
+  if (customElements.get("obc-toggle-switch")) {
+    payload.ml_failure_auto_stop = !!$("input-ml-failure-auto-stop").checked;
+  }
   sentinelFetch("/api/settings", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -351,7 +357,7 @@ $("btn-snooze").addEventListener("click", onSnooze);
 $("btn-clear-data").addEventListener("click", onClearHistory);
 $("btn-save").addEventListener("click", saveSettings);
 $("settings-form").addEventListener("submit", saveSettings);
-$("settings-form").querySelectorAll(".input").forEach((input) => {
+[...$("settings-form").elements].filter((el) => el.classList.contains("input")).forEach((input) => {
   input.addEventListener("blur", () => validateInput(input));
   input.addEventListener("input", () => { if (input.getAttribute("aria-invalid") === "true") validateInput(input); });
 });

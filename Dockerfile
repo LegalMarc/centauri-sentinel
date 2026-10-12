@@ -22,7 +22,7 @@ FROM node:22.23.3-bookworm-slim AS web
 WORKDIR /src/web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci --no-audit --no-fund
-COPY web/entry.js web/build.mjs web/THIRD_PARTY_LICENSE-openbridge.txt ./
+COPY web/entry.js web/build.mjs web/THIRD_PARTY_LICENSES.txt ./
 RUN node build.mjs
 
 # ---------------------------------------------------------------------------

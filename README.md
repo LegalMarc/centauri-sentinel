@@ -352,6 +352,6 @@ MIT — see [LICENSE](LICENSE).
 The `obico-ml` container is derived from the [Obico Server](https://github.com/TheSpaghettiDetective/obico-server) project, which is licensed under the GNU Affero General Public License v3.0 (AGPL-3.0). In accordance with the AGPL-3.0, the source code of the modified `ml_api` service is made available in this repository under the `docker/obico-ml/` directory.
 
 The dashboard uses the [OpenBridge](https://www.openbridge.no) web components
-(`@oicl/openbridge-webcomponents` 1.0.1, Apache-2.0, with the Noto Sans font under the SIL
-Open Font License 1.1), bundled at image build time. The license text is in
-[web/THIRD_PARTY_LICENSE-openbridge.txt](web/THIRD_PARTY_LICENSE-openbridge.txt).
+(`@oicl/openbridge-webcomponents` 1.0.1, Apache-2.0), Lit (BSD-3-Clause) and the Noto Sans
+font (SIL Open Font License 1.1), bundled at image build time. The license texts are in
+[web/THIRD_PARTY_LICENSES.txt](web/THIRD_PARTY_LICENSES.txt).

@@ -79,7 +79,7 @@
           <div class="job" aria-label="Current job">
             <div class="job-file">
               <span class="eyebrow" id="job-state">{{ printer_state }}</span>
-              <strong id="job-file" title="{{ filename or '' }}">{{ filename or 'No job loaded' }}</strong>
+              {% set has_job = filename and filename != '—' %}<strong id="job-file" title="{{ filename if has_job else '' }}">{{ filename if has_job else 'No job loaded' }}</strong>
             </div>
             <div class="job-progress">
               <div class="bar" role="progressbar" aria-label="Print progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{{ '%.1f' | format(progress) }}" id="progress"><i id="progress-fill" style="width: {{ progress }}%"></i></div>
@@ -96,7 +96,7 @@
 
         <aside class="rail" aria-label="Instruments">
           <section class="panel" aria-labelledby="h-watch">
-            <header><h2 id="h-watch">Failure watch</h2><span class="state" id="detection-chip" data-tone="{{ 'ok' if detection_enabled else 'caution' }}">{{ 'On' if detection_enabled else 'Snoozed' }}</span></header>
+            <header><h2 id="h-watch">Failure watch</h2><span class="state" id="detection-chip" data-tone="{{ 'ok' if detection_enabled else 'caution' }}">{{ 'On' if detection_enabled else 'Off' }}</span></header>
             <div class="score-head">
               <span class="eyebrow">Failure score</span>
               <span class="score-value num" id="ml-score">{% if last_ml_score is not none %}{{ "%.2f" | format(last_ml_score) }}{% else %}—{% endif %}</span>
@@ -250,8 +250,11 @@
 
     <!-- SETTINGS -->
     <section class="view" id="view-settings" role="tabpanel" aria-labelledby="tab-settings" hidden>
-      <form id="settings-form" class="settings" novalidate>
-        <section class="panel">
+      <div class="settings">
+        <!-- Only the detection fields live in this form; the printer address joins
+             it through form="settings-form". The account forms must stay outside:
+             nested forms are invalid HTML and the parser would merge them. -->
+        <form id="settings-form" class="panel" novalidate>
           <h2>Detection</h2>
           <p class="panel-lead">How Sentinel decides a print is failing.</p>
           <div class="field">
@@ -282,7 +285,7 @@
             <obc-toggle-switch id="input-ml-failure-auto-stop" label="ML outage pauses can auto-stop"{% if ml_failure_auto_stop %} checked{% endif %}></obc-toggle-switch>
             <p class="help">When the ML service is down, Sentinel pauses the print to be safe. Off (recommended): that pause waits for you. On: it is cancelled after the auto-stop timeout, like a confirmed failure.</p>
           </div>
-        </section>
+        </form>
 
         <div style="display: grid; gap: var(--gutter);">
           <section class="panel">
@@ -290,10 +293,15 @@
             <p class="panel-lead">Where Sentinel finds the Centauri Carbon 2 on your network.</p>
             <div class="field">
               <label for="input-printer-ip">IP address or hostname</label>
-              <input class="input wide num" type="text" id="input-printer-ip" name="printer_ip" value="{{ printer_ip }}" required pattern="^[a-zA-Z0-9.:\-]+$" placeholder="192.168.1.100 or printer.local" autocomplete="off" spellcheck="false">
+              <input class="input wide num" form="settings-form" type="text" id="input-printer-ip" name="printer_ip" value="{{ printer_ip }}" required pattern="^[a-zA-Z0-9.:\-]+$" placeholder="192.168.1.100 or printer.local" autocomplete="off" spellcheck="false">
               <p class="error-msg">Enter an IP address or hostname.</p>
             </div>
           </section>
+
+
+          <div class="form-actions">
+            <obc-button id="btn-save" variant="raised">Save settings</obc-button>
+          </div>
 
           {% if auth_enabled %}
           <section class="panel">
@@ -305,12 +313,8 @@
             </div>
           </section>
           {% endif %}
-
-          <div class="form-actions">
-            <obc-button id="btn-save" variant="raised">Save settings</obc-button>
-          </div>
         </div>
-      </form>
+      </div>
       <p class="about">Centauri Sentinel v{{ version }} · <a href="https://github.com/legalmarc/centauri-sentinel" target="_blank" rel="noopener">Source</a> · <a href="https://github.com/legalmarc/centauri-sentinel/blob/main/docs/threat-model.md" target="_blank" rel="noopener">Threat model</a></p>
     </section>
   </main>

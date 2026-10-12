@@ -41,6 +41,9 @@ class _FakeBroker:
         register_error: str | None = None,
         drop_register: bool = False,
         connect_error: Exception | None = None,
+        print_state: str | None = "standby",
+        start_print_after_rejections: int | None = None,
+        malformed_register: bool = False,
     ) -> None:
         self.capacity = capacity
         self.accept_reused_ids = accept_reused_ids
@@ -48,6 +51,10 @@ class _FakeBroker:
         self.register_error = register_error
         self.drop_register = drop_register
         self.connect_error = connect_error
+        # print_state=None makes status pushes carry no print_status block at all.
+        self.print_state = print_state
+        self.start_print_after_rejections = start_print_after_rejections
+        self.malformed_register = malformed_register
         self.slots: set[str] = set()
         self.rejections = 0
         self.sessions = 0
@@ -66,6 +73,11 @@ class _FakeBroker:
             return "ok" if self.accept_reused_ids else "fail"
         if len(self.slots) >= self.capacity:
             self.rejections += 1
+            if (
+                self.start_print_after_rejections is not None
+                and self.rejections >= self.start_print_after_rejections
+            ):
+                self.print_state = "printing"  # someone starts a print mid-wait
             if (
                 self.free_after_rejections is not None
                 and self.rejections >= self.free_after_rejections
@@ -95,14 +107,23 @@ class _FakeSession:
     async def subscribe(self, topic: str) -> None:
         self.subscribed.append(topic)
         if topic == "elegoo/+/api_status":
+            result: dict[str, Any] = {}
+            if self._broker.print_state is not None:
+                result["print_status"] = {"state": self._broker.print_state}
             self._queue.append(
-                _message(f"elegoo/{_SERIAL}/api_status", {"method": 6000, "result": {}})
+                _message(f"elegoo/{_SERIAL}/api_status", {"method": 6000, "result": result})
             )
 
     async def publish(self, topic: str, payload_str: str) -> None:
         payload = json.loads(payload_str)
         self._broker.published.append((topic, payload))
-        if topic.endswith("/api_register") and not self._broker.drop_register:
+        if topic.endswith("/api_register") and self._broker.malformed_register:
+            sn, request_id = topic.split("/")[1], payload["request_id"]
+            bad = MagicMock()
+            bad.topic = f"elegoo/{sn}/{request_id}/register_response"
+            bad.payload = b"not json"
+            self._queue.append(bad)
+        elif topic.endswith("/api_register") and not self._broker.drop_register:
             sn, request_id = topic.split("/")[1], payload["request_id"]
             self._queue.append(
                 _message(
@@ -150,6 +171,27 @@ async def test_discover_serial_reads_status_topic() -> None:
     assert broker.published == []  # listening only
 
 
+async def test_discover_printer_parses_the_print_state() -> None:
+    broker = _FakeBroker(print_state="paused")
+    with _patched(broker):
+        serial, status = await diagnostics.discover_printer("10.0.0.1", 1883, "secret")
+    assert serial == _SERIAL
+    assert status is not None
+    assert status.print_state == "paused"
+    assert diagnostics.is_print_active(status)
+
+
+async def test_discover_printer_without_a_state_returns_no_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(diagnostics, "_SERIAL_TIMEOUT_S", 0.05)
+    broker = _FakeBroker(print_state=None)
+    with _patched(broker):
+        serial, status = await diagnostics.discover_printer("10.0.0.1", 1883, "secret")
+    assert serial == _SERIAL
+    assert status is None  # a delta push is not evidence of "idle"
+
+
 async def test_discover_serial_times_out_without_status_push(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -171,6 +213,7 @@ async def test_discover_serial_times_out_without_status_push(
         ({"capacity": 0}, "too many clients"),
         ({"register_error": "fail"}, "fail"),
         ({"drop_register": True}, "timeout"),
+        ({"malformed_register": True}, "protocol_error"),
         ({"connect_error": aiomqtt.MqttError("refused")}, "connect_error"),
         ({"connect_error": OSError("unreachable")}, "connect_error"),
     ],
@@ -302,6 +345,102 @@ async def test_expiry_not_measured_without_wait_or_without_rejection() -> None:
     assert report["expiry"] is None
 
 
+# ---------------------------------------------------------------------------
+# Print-state guard
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("state", ["printing", "paused"])
+async def test_refuses_while_a_print_is_active(state: str) -> None:
+    broker = _FakeBroker(print_state=state)
+    with _patched(broker), pytest.raises(diagnostics.PrinterBusyError) as exc:
+        await diagnostics.run_mqtt_slots(_SETTINGS)
+    assert exc.value.print_state == state
+    assert state in str(exc.value)
+    assert broker.published == []  # nothing was registered
+    assert broker.slots == set()
+
+
+async def test_refuses_when_the_print_state_is_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(diagnostics, "_SERIAL_TIMEOUT_S", 0.05)
+    broker = _FakeBroker(print_state=None)
+    with _patched(broker), pytest.raises(diagnostics.PrinterBusyError) as exc:
+        await diagnostics.run_mqtt_slots(_SETTINGS)
+    assert exc.value.print_state == "unknown"
+    assert broker.published == []
+
+
+@pytest.mark.parametrize("state", ["printing", "paused"])
+async def test_force_runs_during_a_print(state: str) -> None:
+    broker = _FakeBroker(capacity=3, print_state=state)
+    with _patched(broker):
+        report = await diagnostics.run_mqtt_slots(_SETTINGS, max_registrations=6, force=True)
+    assert report["forced"] is True
+    assert report["print_state"] == state
+    assert report["fresh"]["rejected"] is True
+    assert broker.published
+
+
+async def test_idle_run_reports_the_print_state() -> None:
+    broker = _FakeBroker(capacity=99)
+    with _patched(broker):
+        report = await diagnostics.run_mqtt_slots(_SETTINGS, max_registrations=2)
+    assert report["print_state"] == "standby"
+    assert report["forced"] is False
+
+
+async def test_expiry_wait_stops_when_a_print_starts() -> None:
+    broker = _FakeBroker(capacity=2, start_print_after_rejections=3)
+    with _patched(broker):
+        report = await diagnostics.run_mqtt_slots(
+            _SETTINGS, max_registrations=12, expiry_wait_s=5.0
+        )
+
+    expiry = report["expiry"]
+    assert expiry["recovered"] is False
+    assert "a print started" in expiry["stopped_reason"]
+    assert "printing" in expiry["stopped_reason"]
+    # Rejection 1 ends the fresh test, retry 1 is rejection 2, retry 2 is rejection 3
+    # (which starts the print); the re-check before retry 3 stops the run.
+    assert expiry["attempts"] == 2
+    assert broker.rejections == 3  # no registration was attempted after the print began
+    summary = diagnostics.format_summary(report)
+    assert "Expiry: stopped early" in summary
+    assert "a print started" in summary
+
+
+async def test_force_skips_the_expiry_recheck() -> None:
+    broker = _FakeBroker(capacity=2, start_print_after_rejections=3, free_after_rejections=5)
+    with _patched(broker):
+        report = await diagnostics.run_mqtt_slots(
+            _SETTINGS, max_registrations=12, expiry_wait_s=5.0, force=True
+        )
+    assert report["expiry"]["recovered"] is True
+    assert report["expiry"]["stopped_reason"] is None
+
+
+async def test_expiry_wait_stops_when_the_state_cannot_be_rechecked() -> None:
+    broker = _FakeBroker(capacity=2)
+    real = diagnostics.discover_printer
+    calls = 0
+
+    async def flaky(*args: Any, **kwargs: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        if calls > 1:  # the first call is the initial check
+            raise diagnostics.PrinterTimeoutError("no status push")
+        return await real(*args, **kwargs)
+
+    with _patched(broker), patch("sentinel.diagnostics.discover_printer", flaky):
+        report = await diagnostics.run_mqtt_slots(
+            _SETTINGS, max_registrations=12, expiry_wait_s=5.0
+        )
+    assert report["expiry"]["attempts"] == 0
+    assert "could not re-check" in report["expiry"]["stopped_reason"]
+
+
 async def test_only_registrations_are_ever_published() -> None:
     """The tool must never send pause/resume/stop or any command to api_request."""
     broker = _FakeBroker(capacity=3, free_after_rejections=3)
@@ -352,6 +491,39 @@ def test_cli_reports_failure_as_json_and_exit_code_1(
     assert code == 1
     assert out[-2].startswith("FAIL: OSError")
     assert "error" in json.loads(out[-1])
+
+
+def test_cli_refuses_during_a_print_with_exit_code_2(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PRINTER_IP", "10.0.0.1")
+    monkeypatch.setenv("PRINTER_ACCESS_CODE", "secret")
+    broker = _FakeBroker(print_state="printing")
+    with _patched(broker):
+        code = diagnostics.main(["mqtt-slots"])
+
+    out = capsys.readouterr().out.strip().splitlines()
+    assert code == 2
+    assert out[-2].startswith("REFUSED:")
+    assert "--force" in out[-2]
+    payload = json.loads(out[-1])
+    assert payload["refused"] is True
+    assert payload["print_state"] == "printing"
+    assert broker.published == []
+
+
+def test_cli_force_runs_during_a_print(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PRINTER_IP", "10.0.0.1")
+    monkeypatch.setenv("PRINTER_ACCESS_CODE", "secret")
+    broker = _FakeBroker(capacity=3, print_state="printing")
+    with _patched(broker):
+        code = diagnostics.main(["mqtt-slots", "--force", "--max", "6"])
+
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "print state printing  (forced)" in out
 
 
 def test_cli_requires_a_subcommand() -> None:

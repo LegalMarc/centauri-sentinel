@@ -39,6 +39,7 @@ from urllib.parse import urlsplit as _urlsplit_parse
 import bcrypt
 from starlette.responses import Response
 
+from sentinel.web.assets import asset_version
 from sentinel.web.sessions import (
     COOKIE_MAX_AGE,
     COOKIE_NAME,
@@ -93,10 +94,10 @@ _LOGIN_TEMPLATE = """<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Sign in · Centauri Sentinel</title>
-<script src="/static/palette.js"></script>
-<link rel="stylesheet" href="/static/vendor/openbridge/openbridge.css">
+<script src="/static/palette.js?v=__ASSET_V__"></script>
+<link rel="stylesheet" href="/static/vendor/openbridge/openbridge.css?v=__ASSET_V__">
 <style>
-@font-face{font-family:"Noto Sans";src:url("/static/vendor/openbridge/NotoSans.ttf") format("truetype");
+@font-face{font-family:"Noto Sans";src:url("/static/vendor/openbridge/NotoSans.ttf?v=__ASSET_V__") format("truetype");
   font-weight:100 900;font-display:swap}
 *{box-sizing:border-box}
 html,body{height:100%}
@@ -355,6 +356,10 @@ class AuthMiddleware:
             qs = scope.get("query_string", b"").decode()
             path: str = scope.get("path", "")
             next_val = f"{path}?{qs}" if qs else path
+            # After sign-in the browser GETs `next`; returning to a POST-only
+            # target such as /logout-all would land on a 404.
+            if scope.get("method") != "GET":
+                next_val = "/"
             return Response(
                 status_code=302,
                 headers={"Location": f"/login?next={quote(next_val, safe='/')}"},
@@ -606,8 +611,10 @@ class AuthMiddleware:
             if error
             else ""
         )
-        return _LOGIN_TEMPLATE.replace("__ERROR_HTML__", error_html).replace(
-            "__NEXT_URL__", html.escape(next_url, quote=True)
+        return (
+            _LOGIN_TEMPLATE.replace("__ASSET_V__", asset_version())
+            .replace("__ERROR_HTML__", error_html)
+            .replace("__NEXT_URL__", html.escape(next_url, quote=True))
         )
 
     @staticmethod

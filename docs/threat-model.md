@@ -37,7 +37,9 @@ stored, in the `auth_sessions` table, so a copied database cannot be replayed as
   Basic credentials, applies the same CSRF origin check as other POSTs, answers 303 to `/login`
   for browsers or `{"status":"ok","revoked":N}` otherwise, 503 if the database delete fails
   (nothing is revoked), and 404 when auth is off. Changing `AUTH_USERNAME` or the password
-  signs every session out at the next restart.
+  signs every session out at the next restart. Log out all devices does not clear the 60-second
+  Basic-auth success cache, because Basic credentials are not sessions; rotating the password
+  needs a restart, which empties that cache.
 - **Unauthenticated responses.** A top-level navigation (`Accept: text/html`) is redirected to
   `/login?next=...`. Any other request that looks like it came from a browser (a `Sec-Fetch-Mode`,
   `Sec-Fetch-Site` or `Sec-Fetch-Dest` header, `X-Requested-With`, or a `sentinel_session`

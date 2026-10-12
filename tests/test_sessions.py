@@ -225,6 +225,19 @@ async def test_revoke_all_memory_only_store() -> None:
     assert await store.revoke_all() == 0
 
 
+async def test_revoke_all_returns_the_database_row_count(db_path: str) -> None:
+    db = await _open(db_path)
+    store = SessionStore(FP, db)
+    for _ in range(2):
+        await store.create()
+    # A row the in-memory index does not know about (another replica's login).
+    await db.insert_auth_session("f" * 64, FP, 1)
+
+    assert await store.revoke_all() == 3  # the DB count, not the 2 in memory
+    assert await db.list_auth_sessions() == []
+    await db.close()
+
+
 async def test_revoke_all_db_failure_keeps_sessions(db_path: str) -> None:
     db = await _open(db_path)
     store = SessionStore(FP, db)

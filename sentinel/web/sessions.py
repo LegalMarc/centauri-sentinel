@@ -124,7 +124,10 @@ class SessionStore:
         self._sessions.pop(token_hash, None)
 
     async def revoke_all(self) -> int:
-        """Invalidate every session and return how many were live.
+        """Invalidate every session and return how many were revoked.
+
+        With a database the count is the number of rows it deleted (the durable
+        sessions); without one it is the number of in-memory sessions.
 
         A login completing in the same instant as this call can end up revoked in
         only one of memory and the database; accepted, since only a holder of
@@ -133,7 +136,7 @@ class SessionStore:
         count = len(self._sessions)
         if self._db is not None:
             # Database first, for the same fail-closed reason as revoke().
-            await self._db.delete_all_auth_sessions()
+            count = await self._db.delete_all_auth_sessions()
         self._sessions.clear()
         return count
 

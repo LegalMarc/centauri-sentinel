@@ -8,8 +8,11 @@ printer command opens a short registered MQTT session with fresh ids
 minutes, those pile up and later pause/stop commands are refused. This tool
 answers that from the printer itself.
 
-It only ever registers (and reads the status topic to learn the serial). It
-never publishes pause, resume, stop or any other print-affecting command.
+It only ever registers (and reads the status topic to learn the serial and the
+print state). It never publishes pause, resume, stop or any other print-affecting
+command. Because filling the slots makes the printer refuse later pause/stop
+commands, it refuses to run while a print is active (exit code 2) unless
+``--force`` is given.
 """
 
 from __future__ import annotations
@@ -26,7 +29,13 @@ from typing import TYPE_CHECKING, Any
 import aiomqtt
 
 from sentinel.network import resolve_and_validate_printer_ip
-from sentinel.printer.client import _TIMEOUT_S, PrinterClient, _generate_cc2_ids
+from sentinel.printer.client import (
+    _TIMEOUT_S,
+    PrinterClient,
+    _deep_merge,
+    _generate_cc2_ids,
+    _parse_status,
+)
 from sentinel.printer.errors import PrinterProtocolError, PrinterTimeoutError
 from sentinel.printer.types import (
     CC2_REG_OK,
@@ -37,13 +46,15 @@ from sentinel.printer.types import (
 
 if TYPE_CHECKING:
     from sentinel.config import Settings
+    from sentinel.printer.types import PrinterStatus
 
 logger = logging.getLogger(__name__)
 
 WARNING = (
     "WARNING: this test registers MQTT clients with the printer and may temporarily\n"
     "occupy its client slots until they expire. Run it while the printer is idle.\n"
-    "It sends registrations only: no pause, resume, stop or any other print command."
+    "It sends registrations only: no pause, resume, stop or any other print command.\n"
+    "It refuses to run while a print is active unless --force is given."
 )
 
 # Seconds between registration retries while waiting for a slot to expire.
@@ -57,6 +68,19 @@ OUTCOME_TOO_MANY = "too many clients"
 OUTCOME_FAIL = "fail"  # any other `error` string; the raw value is in `detail`
 OUTCOME_TIMEOUT = "timeout"  # no register_response within CC2_REGISTRATION_TIMEOUT_S
 OUTCOME_CONNECT_ERROR = "connect_error"  # MQTT connect / socket failure
+# register_response was malformed (not JSON, not an object) or the connection closed first
+OUTCOME_PROTOCOL_ERROR = "protocol_error"
+
+# Exit code when the run is refused because a print is active.
+EXIT_REFUSED = 2
+
+
+class PrinterBusyError(Exception):
+    """The printer is printing or paused (or its state is unknown), so the run is refused."""
+
+    def __init__(self, print_state: str, message: str) -> None:
+        super().__init__(message)
+        self.print_state = print_state
 
 
 @dataclass
@@ -89,12 +113,38 @@ def _make_client(host: str, port: int, access_code: str, identifier: str) -> aio
     )
 
 
-async def discover_serial(host: str, port: int, access_code: str) -> str:
-    """Learn the printer serial the way the client does: from the status topic.
+def _carries_print_state(content: dict[str, Any]) -> bool:
+    """True when a status push says whether a print is active.
+
+    Pushes can be partial deltas; one without ``print_status.state`` (modern
+    format) or ``Attributes.CurrentStatus`` (legacy) would parse as idle, which
+    must not be mistaken for "not printing".
+    """
+    print_status = content.get("print_status")
+    if isinstance(print_status, dict) and print_status.get("state") is not None:
+        return True
+    attrs = content.get("Attributes")
+    return isinstance(attrs, dict) and "CurrentStatus" in attrs
+
+
+def is_print_active(status: PrinterStatus) -> bool:
+    """A print is running or paused (a paused job still needs pause/stop to work)."""
+    return status.printing or status.print_state == "paused"
+
+
+async def discover_printer(
+    host: str, port: int, access_code: str
+) -> tuple[str, PrinterStatus | None]:
+    """Learn the printer serial and print state from the status topic.
 
     The serial is the second segment of ``elegoo/<sn>/api_status`` on any
-    method-6000 push.
+    method-6000 push. The state is parsed with the client's own status parser
+    from the pushes merged so far, once one of them carries a print state. The
+    status is ``None`` when the serial is known but no push carried a state
+    before the timeout.
     """
+    serial: str | None = None
+    accumulated: dict[str, Any] = {"method": METHOD_STATUS_PUSH, "result": {}, "data": {}}
     async with _make_client(
         host, port, access_code, f"sentinel-diag-{_generate_cc2_ids()[0]}"
     ) as c:
@@ -111,15 +161,31 @@ async def discover_serial(host: str, port: int, access_code: str) -> str:
                     if not isinstance(payload, dict) or payload.get("method") != METHOD_STATUS_PUSH:
                         continue
                     parts = str(message.topic).split("/")
-                    if len(parts) >= 2 and parts[1]:
-                        return parts[1]
+                    if serial is None and len(parts) >= 2 and parts[1]:
+                        serial = parts[1]
+                    content = payload.get("result") or payload.get("data") or {}
+                    if not isinstance(content, dict):
+                        continue
+                    _deep_merge(accumulated["result"], content)
+                    _deep_merge(accumulated["data"], content)
+                    if serial is not None and _carries_print_state(accumulated["result"]):
+                        return serial, _parse_status(accumulated)
         except TimeoutError as exc:
+            if serial is not None:
+                return serial, None
             raise PrinterTimeoutError(
                 f"no status push within {_SERIAL_TIMEOUT_S:.0f}s; cannot learn the serial number"
             ) from exc
         except StopAsyncIteration as exc:
+            if serial is not None:
+                return serial, None
             raise PrinterProtocolError("connection closed before any status push") from exc
     raise PrinterProtocolError("unreachable")  # pragma: no cover - satisfies mypy
+
+
+async def discover_serial(host: str, port: int, access_code: str) -> str:
+    """Learn just the printer serial (see ``discover_printer``)."""
+    return (await discover_printer(host, port, access_code))[0]
 
 
 async def register_once(
@@ -169,7 +235,9 @@ async def register_once(
             )
     except PrinterTimeoutError as exc:
         return result(OUTCOME_TIMEOUT, str(exc))
-    except (aiomqtt.MqttError, OSError, TimeoutError, PrinterProtocolError) as exc:
+    except PrinterProtocolError as exc:
+        return result(OUTCOME_PROTOCOL_ERROR, str(exc))
+    except (aiomqtt.MqttError, OSError, TimeoutError) as exc:
         return result(OUTCOME_CONNECT_ERROR, f"{type(exc).__name__}: {exc}")
 
     error = payload.get("error", "")
@@ -181,9 +249,19 @@ async def register_once(
 
 
 async def run_mqtt_slots(
-    settings: Settings, *, max_registrations: int = 12, expiry_wait_s: float = 0.0
+    settings: Settings,
+    *,
+    max_registrations: int = 12,
+    expiry_wait_s: float = 0.0,
+    force: bool = False,
 ) -> dict[str, Any]:
-    """Run the client-slot experiments and return the structured report."""
+    """Run the client-slot experiments and return the structured report.
+
+    Raises ``PrinterBusyError`` before registering anything if a print is active
+    (or its state cannot be determined), unless ``force``. The expiry wait
+    re-reads the print state before each retry and stops early if a print has
+    started, since every retry holds another slot.
+    """
     host = await resolve_and_validate_printer_ip(settings.printer_ip)
     port = settings.printer_mqtt_port
     access_code = settings.printer_access_code.get_secret_value()
@@ -204,7 +282,22 @@ async def run_mqtt_slots(
         used_client_ids.add(ids[0])
         return ids
 
-    serial = await discover_serial(host, port, access_code)
+    serial, status = await discover_printer(host, port, access_code)
+    if not force:
+        if status is None:
+            raise PrinterBusyError(
+                "unknown",
+                "cannot tell whether a print is active (no status push carried a print state); "
+                "refusing to occupy the printer's client slots. Use --force to run anyway.",
+            )
+        if is_print_active(status):
+            raise PrinterBusyError(
+                status.print_state,
+                f"the printer is {status.print_state}: filling its client slots would make it "
+                "refuse Sentinel's pause/stop commands. Run this while the printer is idle, "
+                "or use --force to run anyway.",
+            )
+    start_state = status.print_state if status is not None else "unknown"
 
     # Reuse test first: it is only informative while slots are still free, and
     # it costs at most two of them.
@@ -236,9 +329,26 @@ async def run_mqtt_slots(
         first_ok = next((r for r in [reuse_first, *fresh] if r.ok), None)
         attempts = 0
         recovered: RegistrationResult | None = None
+        stopped_reason: str | None = None
         deadline = time.monotonic() + expiry_wait_s
         while time.monotonic() + _EXPIRY_POLL_S <= deadline:
             await asyncio.sleep(_EXPIRY_POLL_S)
+            if not force:
+                # Every retry that is accepted takes another slot, so do not add to
+                # them once a print has started: Sentinel may need to pause it.
+                try:
+                    _, latest = await discover_printer(host, port, access_code)
+                except Exception as exc:
+                    stopped_reason = (
+                        f"could not re-check the print state: {type(exc).__name__}: {exc}"
+                    )
+                    break
+                if latest is None:
+                    stopped_reason = "could not re-check the print state (no state in status push)"
+                    break
+                if is_print_active(latest):
+                    stopped_reason = f"a print started (printer is {latest.print_state})"
+                    break
             attempts += 1
             r = await reg(serial, new_ids())
             if r.ok:
@@ -246,6 +356,7 @@ async def run_mqtt_slots(
                 break
         expiry = {
             "recovered": recovered is not None,
+            "stopped_reason": stopped_reason,
             "attempts": attempts,
             "waited_s": round(time.monotonic() - (t0 + first_rejection.at_s), 1),
             "since_rejection_s": (
@@ -261,6 +372,8 @@ async def run_mqtt_slots(
     return {
         "printer": settings.printer_ip,
         "serial": serial,
+        "print_state": start_state,
+        "forced": force,
         "reuse": {
             "first": asdict(reuse_first),
             "second": asdict(reuse_second),
@@ -282,7 +395,8 @@ def format_summary(report: dict[str, Any]) -> str:
     fresh = report["fresh"]
     reuse = report["reuse"]
     lines = [
-        f"Printer {report['printer']}  serial {report['serial']}",
+        f"Printer {report['printer']}  serial {report['serial']}  "
+        f"print state {report['print_state']}" + ("  (forced)" if report["forced"] else ""),
         "",
         f"Reuse one id pair on two sessions: {reuse['verdict']}",
     ]
@@ -305,6 +419,11 @@ def format_summary(report: dict[str, Any]) -> str:
             f"Expiry: a registration was accepted again {expiry['since_rejection_s']}s after "
             f"the rejection, about {expiry['since_first_registration_s']}s after the first "
             f"registration (+/- {int(_EXPIRY_POLL_S)}s)"
+        )
+    elif expiry["stopped_reason"]:
+        lines.append(
+            f"Expiry: stopped early after {expiry['waited_s']}s and {expiry['attempts']} retries: "
+            f"{expiry['stopped_reason']}"
         )
     else:
         lines.append(
@@ -339,6 +458,14 @@ def _build_parser() -> argparse.ArgumentParser:
             "long a slot stays taken (default: 0 = off)"
         ),
     )
+    slots.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "Run even if a print is active or paused, or its state is unknown. The printer "
+            "may then refuse Sentinel's pause/stop commands until the slots expire"
+        ),
+    )
     return parser
 
 
@@ -353,7 +480,12 @@ async def _mqtt_slots(args: argparse.Namespace) -> int:
             settings,
             max_registrations=max(1, args.max_registrations),
             expiry_wait_s=max(0.0, args.expiry_wait),
+            force=args.force,
         )
+    except PrinterBusyError as exc:
+        print(f"REFUSED: {exc}")
+        print(json.dumps({"error": str(exc), "refused": True, "print_state": exc.print_state}))
+        return EXIT_REFUSED
     except Exception as exc:
         print(f"FAIL: {type(exc).__name__}: {exc}")
         print(json.dumps({"error": f"{type(exc).__name__}: {exc}"}))

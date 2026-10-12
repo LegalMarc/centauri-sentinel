@@ -219,7 +219,14 @@ async def _main(args: argparse.Namespace) -> None:
 
     beat = asyncio.create_task(_heartbeat())
     server = uvicorn.Server(
-        uvicorn.Config(app, host="127.0.0.1", port=args.port, log_level="warning")
+        uvicorn.Config(
+            app,
+            host="127.0.0.1",
+            port=args.port,
+            log_level="warning",
+            # An open /stream never ends on its own; do not wait for it on Ctrl+C.
+            timeout_graceful_shutdown=1,
+        )
     )
     try:
         await server.serve()

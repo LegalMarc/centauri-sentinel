@@ -149,19 +149,34 @@ python -m sentinel.diagnostics mqtt-slots --max 20 --expiry-wait 900
 ```
 
 The tool registers only. It never sends pause, resume, stop or any print command, but it
-does occupy client slots until they expire, so do not run it mid-print. It prints a
-warning, a human summary and a final JSON line. In order, it:
+does occupy client slots until they expire, which makes the printer refuse Sentinel's
+pause/stop commands in the meantime. It therefore **refuses to run while the printer is
+printing or paused**, or when no status push says what it is doing: it prints `REFUSED: ...`
+and a JSON line with `"refused": true` and the `print_state`, registers nothing, and exits 2.
+Pass `--force` to run anyway (for example to reproduce the refusal during a print), accepting
+that Sentinel cannot pause that print until the slots expire. It prints a warning, a human
+summary and a final JSON line. In order, it:
 
-1. learns the printer serial from the status topic, as the client does;
+1. learns the printer serial and print state from the status topic, as the client does, and
+   refuses here if a print is active (unless `--force`);
 2. registers one id pair twice on two separate sessions and reports whether the repeat is
    accepted (if yes, the client could reuse one id instead of consuming a slot per command);
 3. registers up to `--max` (default 12) fresh id pairs, each on its own short session that
    disconnects after the response, and stops at the first refusal;
 4. with `--expiry-wait SECONDS` and a refusal, retries a fresh registration every 30 s
    until one succeeds or the wait ends, and reports how long that took (resolution 30 s).
+   Before each retry it re-reads the print state and stops early, reporting why in the
+   summary and in `expiry.stopped_reason`, if a print has started or the state cannot be
+   re-read (`--force` skips the re-check).
+
+Each registration is classified as `ok`, `too many clients`, `fail` (any other `error`
+value, raw value in `detail`), `timeout` (no `register_response`), `connect_error` (MQTT
+connect or socket failure) or `protocol_error` (the `register_response` was malformed, not
+a JSON object, or the connection closed before it arrived).
 
 Exit 0 means the measurement ran. Exit 1 means it could not (printer unreachable, wrong
-access code, no status push); the JSON line then holds an `error` field. Settings come from
+access code, no status push); the JSON line then holds an `error` field. Exit 2 means it
+refused because a print is active (see above). Settings come from
 the environment, so a printer IP changed from the dashboard (stored in the database) is not
 picked up: set `PRINTER_IP` to match.
 

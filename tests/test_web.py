@@ -2998,3 +2998,68 @@ async def test_post_settings_rejected_field_blocks_ml_failure_auto_stop(
         )
     assert r.status_code == 400
     mock_db.set_setting.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Dashboard structure regressions
+# ---------------------------------------------------------------------------
+
+
+async def test_dashboard_has_no_nested_forms(
+    mock_db: AsyncMock, mock_watcher: MagicMock, mock_camera: AsyncMock
+) -> None:
+    """Nested <form>s are invalid HTML: the parser drops the inner tag, so a
+    Log out button inside the settings form would submit the settings form
+    instead (it saved settings and left the session signed in)."""
+    from html.parser import HTMLParser
+
+    class FormNesting(HTMLParser):
+        def __init__(self) -> None:
+            super().__init__()
+            self.depth = 0
+            self.max_depth = 0
+            self.logout_actions: list[str] = []
+
+        def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+            if tag == "form":
+                self.depth += 1
+                self.max_depth = max(self.max_depth, self.depth)
+                action = dict(attrs).get("action") or ""
+                if action.startswith("/logout"):
+                    self.logout_actions.append(action)
+
+        def handle_endtag(self, tag: str) -> None:
+            if tag == "form":
+                self.depth -= 1
+
+    settings = _base_settings(auth_username="admin", auth_password_bcrypt=_HASHED_PASS)
+    app_auth = create_app(settings, db=mock_db, watcher=mock_watcher, camera=mock_camera)
+    async with _client(app_auth) as c:
+        await _login(c)
+        r = await c.get("/")
+    parser = FormNesting()
+    parser.feed(r.text)
+    assert parser.max_depth == 1
+    assert "/logout" in parser.logout_actions
+    assert "/logout-all" in parser.logout_actions
+    # The printer address still belongs to the settings form.
+    assert 'form="settings-form"' in r.text
+
+
+async def test_unauthenticated_post_navigation_does_not_return_to_post_target(
+    auth_app: object,
+) -> None:
+    """After sign-in the browser GETs `next`; a POST-only target would 404."""
+    async with _client(auth_app) as c:
+        r = await c.post("/logout-all", headers={"Accept": "text/html"}, follow_redirects=False)
+    assert r.status_code == 302
+    assert r.headers["location"] == "/login?next=/"
+
+
+async def test_login_page_assets_are_versioned(auth_app: object) -> None:
+    import re
+
+    async with _client(auth_app) as c:
+        r = await c.get("/login")
+    assert re.search(r'/static/palette\.js\?v=[0-9a-f]{12}"', r.text)
+    assert "__ASSET_V__" not in r.text

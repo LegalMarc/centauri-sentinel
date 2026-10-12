@@ -23,4 +23,4 @@ await build({
 
 copyFileSync(join(pkg, "dist", "openbridge.css"), join(out, "openbridge.css"));
 copyFileSync(join(pkg, "dist", "NotoSans.ttf"), join(out, "NotoSans.ttf"));
-copyFileSync(join(here, "THIRD_PARTY_LICENSE-openbridge.txt"), join(out, "LICENSE.txt"));
+copyFileSync(join(here, "THIRD_PARTY_LICENSES.txt"), join(out, "LICENSE.txt"));
