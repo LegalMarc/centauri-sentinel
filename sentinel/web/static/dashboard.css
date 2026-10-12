@@ -32,6 +32,9 @@
   --caution: var(--alert-caution-color);
   --warning: var(--alert-warning-color);
   --alarm: var(--alert-alarm-color);
+  /* Empty part of bars and gauges. The instrument frame colour equals the
+     panel background in day, bright and night, so derive a visible track. */
+  --track: color-mix(in srgb, var(--instrument-frame-tertiary-color) 50%, transparent);
 }
 
 * { box-sizing: border-box; }
@@ -264,7 +267,7 @@ main { flex: 1; min-height: 0; }
   position: relative;
   height: 10px;
   border-radius: 5px;
-  background: var(--instrument-frame-primary-color);
+  background: var(--track);
   overflow: hidden;
 }
 .bar i {
@@ -314,7 +317,7 @@ main { flex: 1; min-height: 0; }
 
 .score-head { display: flex; justify-content: space-between; align-items: baseline; }
 .score-value { font-size: 32px; font-weight: 600; line-height: 1.1; }
-.gauge { position: relative; height: 14px; margin: 10px 0 6px; border-radius: 7px; background: var(--instrument-frame-primary-color); }
+.gauge { position: relative; height: 14px; margin: 10px 0 6px; border-radius: 7px; background: var(--track); }
 .gauge i { position: absolute; inset: 0 auto 0 0; border-radius: 7px; background: var(--instrument-enhanced-secondary-color); transition: width 0.6s ease, background 0.3s; }
 .gauge[data-over="true"] i { background: var(--alarm); }
 .gauge b {
@@ -342,7 +345,7 @@ main { flex: 1; min-height: 0; }
 .temp-value { font-size: 28px; font-weight: 600; line-height: 1.15; }
 .temp-value small { font-size: 14px; font-weight: 500; color: var(--ink-muted); }
 .temp-target { font-size: 13px; color: var(--ink-muted); }
-.temp-track { position: relative; height: 4px; margin-top: 8px; border-radius: 2px; background: var(--instrument-frame-primary-color); }
+.temp-track { position: relative; height: 4px; margin-top: 8px; border-radius: 2px; background: var(--track); }
 .temp-track i { position: absolute; inset: 0 auto 0 0; border-radius: 2px; background: var(--instrument-regular-secondary-color); transition: width 0.6s ease; }
 .temp-track[data-at-target="true"] i { background: var(--ok); }
 
