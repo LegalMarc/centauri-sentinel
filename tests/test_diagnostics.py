@@ -200,6 +200,13 @@ async def test_discover_printer_parses_the_print_state() -> None:
         ({"Attributes": {"CurrentStatus": 0}}, False),
         ({"Attributes": {"CurrentStatus": 1}}, True),
         ({"Attributes": {"CurrentStatus": 7}}, True),
+        ({"Attributes": {"CurrentStatus": "0"}}, False),
+        ({"Attributes": {"CurrentStatus": False}}, True),
+        ({"Attributes": {"CurrentStatus": 0.7}}, True),
+        ({"print_status": {"state": "standby", "enable": 1}}, True),
+        ({"print_status": {"state": "standby", "enable": "true"}}, True),
+        ({"Attributes": {"CurrentStatus": 1}, "print_status": {"state": "standby"}}, True),
+        ({"Attributes": {"CurrentStatus": 0}, "print_status": {"state": "standby"}}, False),
     ],
 )
 def test_classify_print_state_is_fail_closed(content: dict[str, object], active: bool) -> None:

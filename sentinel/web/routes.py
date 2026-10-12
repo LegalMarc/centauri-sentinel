@@ -181,6 +181,7 @@ def make_router(
             ml_poll_interval_str,
             detection_warmup_str,
             ml_failure_auto_stop_str,
+            snooze_until_str,
         ) = await asyncio.gather(
             db.get_recent_detections(limit=10),
             db.get_recent_pauses(limit=10),
@@ -193,9 +194,14 @@ def make_router(
             db.get_setting("ml_poll_interval_seconds", str(settings.ml_poll_interval_seconds)),
             db.get_setting("detection_warmup_seconds", str(settings.detection_warmup_seconds)),
             db.get_setting("ml_failure_auto_stop", str(settings.ml_failure_auto_stop).lower()),
+            db.get_setting("snooze_until_utc", "0"),
         )
 
         detection_enabled = detection_enabled_str == "true"
+        try:
+            snooze_active = float(str(snooze_until_str or 0)) > datetime.now(UTC).timestamp()
+        except ValueError:
+            snooze_active = False
         printer_ip = printer_ip_val or settings.printer_ip
         ml_confirm_count = int(
             ml_confirm_count_str if ml_confirm_count_str is not None else settings.ml_confirm_count  # type: ignore[arg-type]
@@ -299,7 +305,7 @@ def make_router(
                 "recent_jobs": recent_jobs,
                 "analytics": analytics,
                 "detection_enabled": detection_enabled,
-                "snooze_active": (await _detection_fields())["snooze_until"] is not None,
+                "snooze_active": snooze_active,
                 "printer_state": printer_state,
                 "print_elapsed": print_elapsed,
                 "extruder_temp": extruder_temp,

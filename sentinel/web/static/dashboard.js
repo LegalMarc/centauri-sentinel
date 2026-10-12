@@ -45,7 +45,7 @@ function toast(message, tone) {
 }
 
 /* ---- Views ------------------------------------------------------------- */
-function showView(name) {
+function showView(name, { push = false } = {}) {
   if (!VIEW_NAMES[name]) name = "monitor";
   document.querySelectorAll(".view-tab").forEach((tab) => {
     const on = tab.dataset.view === name;
@@ -56,7 +56,7 @@ function showView(name) {
   const bar = $("topbar");
   if (bar) bar.pageName = VIEW_NAMES[name];
   try { localStorage.setItem("sentinel_view", name); } catch (e) {}
-  if (location.hash.slice(1) !== name) history.replaceState(null, "", `#${name}`);
+  if (location.hash.slice(1) !== name) history[push ? "pushState" : "replaceState"](null, "", `#${name}`);
 }
 
 /* ---- Palette ----------------------------------------------------------- */
@@ -344,12 +344,12 @@ document.querySelectorAll("time[datetime]").forEach((el) => {
   el.textContent = today ? fmtClock(when) : when.toLocaleDateString([], { month: "short", day: "numeric" }) + " " + fmtClock(when);
   el.title = when.toLocaleString();
 });
-document.querySelectorAll("[data-goto]").forEach((a) => a.addEventListener("click", (e) => { e.preventDefault(); showView(a.dataset.goto); }));
+document.querySelectorAll("[data-goto]").forEach((a) => a.addEventListener("click", (e) => { e.preventDefault(); showView(a.dataset.goto, { push: true }); }));
 document.querySelectorAll("[data-duration]").forEach((el) => { el.textContent = fmtDuration(el.dataset.duration); });
 $("job-remaining").textContent = fmtDuration($("job-remaining").dataset.seconds);
 setStreak(0, state.confirmCount);
 
-document.querySelectorAll(".view-tab").forEach((tab) => tab.addEventListener("click", () => showView(tab.dataset.view)));
+document.querySelectorAll(".view-tab").forEach((tab) => tab.addEventListener("click", () => showView(tab.dataset.view, { push: true })));
 $("btn-pause").addEventListener("click", (e) => { if (!e.currentTarget.disabled) sendControl("pause", "Pause"); });
 $("btn-resume").addEventListener("click", (e) => { if (!e.currentTarget.disabled) sendControl("resume", "Resume"); });
 $("btn-stop").addEventListener("click", onStop);

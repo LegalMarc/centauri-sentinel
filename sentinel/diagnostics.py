@@ -135,20 +135,26 @@ def classify_print_state(content: dict[str, Any]) -> PrintState | None:
     where only 0 is known to mean idle. Returns None when no push has carried
     a state yet (partial deltas often omit it).
     """
+    attrs = content.get("Attributes")
+    legacy: PrintState | None = None
+    if isinstance(attrs, dict) and "CurrentStatus" in attrs:
+        raw_code = attrs["CurrentStatus"]
+        # Only a literal 0 is known to mean idle; False, 0.7 or "0.0" are not.
+        legacy_idle = not isinstance(raw_code, bool) and str(raw_code).strip() == "0"
+        legacy = PrintState(f"CurrentStatus={raw_code}", legacy_idle)
+
     print_status = content.get("print_status")
     if isinstance(print_status, dict) and "state" in print_status:
         raw = print_status.get("state")
         label = str(raw).strip().lower() if raw is not None else ""
-        idle = label in _IDLE_PRINT_STATES and print_status.get("enable") is not True
+        idle = (
+            label in _IDLE_PRINT_STATES
+            and not print_status.get("enable")
+            # Both formats present: either one saying busy wins.
+            and (legacy is None or legacy.idle)
+        )
         return PrintState(label or "(empty)", idle)
-    attrs = content.get("Attributes")
-    if isinstance(attrs, dict) and "CurrentStatus" in attrs:
-        try:
-            code: int | None = int(attrs["CurrentStatus"])
-        except (TypeError, ValueError):
-            code = None
-        return PrintState(f"CurrentStatus={attrs['CurrentStatus']}", code == 0)
-    return None
+    return legacy
 
 
 def is_print_active(state: PrintState) -> bool:
