@@ -68,5 +68,9 @@ the `servany` SSH key is restricted to an inventory command. After deploy, run
 `python -m sentinel.diagnostics mqtt-slots` in the Coolify terminal of the sentinel
 service while the printer is idle, then decide whether to reuse one registration id.
 
-Next: deep-tier review of `git diff main...HEAD`, fix all items, merge to `main`, then ask
-before pushing (push may redeploy via Coolify).
+- `82fe1e3`, `b9cdca6`, `f299087` Three deep-tier review passes and fixes: nested logout
+  forms (Log out was submitting settings), fail-closed mqtt-slots guard (allowlisted idle
+  states only), Stop double-click guard, Enter saves settings, full third-party licenses.
+  868 tests pass. Merged to local `main`; not pushed.
+
+Next: owner decides when to push (Q1). After deploy, run the mqtt-slots diagnostic (Q3).
