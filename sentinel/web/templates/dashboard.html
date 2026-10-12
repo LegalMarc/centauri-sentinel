@@ -96,7 +96,7 @@
 
         <aside class="rail" aria-label="Instruments">
           <section class="panel" aria-labelledby="h-watch">
-            <header><h2 id="h-watch">Failure watch</h2><span class="state" id="detection-chip" data-tone="{{ 'ok' if detection_enabled else 'caution' }}">{{ 'On' if detection_enabled else 'Off' }}</span></header>
+            <header><h2 id="h-watch">Failure watch</h2><span class="state" id="detection-chip" data-tone="{{ 'ok' if detection_enabled else 'caution' }}">{{ 'On' if detection_enabled else ('Snoozed' if snooze_active else 'Off') }}</span></header>
             <div class="score-head">
               <span class="eyebrow">Failure score</span>
               <span class="score-value num" id="ml-score">{% if last_ml_score is not none %}{{ "%.2f" | format(last_ml_score) }}{% else %}—{% endif %}</span>
@@ -255,6 +255,8 @@
              it through form="settings-form". The account forms must stay outside:
              nested forms are invalid HTML and the parser would merge them. -->
         <form id="settings-form" class="panel" novalidate>
+          <!-- Lets Enter submit: obc-button is not form-associated. -->
+          <button type="submit" class="implicit-submit" tabindex="-1" aria-hidden="true"></button>
           <h2>Detection</h2>
           <p class="panel-lead">How Sentinel decides a print is failing.</p>
           <div class="field">

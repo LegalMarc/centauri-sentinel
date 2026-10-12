@@ -177,8 +177,40 @@ async def test_discover_printer_parses_the_print_state() -> None:
         serial, status = await diagnostics.discover_printer("10.0.0.1", 1883, "secret")
     assert serial == _SERIAL
     assert status is not None
-    assert status.print_state == "paused"
+    assert status.label == "paused"
     assert diagnostics.is_print_active(status)
+
+
+@pytest.mark.parametrize(
+    ("content", "active"),
+    [
+        ({"print_status": {"state": "standby"}}, False),
+        ({"print_status": {"state": "complete"}}, False),
+        ({"print_status": {"state": "Cancelled"}}, False),
+        ({"print_status": {"state": "printing"}}, True),
+        ({"print_status": {"state": "paused"}}, True),
+        # This firmware sends state="" while printing (see routes.py); unknown
+        # states must never read as idle.
+        ({"print_status": {"state": ""}}, True),
+        ({"print_status": {"state": None}}, True),
+        ({"print_status": {"state": "printing_start"}}, True),
+        ({"print_status": {"state": "standby", "enable": True}}, True),
+        # Both formats present: the modern field wins over legacy Attributes.
+        ({"Attributes": {"Name": "CC2"}, "print_status": {"state": "printing"}}, True),
+        ({"Attributes": {"CurrentStatus": 0}}, False),
+        ({"Attributes": {"CurrentStatus": 1}}, True),
+        ({"Attributes": {"CurrentStatus": 7}}, True),
+    ],
+)
+def test_classify_print_state_is_fail_closed(content: dict[str, object], active: bool) -> None:
+    state = diagnostics.classify_print_state(content)
+    assert state is not None
+    assert diagnostics.is_print_active(state) is active
+
+
+def test_classify_print_state_without_a_state_is_unknown() -> None:
+    assert diagnostics.classify_print_state({"print_status": {"progress": 40}}) is None
+    assert diagnostics.classify_print_state({}) is None
 
 
 async def test_discover_printer_without_a_state_returns_no_status(

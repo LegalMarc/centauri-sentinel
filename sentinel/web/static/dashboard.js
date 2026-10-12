@@ -397,5 +397,7 @@ if (userMenu) {
 let initialView = location.hash.slice(1);
 if (!VIEW_NAMES[initialView]) { try { initialView = localStorage.getItem("sentinel_view") || "monitor"; } catch (e) { initialView = "monitor"; } }
 showView(initialView);
+// Back/forward and #view links switch views without a reload.
+window.addEventListener("hashchange", () => showView(location.hash.slice(1)));
 poll();
 setInterval(poll, 3000);

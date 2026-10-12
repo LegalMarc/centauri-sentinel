@@ -527,3 +527,6 @@ td a { color: var(--accent); }
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; }
 }
+
+/* Present so Enter submits the settings form; never seen or focused. */
+.implicit-submit { position: absolute; width: 1px; height: 1px; padding: 0; border: 0; overflow: hidden; clip-path: inset(50%); }

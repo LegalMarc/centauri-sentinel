@@ -34,7 +34,6 @@ from sentinel.printer.client import (
     PrinterClient,
     _deep_merge,
     _generate_cc2_ids,
-    _parse_status,
 )
 from sentinel.printer.errors import PrinterProtocolError, PrinterTimeoutError
 from sentinel.printer.types import (
@@ -46,7 +45,6 @@ from sentinel.printer.types import (
 
 if TYPE_CHECKING:
     from sentinel.config import Settings
-    from sentinel.printer.types import PrinterStatus
 
 logger = logging.getLogger(__name__)
 
@@ -113,38 +111,62 @@ def _make_client(host: str, port: int, access_code: str, identifier: str) -> aio
     )
 
 
-def _carries_print_state(content: dict[str, Any]) -> bool:
-    """True when a status push says whether a print is active.
+# Firmware print states in which no job is running (docs/verified-assumptions.md
+# §3: standby | printing | paused | complete | cancelled | error). Anything else,
+# including an empty or unknown state, counts as busy: the guard is fail-closed.
+_IDLE_PRINT_STATES = frozenset(
+    {"standby", "idle", "complete", "completed", "cancelled", "canceled", "error"}
+)
 
-    Pushes can be partial deltas; one without ``print_status.state`` (modern
-    format) or ``Attributes.CurrentStatus`` (legacy) would parse as idle, which
-    must not be mistaken for "not printing".
+
+@dataclass(frozen=True)
+class PrintState:
+    """The printer's job state as reported in a status push."""
+
+    label: str
+    idle: bool
+
+
+def classify_print_state(content: dict[str, Any]) -> PrintState | None:
+    """Read the job state straight from merged status-push content.
+
+    Prefers the modern ``print_status.state`` field (with ``enable`` as a
+    second busy signal); falls back to the legacy ``Attributes.CurrentStatus``,
+    where only 0 is known to mean idle. Returns None when no push has carried
+    a state yet (partial deltas often omit it).
     """
     print_status = content.get("print_status")
-    if isinstance(print_status, dict) and print_status.get("state") is not None:
-        return True
+    if isinstance(print_status, dict) and "state" in print_status:
+        raw = print_status.get("state")
+        label = str(raw).strip().lower() if raw is not None else ""
+        idle = label in _IDLE_PRINT_STATES and print_status.get("enable") is not True
+        return PrintState(label or "(empty)", idle)
     attrs = content.get("Attributes")
-    return isinstance(attrs, dict) and "CurrentStatus" in attrs
+    if isinstance(attrs, dict) and "CurrentStatus" in attrs:
+        try:
+            code: int | None = int(attrs["CurrentStatus"])
+        except (TypeError, ValueError):
+            code = None
+        return PrintState(f"CurrentStatus={attrs['CurrentStatus']}", code == 0)
+    return None
 
 
-def is_print_active(status: PrinterStatus) -> bool:
-    """A print is running or paused (a paused job still needs pause/stop to work)."""
-    return status.printing or status.print_state == "paused"
+def is_print_active(state: PrintState) -> bool:
+    """Not known to be idle: printing, paused, or a state we cannot vouch for."""
+    return not state.idle
 
 
-async def discover_printer(
-    host: str, port: int, access_code: str
-) -> tuple[str, PrinterStatus | None]:
+async def discover_printer(host: str, port: int, access_code: str) -> tuple[str, PrintState | None]:
     """Learn the printer serial and print state from the status topic.
 
     The serial is the second segment of ``elegoo/<sn>/api_status`` on any
-    method-6000 push. The state is parsed with the client's own status parser
-    from the pushes merged so far, once one of them carries a print state. The
-    status is ``None`` when the serial is known but no push carried a state
-    before the timeout.
+    method-6000 push. The state comes from ``classify_print_state`` over the
+    pushes merged so far, once one of them carries a print state. It is
+    ``None`` when the serial is known but no push carried a state before the
+    timeout.
     """
     serial: str | None = None
-    accumulated: dict[str, Any] = {"method": METHOD_STATUS_PUSH, "result": {}, "data": {}}
+    accumulated: dict[str, Any] = {}
     async with _make_client(
         host, port, access_code, f"sentinel-diag-{_generate_cc2_ids()[0]}"
     ) as c:
@@ -166,10 +188,10 @@ async def discover_printer(
                     content = payload.get("result") or payload.get("data") or {}
                     if not isinstance(content, dict):
                         continue
-                    _deep_merge(accumulated["result"], content)
-                    _deep_merge(accumulated["data"], content)
-                    if serial is not None and _carries_print_state(accumulated["result"]):
-                        return serial, _parse_status(accumulated)
+                    _deep_merge(accumulated, content)
+                    state = classify_print_state(accumulated)
+                    if serial is not None and state is not None:
+                        return serial, state
         except TimeoutError as exc:
             if serial is not None:
                 return serial, None
@@ -292,12 +314,12 @@ async def run_mqtt_slots(
             )
         if is_print_active(status):
             raise PrinterBusyError(
-                status.print_state,
-                f"the printer is {status.print_state}: filling its client slots would make it "
+                status.label,
+                f"the printer is {status.label}: filling its client slots would make it "
                 "refuse Sentinel's pause/stop commands. Run this while the printer is idle, "
                 "or use --force to run anyway.",
             )
-    start_state = status.print_state if status is not None else "unknown"
+    start_state = status.label if status is not None else "unknown"
 
     # Reuse test first: it is only informative while slots are still free, and
     # it costs at most two of them.
@@ -347,7 +369,7 @@ async def run_mqtt_slots(
                     stopped_reason = "could not re-check the print state (no state in status push)"
                     break
                 if is_print_active(latest):
-                    stopped_reason = f"a print started (printer is {latest.print_state})"
+                    stopped_reason = f"a print started (printer is {latest.label})"
                     break
             attempts += 1
             r = await reg(serial, new_ids())

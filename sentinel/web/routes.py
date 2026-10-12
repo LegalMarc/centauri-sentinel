@@ -299,6 +299,7 @@ def make_router(
                 "recent_jobs": recent_jobs,
                 "analytics": analytics,
                 "detection_enabled": detection_enabled,
+                "snooze_active": (await _detection_fields())["snooze_until"] is not None,
                 "printer_state": printer_state,
                 "print_elapsed": print_elapsed,
                 "extruder_temp": extruder_temp,
