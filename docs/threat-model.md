@@ -55,6 +55,9 @@ stored, in the `auth_sessions` table, so a copied database cannot be replayed as
   placeholder credentials.
 - **Redirects.** The post-login `next` target must be a same-origin path. Anything with
   `//`, a backslash, a control character, a space or a non-ASCII character is replaced by `/`.
+- **Public assets.** `GET /static/*` (the vendored UI bundle, font, page CSS and script) is
+  served without a session because the login page needs it. It holds no private data;
+  the DNS-rebinding host check still applies.
 - **Rate limit.** 10 failed credential attempts per client IP per minute. Successes reset it.
 - **Cookie flags.** `SameSite=Strict; HttpOnly`, plus `Secure` per `AUTH_COOKIE_SECURE`
   (`auto` adds it when the request arrived over HTTPS).

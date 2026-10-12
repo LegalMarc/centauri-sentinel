@@ -14,7 +14,19 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
 # ---------------------------------------------------------------------------
-# Stage 2 — runtime: copy venv + source, run as non-root via gosu
+# Stage 2 — web: build the dashboard's vendored UI bundle (OpenBridge web
+# components, Apache-2.0) so the runtime image never fetches anything
+# ---------------------------------------------------------------------------
+FROM node:22.23.3-bookworm-slim AS web
+
+WORKDIR /src/web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY web/entry.js web/build.mjs web/THIRD_PARTY_LICENSE-openbridge.txt ./
+RUN node build.mjs
+
+# ---------------------------------------------------------------------------
+# Stage 3 — runtime: copy venv + source, run as non-root via gosu
 # ---------------------------------------------------------------------------
 FROM python:3.12.8-slim AS runtime
 
@@ -33,6 +45,7 @@ COPY --from=builder /build/.venv /app/.venv
 # Copy application source
 WORKDIR /app
 COPY sentinel/ ./sentinel/
+COPY --from=web /src/sentinel/web/static/vendor/ ./sentinel/web/static/vendor/
 
 # Set PATH so the venv's binaries are used
 ENV PATH="/app/.venv/bin:$PATH" \

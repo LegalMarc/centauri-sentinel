@@ -88,38 +88,49 @@ class _BodyTooLargeError(Exception):
 _DUMMY_HASH = bcrypt.hashpw(b"__sentinel_dummy__", bcrypt.gensalt()).decode()
 
 _LOGIN_TEMPLATE = """<!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-obc-theme="dusk">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Sign in — Centauri Sentinel</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Sign in · Centauri Sentinel</title>
+<script src="/static/palette.js"></script>
+<link rel="stylesheet" href="/static/vendor/openbridge/openbridge.css">
 <style>
-*{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
-     background:#0f172a;color:#e2e8f0;min-height:100vh;
-     display:flex;align-items:center;justify-content:center}
-.card{background:#1e293b;border:1px solid #334155;border-radius:12px;
-      padding:2rem;width:100%;max-width:360px}
-h1{font-size:1.25rem;font-weight:600;margin-bottom:1.5rem;
-   text-align:center;color:#f1f5f9}
-label{display:block;font-size:.875rem;color:#94a3b8;margin-bottom:.375rem}
-input[type=text],input[type=password]{width:100%;padding:.625rem .75rem;
-  border:1px solid #475569;border-radius:6px;background:#0f172a;
-  color:#f1f5f9;font-size:.9375rem;outline:none;transition:border-color .15s}
-input:focus{border-color:#3b82f6}
-.field{margin-bottom:1rem}
-button{width:100%;padding:.625rem;background:#3b82f6;color:#fff;
-       border:none;border-radius:6px;font-size:.9375rem;font-weight:500;
-       cursor:pointer;margin-top:.5rem;transition:background .15s}
-button:hover{background:#2563eb}
-.error{background:#450a0a;border:1px solid #b91c1c;color:#fca5a5;
-       border-radius:6px;padding:.625rem .75rem;margin-bottom:1rem;
-       font-size:.875rem}
+@font-face{font-family:"Noto Sans";src:url("/static/vendor/openbridge/NotoSans.ttf") format("truetype");
+  font-weight:100 900;font-display:swap}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;display:grid;place-items:center;padding:24px 16px;
+  font:15px/1.45 "Noto Sans",system-ui,-apple-system,"Segoe UI",sans-serif;
+  background:var(--container-backdrop-color,#0f0f0f);color:var(--element-active-color,#e9e9e9)}
+.card{width:100%;max-width:380px;padding:28px;border-radius:8px;
+  background:var(--container-background-color,#1f1f1f);border:1px solid var(--border-outline-color,#373737)}
+.brand{display:flex;align-items:center;gap:10px;margin-bottom:6px}
+.mark{width:10px;height:10px;border-radius:50%;background:var(--alert-running-color,#198100)}
+h1{margin:0;font-size:20px;font-weight:600}
+.lead{margin:0 0 22px;color:var(--element-neutral-color,#b0b0b0);font-size:14px}
+label{display:block;margin-bottom:6px;font-weight:600;font-size:14px}
+.field{margin-bottom:16px}
+input[type=text],input[type=password]{width:100%;height:42px;padding:0 12px;border-radius:8px;font:inherit;
+  color:var(--element-active-color,#e9e9e9);background:var(--indent-enabled-background-color,rgba(255,255,255,.03));
+  border:1px solid var(--indent-enabled-border-color,rgba(255,255,255,.08))}
+input:focus{outline:none;border-color:var(--border-focus-color,#84b3ef);
+  background:var(--indent-focused-background-color,rgba(0,0,0,.42))}
+button{width:100%;height:44px;margin-top:6px;border-radius:8px;font:inherit;font-weight:600;cursor:pointer;
+  color:var(--element-active-inverted-color,#000);background:var(--raised-enabled-background-color,#96c4fe);
+  border:1px solid var(--raised-enabled-border-color,#b1d6ff)}
+button:hover{background:var(--raised-hover-background-color,#96c4fe)}
+button:focus-visible{outline:2px solid var(--border-focus-color,#84b3ef);outline-offset:2px}
+.error{margin:0 0 16px;padding:10px 12px;border-radius:8px;font-size:14px;
+  background:var(--alert-alarm-container-background-color,#620000);
+  border:1px solid var(--alert-alarm-container-border-color,#770000);border-left-width:6px}
+.note{margin:18px 0 0;color:var(--element-inactive-color,#8c8c8c);font-size:13px}
 </style>
 </head>
 <body>
-<div class="card">
-  <h1>Centauri Sentinel</h1>
+<main class="card">
+  <div class="brand"><span class="mark" aria-hidden="true"></span><h1>Centauri Sentinel</h1></div>
+  <p class="lead">Sign in to watch and control your printer.</p>
   __ERROR_HTML__
   <form method="post" action="/login">
     <input type="hidden" name="next" value="__NEXT_URL__">
@@ -133,7 +144,8 @@ button:hover{background:#2563eb}
     </div>
     <button type="submit">Sign in</button>
   </form>
-</div>
+  <p class="note">You stay signed in on this device until you log out.</p>
+</main>
 </body>
 </html>"""
 
@@ -237,6 +249,12 @@ class AuthMiddleware:
                 status_code=403, content="DNS Rebinding Protection: Host not allowed"
             )
             await response(scope, receive, send)
+            return
+
+        # Static UI assets (vendored stylesheet, font, components) hold nothing
+        # private and the login page needs them before anyone is signed in.
+        if path.startswith("/static/") and scope.get("method") in ("GET", "HEAD"):
+            await self._app(scope, receive, send)
             return
 
         # /login is exempt from CSRF and auth checks (it IS the auth endpoint).
@@ -583,7 +601,11 @@ class AuthMiddleware:
 
     @staticmethod
     def _login_page(next_url: str = "/", *, error: bool = False) -> str:
-        error_html = '<p class="error">Invalid username or password.</p>' if error else ""
+        error_html = (
+            '<p class="error" role="alert">That username and password did not match. Try again.</p>'
+            if error
+            else ""
+        )
         return _LOGIN_TEMPLATE.replace("__ERROR_HTML__", error_html).replace(
             "__NEXT_URL__", html.escape(next_url, quote=True)
         )

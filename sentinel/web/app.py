@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import json
 import logging
@@ -10,6 +11,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import Response
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from sentinel.ml.nonce import get_nonce_store
@@ -24,6 +26,8 @@ if TYPE_CHECKING:
     from sentinel.web.sessions import SessionStore
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
+# Built by web/build.mjs (Dockerfile web stage); absent in a bare checkout.
+_STATIC_DIR = Path(__file__).parent / "static"
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +84,16 @@ class LimitUploadSizeMiddleware:
             await response(scope, receive, send)
 
 
+def _asset_version() -> str:
+    """Short content hash of the static UI assets (stable across restarts)."""
+    digest = hashlib.sha256()
+    if _STATIC_DIR.is_dir():
+        for path in sorted(p for p in _STATIC_DIR.rglob("*") if p.is_file()):
+            digest.update(path.relative_to(_STATIC_DIR).as_posix().encode())
+            digest.update(path.read_bytes())
+    return digest.hexdigest()[:12]
+
+
 def create_app(
     settings: Settings,
     *,
@@ -95,6 +109,9 @@ def create_app(
     app = FastAPI(title="centauri-sentinel", version=__version__)
 
     templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
+    # Appended to static URLs so a deploy with new assets is never served from
+    # a browser's stale cache.
+    templates.env.globals["asset_version"] = _asset_version()
 
     router = make_router(
         db,
@@ -104,6 +121,7 @@ def create_app(
         settings,
     )
     app.include_router(router)
+    app.mount("/static", StaticFiles(directory=_STATIC_DIR, check_dir=False), name="static")
     app.add_middleware(LimitUploadSizeMiddleware)
 
     @app.get("/healthz")

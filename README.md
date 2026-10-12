@@ -337,6 +337,10 @@ uv run mypy --strict sentinel/
 uv run pytest --cov=sentinel --cov-fail-under=85
 ```
 
+Working on the dashboard? Build the UI bundle once (`npm --prefix web ci && npm --prefix web run build`)
+and run `uv run python tools/dev_preview.py` for a live preview against a fake printer. See
+[docs/ui.md](docs/ui.md).
+
 ---
 
 ## License
@@ -346,3 +350,8 @@ MIT — see [LICENSE](LICENSE).
 ### Third-party license acknowledgements
 
 The `obico-ml` container is derived from the [Obico Server](https://github.com/TheSpaghettiDetective/obico-server) project, which is licensed under the GNU Affero General Public License v3.0 (AGPL-3.0). In accordance with the AGPL-3.0, the source code of the modified `ml_api` service is made available in this repository under the `docker/obico-ml/` directory.
+
+The dashboard uses the [OpenBridge](https://www.openbridge.no) web components
+(`@oicl/openbridge-webcomponents` 1.0.1, Apache-2.0, with the Noto Sans font under the SIL
+Open Font License 1.1), bundled at image build time. The license text is in
+[web/THIRD_PARTY_LICENSE-openbridge.txt](web/THIRD_PARTY_LICENSE-openbridge.txt).

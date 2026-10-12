@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "dashboard-preview",
+      "runtimeExecutable": "uv",
+      "runtimeArgs": ["run", "python", "tools/dev_preview.py", "--scenario", "printing", "--port", "8765"],
+      "port": 8765
+    },
+    {
+      "name": "dashboard-preview-auth",
+      "runtimeExecutable": "uv",
+      "runtimeArgs": ["run", "python", "tools/dev_preview.py", "--scenario", "paused", "--auth", "--port", "8766"],
+      "port": 8766
+    }
+  ]
+}

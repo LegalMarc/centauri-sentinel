@@ -117,6 +117,38 @@ def make_router(
         except ValueError:
             return default
 
+    async def _detection_fields() -> dict[str, Any]:
+        """Detection state for the live view: on/snoozed, threshold, streak."""
+        assert db is not None
+        enabled, snooze_raw, threshold_raw, confirm_raw = await asyncio.gather(
+            db.get_setting("detection_enabled", "true"),
+            db.get_setting("snooze_until_utc", "0"),
+            db.get_setting("ml_score_threshold", str(settings.ml_score_threshold)),
+            db.get_setting("ml_confirm_count", str(settings.ml_confirm_count)),
+        )
+        try:
+            snooze_ts = float(snooze_raw or 0)
+        except ValueError:
+            snooze_ts = 0.0
+        try:
+            threshold = float(threshold_raw or settings.ml_score_threshold)
+        except ValueError:
+            threshold = settings.ml_score_threshold
+        try:
+            confirm_count = int(float(confirm_raw or settings.ml_confirm_count))
+        except ValueError:
+            confirm_count = settings.ml_confirm_count
+        snooze_active = snooze_ts > datetime.now(UTC).timestamp()
+        return {
+            "detection_enabled": enabled != "false",
+            "snooze_until": datetime.fromtimestamp(snooze_ts, UTC).isoformat()
+            if snooze_active
+            else None,
+            "ml_score_threshold": threshold,
+            "ml_confirm_count": confirm_count,
+            "confirm_streak": int(getattr(watcher, "confirm_streak", 0) or 0),
+        }
+
     async def _stall_seconds() -> float:
         """The watchdog's effective stall threshold, so every view agrees with it."""
         return effective_stall_seconds(
@@ -256,7 +288,7 @@ def make_router(
 
         return templates.TemplateResponse(
             request,
-            "status.html",
+            "dashboard.html",
             {
                 "watcher_state": watcher.state.name,
                 "tick_age": _format_age(age),
@@ -319,6 +351,7 @@ def make_router(
             "last_ml_score_stale": last_ml_score_age_s is not None
             and last_ml_score_age_s > stall_seconds,
             "ml_failure_auto_stop": await _ml_failure_auto_stop(),
+            **await _detection_fields(),
         }
 
         # Sentinel's own MJPEG probe (same signal /readyz uses), not the printer's

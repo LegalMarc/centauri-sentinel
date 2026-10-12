@@ -209,6 +209,11 @@ class WatcherLoop:
         self._last_resume_time = time.monotonic()
 
     @property
+    def confirm_streak(self) -> int:
+        """Consecutive over-threshold frames counted toward the next pause."""
+        return self._confirm_count
+
+    @property
     def dispatcher(self) -> NotificationDispatcher:
         return self._dispatcher
 

@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en" data-obc-theme="dusk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Centauri Sentinel</title>
+<script src="/static/palette.js?v={{ asset_version }}"></script>
+<link rel="stylesheet" href="/static/vendor/openbridge/openbridge.css?v={{ asset_version }}">
+<script type="module" src="/static/vendor/openbridge/ob.js?v={{ asset_version }}"></script>
+<link rel="stylesheet" href="/static/dashboard.css?v={{ asset_version }}">
+</head>
+<body class="obc-component-size-regular" data-threshold="{{ ml_score_threshold }}" data-confirm-count="{{ ml_confirm_count }}">
+<div class="app">
+  <header class="topbar">
+    <obc-top-bar id="topbar" apptitle="Centauri Sentinel" pagename="Monitor" menubuttonicon="home" showdimmingbutton{% if auth_enabled %} showuserbutton{% endif %}>
+      <div slot="alerts" class="status-chips">
+        <span class="state" id="watcher-chip" data-state="{{ watcher_state }}" data-tone="{{ 'ok' if watcher_state == 'ARMED' else ('caution' if watcher_state in ('PAUSED', 'WARMUP') else ('alarm' if watcher_state in ('STALLED', 'CAMERA_OFFLINE', 'OFFLINE') else '')) }}">{{ watcher_state | replace('_', ' ') | lower }}</span>
+      </div>
+    </obc-top-bar>
+  </header>
+
+  <nav class="commandbar" aria-label="Views and printer controls">
+    <div class="views" role="tablist" aria-label="Views">
+      <button class="view-tab" role="tab" id="tab-monitor" data-view="monitor" aria-controls="view-monitor" aria-selected="true"><obi-camera class="icon" aria-hidden="true"></obi-camera>Monitor</button>
+      <button class="view-tab" role="tab" id="tab-history" data-view="history" aria-controls="view-history" aria-selected="false" tabindex="-1"><obi-history-google class="icon" aria-hidden="true"></obi-history-google>History</button>
+      <button class="view-tab" role="tab" id="tab-settings" data-view="settings" aria-controls="view-settings" aria-selected="false" tabindex="-1"><obi-settings-iec class="icon" aria-hidden="true"></obi-settings-iec>Settings</button>
+    </div>
+    <div class="controls" role="group" aria-label="Printer controls">
+      <obc-button id="btn-pause" variant="normal" showleadingicon{% if not is_printing %} disabled{% endif %}><obi-media-pause slot="leading-icon"></obi-media-pause>Pause</obc-button>
+      <obc-button id="btn-resume" variant="normal" showleadingicon{% if not is_paused %} disabled{% endif %}><obi-media-play slot="leading-icon"></obi-media-play>Resume</obc-button>
+      <obc-button id="btn-stop" class="danger" variant="normal" showleadingicon{% if not (is_printing or is_paused) %} disabled{% endif %}><obi-media-stop slot="leading-icon"></obi-media-stop><span id="stop-label">Stop</span></obc-button>
+      <span class="sep" aria-hidden="true"></span>
+      <div class="snooze">
+        <obc-button id="btn-snooze" variant="normal" showleadingicon segmentposition="left"><obi-alarm-silenced-outlined slot="leading-icon"></obi-alarm-silenced-outlined>Snooze</obc-button>
+        <label class="visually-hidden" for="snooze-duration" hidden>Snooze length</label>
+        <select id="snooze-duration" aria-label="Snooze length">
+          <option value="300">5 min</option>
+          <option value="600" selected>10 min</option>
+          <option value="1800">30 min</option>
+          <option value="3600">1 hour</option>
+        </select>
+      </div>
+    </div>
+  </nav>
+
+  {% if notification_failures %}
+  <div class="banner" role="alert" id="notification-failures-banner">
+    <obi-warning-badge aria-hidden="true"></obi-warning-badge>
+    <div>
+      <strong>Alerts did not reach every channel.</strong>
+      <ul>
+        {% for fail in notification_failures %}
+        <li>{{ fail.channel }} failed to deliver an alert.{% if fail.snapshot_id %} <a href="/snapshot/{{ fail.snapshot_id }}" target="_blank" rel="noopener">View snapshot</a>{% endif %}</li>
+        {% endfor %}
+      </ul>
+    </div>
+  </div>
+  {% endif %}
+
+  <main>
+    <!-- MONITOR -->
+    <section class="view" id="view-monitor" role="tabpanel" aria-labelledby="tab-monitor">
+      <div class="monitor">
+        <div class="viewer">
+          <figure class="camera" id="camera" data-state="{{ 'paused' if is_paused else 'live' }}">
+              <img id="camera-feed-img" src="/stream" alt="Live view inside the print chamber"{% if not camera_connected %} hidden{% endif %}>
+              <div class="camera-offline" id="camera-offline"{% if camera_connected %} hidden{% endif %}>
+                <obi-camera-off class="icon" aria-hidden="true"></obi-camera-off>
+                <strong>Camera offline</strong>
+                <span>Sentinel keeps retrying. Detection is paused until frames arrive.</span>
+              </div>
+              <div class="hud">
+                <span class="chip" id="cam-chip" data-live="{{ 'true' if camera_connected else 'false' }}"><span class="dot"></span><span id="cam-status">{{ 'LIVE' if camera_connected else 'OFFLINE' }}</span><span class="res num" id="cam-res"></span></span>
+                <button class="cam-btn" id="btn-fullscreen" type="button" aria-label="Show camera full screen"><obi-expand aria-hidden="true"></obi-expand></button>
+              </div>
+              <div class="cam-banner" id="cam-banner"{% if not is_paused %} hidden{% endif %}>Paused · check the print, then resume</div>
+            </figure>
+
+          <div class="job" aria-label="Current job">
+            <div class="job-file">
+              <span class="eyebrow" id="job-state">{{ printer_state }}</span>
+              <strong id="job-file" title="{{ filename or '' }}">{{ filename or 'No job loaded' }}</strong>
+            </div>
+            <div class="job-progress">
+              <div class="bar" role="progressbar" aria-label="Print progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{{ '%.1f' | format(progress) }}" id="progress"><i id="progress-fill" style="width: {{ progress }}%"></i></div>
+              <span class="pct num" id="progress-pct">{{ "%.1f" | format(progress) }}%</span>
+            </div>
+            <dl class="job-stats">
+              <div><dt>Layer</dt><dd class="num" id="job-layer">{% if total_layers > 0 %}{{ current_layer }} / {{ total_layers }}{% else %}—{% endif %}</dd></div>
+              <div><dt>Elapsed</dt><dd class="num" id="job-elapsed">{{ print_elapsed }}</dd></div>
+              <div><dt>Remaining</dt><dd class="num" id="job-remaining" data-seconds="{{ remaining_seconds | int }}">—</dd></div>
+              <div><dt>Finishes</dt><dd class="num" id="job-eta">—</dd></div>
+            </dl>
+          </div>
+        </div>
+
+        <aside class="rail" aria-label="Instruments">
+          <section class="panel" aria-labelledby="h-watch">
+            <header><h2 id="h-watch">Failure watch</h2><span class="state" id="detection-chip" data-tone="{{ 'ok' if detection_enabled else 'caution' }}">{{ 'On' if detection_enabled else 'Snoozed' }}</span></header>
+            <div class="score-head">
+              <span class="eyebrow">Failure score</span>
+              <span class="score-value num" id="ml-score">{% if last_ml_score is not none %}{{ "%.2f" | format(last_ml_score) }}{% else %}—{% endif %}</span>
+            </div>
+            <div class="gauge" id="ml-gauge" role="meter" aria-label="Failure score" aria-valuemin="0" aria-valuemax="1" aria-valuenow="{{ last_ml_score or 0 }}" data-over="{{ 'true' if last_ml_score is not none and last_ml_score >= ml_score_threshold else 'false' }}">
+              <i id="ml-gauge-fill" style="width: {{ ((last_ml_score or 0) * 100) | round(1) }}%"></i>
+              <b id="ml-gauge-threshold" style="left: {{ (ml_score_threshold * 100) | round(1) }}%" title="Pause threshold"></b>
+            </div>
+            <div class="score-foot">
+              <span>Pauses at <strong class="num" id="ml-threshold">{{ "%.2f" | format(ml_score_threshold) }}</strong></span>
+              <span id="ml-age" class="{% if last_ml_score_stale %}stale{% endif %}">scored {{ last_ml_score_age }}</span>
+            </div>
+            <dl class="facts">
+              <div><dt>Confirm streak</dt><dd><span class="streak" id="streak" aria-hidden="true"></span><span class="num" id="streak-text">0 of {{ ml_confirm_count }}</span></dd></div>
+              <div><dt>Watcher</dt><dd id="watcher-state">{{ watcher_state | replace('_', ' ') | capitalize }}</dd></div>
+              <div><dt>Heartbeat</dt><dd class="num {% if tick_age_stale %}stale{% endif %}" id="heartbeat">{{ tick_age }}</dd></div>
+            </dl>
+          </section>
+
+          <section class="panel" aria-labelledby="h-temps">
+            <header><h2 id="h-temps">Temperatures</h2></header>
+            <div class="temps">
+              <figure class="temp">
+                <figcaption class="eyebrow">Nozzle</figcaption>
+                <div class="temp-value num"><span id="nozzle-temp">{% if extruder_temp is not none and extruder_temp > 0.5 %}{{ "%.0f" | format(extruder_temp) }}{% else %}—{% endif %}</span><small>°C</small></div>
+                <div class="temp-target num" id="nozzle-target">{% if extruder_target %}target {{ extruder_target | round | int }}°C{% else %}off{% endif %}</div>
+                <div class="temp-track" id="nozzle-track"><i></i></div>
+              </figure>
+              <figure class="temp">
+                <figcaption class="eyebrow">Bed</figcaption>
+                <div class="temp-value num"><span id="bed-temp">{% if bed_temp is not none and bed_temp > 0.5 %}{{ "%.0f" | format(bed_temp) }}{% else %}—{% endif %}</span><small>°C</small></div>
+                <div class="temp-target num" id="bed-target">{% if bed_target %}target {{ bed_target | round | int }}°C{% else %}off{% endif %}</div>
+                <div class="temp-track" id="bed-track"><i></i></div>
+              </figure>
+            </div>
+          </section>
+
+          <section class="panel" aria-labelledby="h-activity">
+            <header><h2 id="h-activity">Recent activity</h2><a class="panel-link" href="#history" data-goto="history">History</a></header>
+            {% set events = ((detections or [])[:5] + (pauses or [])[:5]) | sort(attribute='ts_utc', reverse=True) %}
+            {% if events %}
+            <ol class="events">
+              {% for e in events[:5] %}
+              {% if e.score is defined %}
+              <li data-tone="{{ 'alarm' if e.confirmed else 'caution' }}">
+                <span class="what">{{ 'Failure confirmed' if e.confirmed else 'Possible failure' }} <span class="num">· {{ "%.2f" | format(e.score) }}</span></span>
+                <time class="num" datetime="{{ e.ts_utc }}">{{ e.ts_utc }}</time>
+              </li>
+              {% else %}
+              <li data-tone="{{ 'ok' if e.result == 'ok' else 'alarm' }}">
+                <span class="what">{{ {'auto': 'Paused by detection', 'ml_failure': 'Paused: ML offline', 'web': 'Paused from dashboard', 'telegram': 'Paused from Telegram'}.get(e.source, 'Paused') }}{% if e.result != 'ok' %} · failed{% endif %}</span>
+                <time class="num" datetime="{{ e.ts_utc }}">{{ e.ts_utc }}</time>
+              </li>
+              {% endif %}
+              {% endfor %}
+            </ol>
+            {% else %}
+            <p class="empty-small">Nothing yet. Detections and pauses show up here.</p>
+            {% endif %}
+          </section>
+
+          <section class="panel" id="preview-panel" aria-labelledby="h-model"{% if not thumbnail_base64 %} hidden{% endif %}>
+            <header><h2 id="h-model">Model</h2></header>
+            <div class="thumb"><img id="gcode-preview-img" alt="Slicer preview of the current model" src="{% if thumbnail_base64 %}data:image/png;base64,{{ thumbnail_base64 }}{% endif %}"></div>
+          </section>
+        </aside>
+      </div>
+    </section>
+
+    <!-- HISTORY -->
+    <section class="view" id="view-history" role="tabpanel" aria-labelledby="tab-history" hidden>
+      <div class="summary">
+        <div class="metric"><span class="eyebrow">Print jobs</span><span class="value num">{{ analytics.total_prints }}</span></div>
+        <div class="metric"><span class="eyebrow">Success rate</span><span class="value num">{{ "%.0f" | format(analytics.success_rate_percent) }}%</span></div>
+        <div class="metric"><span class="eyebrow">Pauses</span><span class="value num">{{ analytics.total_pauses }}</span></div>
+        <div class="metric"><span class="eyebrow">Average completed print</span><span class="value num" data-duration="{{ analytics.avg_duration_seconds | int }}">—</span></div>
+      </div>
+
+      <h2 class="section-title">Print jobs</h2>
+      <div class="table-wrap">
+        {% if recent_jobs %}
+        <table>
+          <thead><tr><th>File</th><th>Started</th><th>Duration</th><th>Pauses</th><th>Result</th></tr></thead>
+          <tbody>
+            {% for j in recent_jobs %}
+            <tr>
+              <td class="file" title="{{ j.filename }}">{{ j.filename }}</td>
+              <td class="num"><time datetime="{{ j.started_at }}">{{ j.started_at }}</time></td>
+              <td class="num" data-duration="{{ j.duration_seconds or 0 }}">—</td>
+              <td class="num">{{ j.pauses_count }}</td>
+              <td><span class="state" data-tone="{{ {'completed': 'ok', 'failed': 'alarm', 'interrupted': 'caution', 'printing': 'active'}.get(j.status, '') }}">{{ j.status }}</span></td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% else %}
+        <p class="empty">No print jobs recorded yet. Jobs appear here once a print starts.</p>
+        {% endif %}
+      </div>
+
+      <h2 class="section-title">Detections</h2>
+      <div class="table-wrap">
+        {% if detections %}
+        <table>
+          <thead><tr><th>Time</th><th>Failure score</th><th>Streak</th><th>Action</th></tr></thead>
+          <tbody>
+            {% for d in detections %}
+            <tr>
+              <td class="num"><time datetime="{{ d.ts_utc }}">{{ d.ts_utc }}</time></td>
+              <td class="num">{% if d.snapshot_id %}<a href="/snapshot/{{ d.snapshot_id }}" target="_blank" rel="noopener">{{ "%.3f" | format(d.score) }}</a>{% else %}{{ "%.3f" | format(d.score) }}{% endif %}</td>
+              <td class="num">{{ d.consecutive }}</td>
+              <td><span class="state" data-tone="{{ 'alarm' if d.confirmed else 'caution' }}">{{ 'paused printer' if d.confirmed else 'alert sent' }}</span></td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% else %}
+        <p class="empty">No failures detected yet.</p>
+        {% endif %}
+      </div>
+
+      <h2 class="section-title">Pauses</h2>
+      <div class="table-wrap">
+        {% if pauses %}
+        <table>
+          <thead><tr><th>Time</th><th>Source</th><th>Result</th><th>Details</th></tr></thead>
+          <tbody>
+            {% for p in pauses %}
+            <tr>
+              <td class="num"><time datetime="{{ p.ts_utc }}">{{ p.ts_utc }}</time></td>
+              <td>{{ {'auto': 'Detection', 'ml_failure': 'ML outage', 'web': 'Dashboard', 'telegram': 'Telegram'}.get(p.source, p.source) }}</td>
+              <td><span class="state" data-tone="{{ 'ok' if p.result == 'ok' else 'alarm' }}">{{ p.result }}</span></td>
+              <td>{{ p.error_message or "—" }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% else %}
+        <p class="empty">No pauses recorded.</p>
+        {% endif %}
+      </div>
+
+      <div class="danger-zone">
+        <div>
+          <strong>Clear history</strong>
+          <p>Deletes every print job, detection, pause record and saved snapshot. This cannot be undone.</p>
+        </div>
+        <button class="plain-btn alarm" id="btn-clear-data" type="button">Clear history</button>
+      </div>
+    </section>
+
+    <!-- SETTINGS -->
+    <section class="view" id="view-settings" role="tabpanel" aria-labelledby="tab-settings" hidden>
+      <form id="settings-form" class="settings" novalidate>
+        <section class="panel">
+          <h2>Detection</h2>
+          <p class="panel-lead">How Sentinel decides a print is failing.</p>
+          <div class="field">
+            <label for="input-ml-score-threshold">Pause threshold</label>
+            <div class="row"><input class="input num" type="number" id="input-ml-score-threshold" name="ml_score_threshold" value="{{ ml_score_threshold }}" min="0" max="1" step="0.01" required aria-describedby="help-threshold"><span class="unit">0 to 1</span></div>
+            <p class="help" id="help-threshold">A frame scoring at or above this counts as a failure. Raise it if textured or busy models cause false alarms. Lower it if real spaghetti gets missed.</p>
+            <p class="error-msg">Enter a number from 0 to 1.</p>
+          </div>
+          <div class="field">
+            <label for="input-ml-confirm-count">Frames to confirm</label>
+            <div class="row"><input class="input num" type="number" id="input-ml-confirm-count" name="ml_confirm_count" value="{{ ml_confirm_count }}" min="1" max="20" step="1" required aria-describedby="help-confirm"><span class="unit">in a row</span></div>
+            <p class="help" id="help-confirm">How many failing frames in a row before Sentinel pauses. More ignores brief nozzle moves; fewer reacts sooner.</p>
+            <p class="error-msg">Enter a whole number from 1 to 20.</p>
+          </div>
+          <div class="field">
+            <label for="input-ml-poll-interval">Check every</label>
+            <div class="row"><input class="input num" type="number" id="input-ml-poll-interval" name="ml_poll_interval_seconds" value="{{ ml_poll_interval_seconds }}" min="1" max="300" step="1" required aria-describedby="help-poll"><span class="unit">seconds</span></div>
+            <p class="help" id="help-poll">How often a camera frame is scored. Longer saves CPU on the ML host; shorter responds faster.</p>
+            <p class="error-msg">Enter a whole number from 1 to 300.</p>
+          </div>
+          <div class="field">
+            <label for="input-detection-warmup">Warm-up</label>
+            <div class="row"><input class="input num" type="number" id="input-detection-warmup" name="detection_warmup_seconds" value="{{ detection_warmup_seconds }}" min="0" max="3600" step="1" required aria-describedby="help-warmup"><span class="unit">seconds</span></div>
+            <p class="help" id="help-warmup">Quiet period after a print starts or resumes. First layers, purge lines and towers often look like failures.</p>
+            <p class="error-msg">Enter a whole number from 0 to 3600.</p>
+          </div>
+          <div class="field">
+            <obc-toggle-switch id="input-ml-failure-auto-stop" label="ML outage pauses can auto-stop"{% if ml_failure_auto_stop %} checked{% endif %}></obc-toggle-switch>
+            <p class="help">When the ML service is down, Sentinel pauses the print to be safe. Off (recommended): that pause waits for you. On: it is cancelled after the auto-stop timeout, like a confirmed failure.</p>
+          </div>
+        </section>
+
+        <div style="display: grid; gap: var(--gutter);">
+          <section class="panel">
+            <h2>Printer</h2>
+            <p class="panel-lead">Where Sentinel finds the Centauri Carbon 2 on your network.</p>
+            <div class="field">
+              <label for="input-printer-ip">IP address or hostname</label>
+              <input class="input wide num" type="text" id="input-printer-ip" name="printer_ip" value="{{ printer_ip }}" required pattern="^[a-zA-Z0-9.:\-]+$" placeholder="192.168.1.100 or printer.local" autocomplete="off" spellcheck="false">
+              <p class="error-msg">Enter an IP address or hostname.</p>
+            </div>
+          </section>
+
+          {% if auth_enabled %}
+          <section class="panel">
+            <h2>Account</h2>
+            <p class="panel-lead">You stay signed in on this device until you log out.</p>
+            <div class="account-actions">
+              <form method="post" action="/logout"><button class="plain-btn" type="submit">Log out</button></form>
+              <form method="post" action="/logout-all"><button class="plain-btn alarm" type="submit">Log out all devices</button></form>
+            </div>
+          </section>
+          {% endif %}
+
+          <div class="form-actions">
+            <obc-button id="btn-save" variant="raised">Save settings</obc-button>
+          </div>
+        </div>
+      </form>
+      <p class="about">Centauri Sentinel v{{ version }} · <a href="https://github.com/legalmarc/centauri-sentinel" target="_blank" rel="noopener">Source</a> · <a href="https://github.com/legalmarc/centauri-sentinel/blob/main/docs/threat-model.md" target="_blank" rel="noopener">Threat model</a></p>
+    </section>
+  </main>
+</div>
+
+{% if auth_enabled %}
+<div class="user-menu" id="user-menu" role="menu" hidden>
+  <div class="who">Signed in</div>
+  <form method="post" action="/logout"><button type="submit" role="menuitem">Log out</button></form>
+  <form method="post" action="/logout-all"><button type="submit" role="menuitem">Log out all devices</button></form>
+</div>
+{% endif %}
+
+<script src="/static/dashboard.js?v={{ asset_version }}" defer></script>
+</body>
+</html>

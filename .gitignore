@@ -68,3 +68,7 @@ SYSTEM_PROMPT.md
 
 # Agent build transcripts (kept locally, never published)
 spike/*.jsonl
+
+# Built UI bundle (web/build.mjs); produced by the Dockerfile web stage
+web/node_modules/
+sentinel/web/static/vendor/

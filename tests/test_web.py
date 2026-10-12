@@ -260,11 +260,11 @@ async def test_status_page_renders(app: object) -> None:
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("text/html")
     body = r.text
-    assert "centauri-sentinel" in body
-    assert "ARMED" in body
-    assert "Watcher state" in body
-    assert "Recent detections" in body
-    assert "Recent pauses" in body
+    assert "Centauri Sentinel" in body
+    assert "armed" in body
+    assert "Failure watch" in body
+    assert "Detections" in body
+    assert "Pauses" in body
 
 
 async def test_status_page_no_tailwind_cdn(app: object) -> None:
@@ -277,16 +277,21 @@ async def test_status_page_no_tailwind_cdn(app: object) -> None:
     assert "cdnjs.cloudflare.com" not in body
 
 
-async def test_status_page_css_under_2kb(app: object) -> None:
-    """Embedded CSS must stay under 16 KB."""
+async def test_status_page_assets_are_static_and_versioned(app: object) -> None:
+    """Styles and script ship as cacheable static files, never inline, and
+    carry a content version so a deploy is not served from a stale cache."""
+    import re
+
     async with _client(app) as c:
         r = await c.get("/")
+        css = await c.get("/static/dashboard.css")
+        js = await c.get("/static/dashboard.js")
     body = r.text
-    start = body.find("<style>")
-    end = body.find("</style>")
-    assert start != -1 and end != -1
-    css_bytes = len(body[start:end].encode())
-    assert css_bytes < 16384, f"Embedded CSS is {css_bytes} bytes (limit 16384)"
+    assert "<style>" not in body
+    assert re.search(r'href="/static/dashboard\.css\?v=[0-9a-f]{12}"', body)
+    assert re.search(r'src="/static/dashboard\.js\?v=[0-9a-f]{12}"', body)
+    assert css.status_code == 200
+    assert js.status_code == 200
 
 
 async def test_status_page_no_meta_refresh(app: object) -> None:
@@ -1943,8 +1948,8 @@ async def test_status_page_camera_badge_uses_sentinel_probe_not_printer_flag(
         r = await c.get("/")
 
     assert r.status_code == 200
-    assert "Camera Connected" in r.text
-    assert 'class="camera-dot offline"' not in r.text
+    assert 'id="cam-chip" data-live="true"' in r.text
+    assert 'id="camera-offline" hidden' in r.text
 
 
 async def test_status_page_camera_img_uses_addeventlistener_not_inline_onerror(
@@ -1959,12 +1964,10 @@ async def test_status_page_camera_img_uses_addeventlistener_not_inline_onerror(
     """
     async with _client(app) as c:
         r = await c.get("/")
+        js = await c.get("/static/dashboard.js")
     assert r.status_code == 200
     assert "onerror=" not in r.text
-    assert (
-        'document.getElementById("camera-feed-img")?.addEventListener("error", handleCameraError);'
-        in r.text
-    )
+    assert 'addEventListener("error", onCameraError)' in js.text
 
 
 async def test_status_page_js_printer_badge_uses_printer_state_field(
@@ -1977,10 +1980,9 @@ async def test_status_page_js_printer_badge_uses_printer_state_field(
     after page load with no real state transition.
     """
     async with _client(app) as c:
-        r = await c.get("/")
-    assert r.status_code == 200
-    assert "cardPrinterBadge.textContent = data.printer_state;" in r.text
-    assert "data.print_state.charAt(0).toUpperCase()" not in r.text
+        js = await c.get("/static/dashboard.js")
+    assert js.status_code == 200
+    assert '$("job-state").textContent = d.printer_state || ps;' in js.text
 
 
 async def test_status_page_interrupted_job_gets_distinct_badge(
@@ -2008,8 +2010,8 @@ async def test_status_page_interrupted_job_gets_distinct_badge(
     async with _client(app_state) as c:
         r = await c.get("/")
     assert r.status_code == 200
-    assert 'class="state-badge state-warmup">' in r.text
-    assert 'class="state-badge state-printing">' not in r.text
+    assert '<span class="state" data-tone="caution">interrupted</span>' in r.text
+    assert 'data-tone="active">interrupted' not in r.text
 
 
 async def test_status_page_extruder_and_bed_target_round_not_truncate(
@@ -2042,8 +2044,8 @@ async def test_status_page_extruder_and_bed_target_round_not_truncate(
     async with _client(app_state) as c:
         r = await c.get("/")
     assert r.status_code == 200
-    assert "/ 201°C" in r.text  # round(200.7) == 201, not int(200.7) == 200
-    assert "/ 60°C" in r.text  # round(59.6) == 60, not int(59.6) == 59
+    assert "target 201°C" in r.text  # round(200.7) == 201, not int(200.7) == 200
+    assert "target 60°C" in r.text  # round(59.6) == 60, not int(59.6) == 59
 
 
 async def test_control_pause_failure(
@@ -2346,9 +2348,9 @@ async def test_status_page_renders_notification_failures_banner(
         r = await c.get("/")
     assert r.status_code == 200
     body = r.text
-    assert "Notification Delivery Failures" in body
+    assert "Alerts did not reach every channel." in body
     assert "Telegram" in body
-    assert "View Snapshot" in body
+    assert "View snapshot" in body
     assert "/snapshot/12345678901234567890123456789012" in body
 
 
@@ -2780,16 +2782,16 @@ def test_dashboard_template_redirects_to_login_on_401() -> None:
 
     import sentinel.web as web_pkg
 
-    html = (Path(web_pkg.__file__).parent / "templates" / "status.html").read_text()
-    assert "function sentinelFetch" in html
-    assert "res.status === 401" in html
-    assert "'/login?next=' + encodeURIComponent(location.pathname + location.search)" in html
+    js = (Path(web_pkg.__file__).parent / "static" / "dashboard.js").read_text()
+    assert "function sentinelFetch" in js
+    assert "res.status === 401" in js
+    assert '"/login?next=" + encodeURIComponent(location.pathname + location.search)' in js
     # Every network call uses the wrapper; the only raw fetch() is inside it.
     import re
 
-    assert len(re.findall(r"(?<![A-Za-z])fetch\(", html)) == 1
-    handler = html[html.index("function handleCameraError") :]
-    assert "sentinelFetch('/api/printer')" in handler.split("function updateLiveStats")[0]
+    assert len(re.findall(r"(?<![A-Za-z])fetch\(", js)) == 1
+    handler = js[js.index("function onCameraError") :]
+    assert 'sentinelFetch("/api/printer")' in handler.split("function toggleFullscreen")[0]
 
 
 # ---------------------------------------------------------------------------
