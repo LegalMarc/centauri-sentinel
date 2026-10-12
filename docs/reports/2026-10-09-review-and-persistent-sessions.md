@@ -49,3 +49,24 @@ Three reviewers (watcher, printer/camera/ML, bot/notify/db/web) reported:
 Merged to local `main`. Not pushed: pushing may trigger a Coolify redeploy to the live
 printer host, so that is the owner's call. After deploy, sign in once; the session then
 persists until Log out.
+
+## Phase 2 (2026-10-11): UI redesign and auth follow-ups
+
+Branch `feat/ui-redesign-and-auth-followups`. Owner decisions: hold the push until more
+changes land (Q1); add a settings toggle for ML-outage auto-stop, default off (Q2); use the
+real printer to settle the MQTT slot question (Q3); add "log out all devices" (Q4); redesign
+the dashboard with OpenBridge.
+
+- `f1105cc` Browser requests never get the Basic popup (JSON 401, page goes to /login);
+  `ml_failure_auto_stop`; POST /logout-all; `python -m sentinel.diagnostics mqtt-slots`.
+- `45683f4`, `3ac23fe` OpenBridge dashboard (vendored 1.0.1, Apache-2.0; 2.x is AGPL),
+  styled login, static versioned assets, Dockerfile web stage, `tools/dev_preview.py`.
+  See `docs/ui.md`.
+
+Q3 status: the printer is on 192.168.40.x, unreachable from the dev Mac (192.168.10.x), and
+the `servany` SSH key is restricted to an inventory command. After deploy, run
+`python -m sentinel.diagnostics mqtt-slots` in the Coolify terminal of the sentinel
+service while the printer is idle, then decide whether to reuse one registration id.
+
+Next: deep-tier review of `git diff main...HEAD`, fix all items, merge to `main`, then ask
+before pushing (push may redeploy via Coolify).
