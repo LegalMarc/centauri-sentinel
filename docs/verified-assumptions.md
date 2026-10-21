@@ -202,6 +202,27 @@ to 20 s and exits 0 only when the printer itself reports `paused`. Follow with
 firmware acks but ignores the command, which is the next thing to capture
 with an `elegoo/#` subscription during a pause from the official app.
 
+### Live probes (2026-10-21, firmware 02.01.00.00, printer idle)
+
+Run from the Coolify terminal of the sentinel container against 192.168.40.18.
+
+- **HTTP info works.** `GET http://<ip>/system/info?X-Token=<accessCode>` returns
+  `system_info.sn` (the serial), model, hostname, IP and `software_version.ota_version`
+  (`02.01.00.00`). It needs no MQTT session, so it is the reliable way to learn the serial.
+- **UDP discovery (port 3000, method 7000) did not answer** within 3 s.
+- **Status pushes are deltas.** In 60 s idle, 21 method-6000 pushes arrived, every one
+  carrying only `{"extruder": {"temperature": N}}`, at gaps of 1 to 12 s. No push carried
+  `print_status`, `machine_status` or `heater_bed`. A listener that starts from nothing
+  never learns those blocks while they do not change.
+- **GET_STATUS (`1002`) returns the full state** on a registered session, as
+  `{"id", "method": 1002, "result": {...}}` with blocks `error_code`, `external_device`,
+  `extruder`, `fans`, `gcode_move`, `heater_bed`, `led`, `machine_status`, `print_status`,
+  `tool_head`, `ztemperature_sensor`.
+- **Idle reads as an empty state.** Idle after a finished job: `print_status.state` is `""`,
+  `print_status.enable` is `true`, `filename` is `""`, and `machine_status.status` is `1`.
+  So `enable` does not mean "printing", and `""` is the idle state on this firmware.
+  The state values during a print are still to be captured with the same request.
+
 ### pycentauri status (0.4.2)
 
 pycentauri explicitly notes: *"The newer Centauri Carbon 2 uses a different JSON-RPC probe and is not supported here."* (discovery.py docstring). The `Printer.connect()` hardcodes port 3030 which is closed on the Carbon 2.
