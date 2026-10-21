@@ -427,7 +427,8 @@ class PrinterClient:
                 # left): do not carry an older printing view past them.
                 self._provisional = None
             else:
-                self._provisional = copy.deepcopy(view)
+                # A provisional view is already a fresh copy; the confirmed state is live.
+                self._provisional = copy.deepcopy(view) if confirmed else view
                 if confirmed:
                     self._provisional_at = self._last_update_time
         self._accumulated_data = {}
