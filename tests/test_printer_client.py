@@ -1740,3 +1740,24 @@ async def test_print_end_keeps_the_other_blocks() -> None:
     assert s.filename is None
     assert s.thumbnail_base64 is None
     assert s.bed_temp == 60.0
+
+
+@pytest.mark.parametrize(
+    ("print_status", "machine_status", "printing", "label"),
+    [
+        ({"state": "", "enable": True}, {"status": 1}, False, "standby"),  # live idle capture
+        ({"state": ""}, {"status": 2}, True, "printing"),
+        ({"state": ""}, {}, True, "printing"),  # no idle code: keep detection on
+        ({"state": "standby", "enable": True}, {}, False, "standby"),
+        ({"state": "complete", "enable": True}, {}, False, "complete"),
+        ({"state": "printing"}, {"status": 1}, True, "printing"),
+        ({"state": "paused"}, {}, True, "paused"),
+    ],
+)
+def test_print_state_rules(
+    print_status: dict[str, Any], machine_status: dict[str, Any], printing: bool, label: str
+) -> None:
+    s = _parse_status(
+        {"method": 6000, "result": {"print_status": print_status, "machine_status": machine_status}}
+    )
+    assert (s.printing, s.print_state) == (printing, label)

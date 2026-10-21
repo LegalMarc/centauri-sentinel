@@ -8,9 +8,10 @@ printer command opens a short registered MQTT session with fresh ids
 minutes, those pile up and later pause/stop commands are refused. This tool
 answers that from the printer itself.
 
-It only ever registers (and reads the status topic to learn the serial and the
-print state). It never publishes pause, resume, stop or any other print-affecting
-command. Because filling the slots makes the printer refuse later pause/stop
+It only ever registers, reads the status topic, and (when pushes do not say what
+the printer is doing) sends one read-only GET_STATUS query and one HTTP
+``/system/info`` request. It never publishes pause, resume, stop or any other
+print-affecting command. Because filling the slots makes the printer refuse later pause/stop
 commands, it refuses to run while a print is active (exit code 2) unless
 ``--force`` is given.
 """
@@ -39,6 +40,7 @@ from sentinel.printer.client import (
 )
 from sentinel.printer.errors import PrinterProtocolError, PrinterTimeoutError
 from sentinel.printer.types import (
+    CC2_CMD_GET_STATUS,
     CC2_REG_OK,
     CC2_REG_TOO_MANY_CLIENTS,
     CC2_REGISTRATION_TIMEOUT_S,
@@ -61,6 +63,10 @@ WARNING = (
 _EXPIRY_POLL_S = 30.0
 # How long to wait for the first status push when learning the serial number.
 _SERIAL_TIMEOUT_S = 15.0
+# How long each re-check waits for queued status pushes before reading the state.
+_WATCH_DRAIN_S = 0.5
+# machine_status.status reported by an idle printer (live probe 2026-10-21).
+_MACHINE_STATUS_IDLE = 1
 
 # RegistrationResult.outcome values.
 OUTCOME_OK = "ok"
@@ -149,13 +155,20 @@ def classify_print_state(content: dict[str, Any]) -> PrintState | None:
     if isinstance(print_status, dict) and "state" in print_status:
         raw = print_status.get("state")
         label = str(raw).strip().lower() if raw is not None else ""
+        machine_status = content.get("machine_status")
+        # Firmware 02.01 reports idle as state "" with enable true and machine status 1
+        # (live probe 2026-10-21). An empty state without that code stays busy.
+        empty_idle = (
+            raw == ""
+            and isinstance(machine_status, dict)
+            and machine_status.get("status") == _MACHINE_STATUS_IDLE
+        )
         idle = (
-            label in _IDLE_PRINT_STATES
-            and not print_status.get("enable")
+            ((label in _IDLE_PRINT_STATES and not print_status.get("enable")) or empty_idle)
             # Both formats present: either one saying busy wins.
             and (legacy is None or legacy.idle)
         )
-        return PrintState(label or "(empty)", idle)
+        return PrintState(label or ("standby (empty state)" if idle else "(empty)"), idle)
     return legacy
 
 
@@ -211,6 +224,82 @@ async def discover_printer(host: str, port: int, access_code: str) -> tuple[str,
                 return serial, None
             raise PrinterProtocolError("connection closed before any status push") from exc
     raise PrinterProtocolError("unreachable")  # pragma: no cover - satisfies mypy
+
+
+async def http_serial(host: str, access_code: str) -> str | None:
+    """The serial from ``GET /system/info`` (live-verified 2026-10-21), or None.
+
+    An idle printer can go more than 15 s without a status push, so the push topic
+    is not a reliable way to learn the serial.
+    """
+    import urllib.request
+
+    def fetch() -> str | None:
+        url = f"http://{host}/system/info?X-Token={access_code}"
+        with urllib.request.urlopen(url, timeout=5) as resp:
+            sn = json.loads(resp.read()).get("system_info", {}).get("sn")
+        return str(sn) if sn else None
+
+    try:
+        return await asyncio.to_thread(fetch)
+    except Exception as exc:
+        logger.warning("Could not read the serial from /system/info: %s", exc)
+        return None
+
+
+async def snapshot_print_state(reader: PrinterClient, serial: str) -> PrintState | None:
+    """The print state from one GET_STATUS query, or None if it fails.
+
+    Status pushes are deltas and carry no print state while it is not changing, so
+    this is the only way to learn it from an idle printer. It costs one registration.
+    """
+    reader._serial_number = serial
+    try:
+        response = await reader._send_command(CC2_CMD_GET_STATUS)
+    except Exception as exc:
+        logger.warning("GET_STATUS failed: %s", exc)
+        return None
+    result = response.get("result")
+    return classify_print_state(result) if isinstance(result, dict) else None
+
+
+class _StateWatch:
+    """A status subscription held open while registering, to see a print start.
+
+    A print starting pushes its new state, so draining the queued pushes at each
+    re-check sees it whenever it happened. No state push means no change.
+    """
+
+    def __init__(self, host: str, port: int, access_code: str) -> None:
+        self._cm = _make_client(host, port, access_code, f"sentinel-diag-{_generate_cc2_ids()[0]}")
+        self._merged: dict[str, Any] = {}
+        self._messages: Any = None
+
+    async def __aenter__(self) -> _StateWatch:
+        client = await self._cm.__aenter__()
+        await client.subscribe("elegoo/+/api_status")
+        self._messages = aiter(client.messages)
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        await self._cm.__aexit__(*exc)  # type: ignore[arg-type]
+
+    async def latest(self) -> PrintState | None:
+        """Drain queued pushes; return the newest state seen, or None if none carried one."""
+        while True:
+            try:
+                message = await asyncio.wait_for(anext(self._messages), _WATCH_DRAIN_S)
+            except TimeoutError:
+                break
+            try:
+                payload = json.loads(message.payload)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict) and payload.get("method") == METHOD_STATUS_PUSH:
+                content = payload.get("result") or payload.get("data") or {}
+                if isinstance(content, dict):
+                    _deep_merge(self._merged, content)
+        return classify_print_state(self._merged)
 
 
 async def discover_serial(host: str, port: int, access_code: str) -> str:
@@ -312,13 +401,32 @@ async def run_mqtt_slots(
         used_client_ids.add(ids[0])
         return ids
 
-    serial, status = await discover_printer(host, port, access_code)
+    serial: str | None
+    status: PrintState | None
+    try:
+        serial, status = await discover_printer(host, port, access_code)
+    except PrinterTimeoutError:
+        serial, status = None, None  # a quiet idle printer; fall back below
+    if serial is None:
+        serial = await http_serial(host, access_code)
+        if serial is None:
+            raise PrinterTimeoutError(
+                "no status push and no answer from /system/info; cannot learn the serial number"
+            )
+    state_source = "status push"
+    snapshot_registrations = 0
+    if status is None:
+        # Pushes are deltas: an idle printer does not repeat its state. Ask for it.
+        status = await snapshot_print_state(reader, serial)
+        state_source = "GET_STATUS"
+        snapshot_registrations = 1
     if not force:
         if status is None:
             raise PrinterBusyError(
                 "unknown",
-                "cannot tell whether a print is active (no status push carried a print state); "
-                "refusing to occupy the printer's client slots. Use --force to run anyway.",
+                "cannot tell whether a print is active (no status push carried a print state "
+                "and GET_STATUS failed); refusing to occupy the printer's client slots. "
+                "Use --force to run anyway.",
             )
         if is_print_active(status):
             raise PrinterBusyError(
@@ -328,6 +436,45 @@ async def run_mqtt_slots(
                 "or use --force to run anyway.",
             )
     start_state = status.label if status is not None else "unknown"
+
+    async with contextlib.AsyncExitStack() as stack:
+        # Open before the first registration so a print that starts at any point is
+        # seen at the next re-check (--force skips the re-checks).
+        watch = (
+            None if force else await stack.enter_async_context(_StateWatch(host, port, access_code))
+        )
+        return await _registration_tests(
+            settings,
+            serial,
+            reg,
+            new_ids,
+            watch,
+            max_registrations=max_registrations,
+            expiry_wait_s=expiry_wait_s,
+            force=force,
+            t0=t0,
+            start_state=start_state,
+            state_source=state_source,
+            snapshot_registrations=snapshot_registrations,
+        )
+
+
+async def _registration_tests(
+    settings: Settings,
+    serial: str,
+    reg: Any,
+    new_ids: Any,
+    watch: _StateWatch | None,
+    *,
+    max_registrations: int,
+    expiry_wait_s: float,
+    force: bool,
+    t0: float,
+    start_state: str,
+    state_source: str,
+    snapshot_registrations: int,
+) -> dict[str, Any]:
+    """The reuse, fresh-id and expiry tests (see ``run_mqtt_slots``)."""
 
     # Reuse test first: it is only informative while slots are still free, and
     # it costs at most two of them.
@@ -363,20 +510,18 @@ async def run_mqtt_slots(
         deadline = time.monotonic() + expiry_wait_s
         while time.monotonic() + _EXPIRY_POLL_S <= deadline:
             await asyncio.sleep(_EXPIRY_POLL_S)
-            if not force:
+            if watch is not None:
                 # Every retry that is accepted takes another slot, so do not add to
                 # them once a print has started: Sentinel may need to pause it.
                 try:
-                    _, latest = await discover_printer(host, port, access_code)
+                    latest = await watch.latest()
                 except Exception as exc:
                     stopped_reason = (
                         f"could not re-check the print state: {type(exc).__name__}: {exc}"
                     )
                     break
-                if latest is None:
-                    stopped_reason = "could not re-check the print state (no state in status push)"
-                    break
-                if is_print_active(latest):
+                # No state push since the start means no change from the idle start.
+                if latest is not None and is_print_active(latest):
                     stopped_reason = f"a print started (printer is {latest.label})"
                     break
             attempts += 1
@@ -403,6 +548,9 @@ async def run_mqtt_slots(
         "printer": settings.printer_ip,
         "serial": serial,
         "print_state": start_state,
+        "print_state_source": state_source,
+        # GET_STATUS registers once before the tests; count it when reading capacity.
+        "registrations_before_tests": snapshot_registrations,
         "forced": force,
         "reuse": {
             "first": asdict(reuse_first),

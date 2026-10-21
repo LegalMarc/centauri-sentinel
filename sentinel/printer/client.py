@@ -68,6 +68,8 @@ _PAUSE_DEBOUNCE_S = 30.0  # minimum seconds between successive pause() publishes
 _STATUS_SILENCE_S = 45.0
 # Retry a failed GET_STATUS snapshot after this long, while the print state is unknown.
 _SNAPSHOT_RETRY_S = 30.0
+# machine_status.status reported by an idle printer (live probe 2026-10-21).
+_MACHINE_STATUS_IDLE = 1
 
 
 def _generate_cc2_ids() -> tuple[str, str]:
@@ -224,11 +226,18 @@ def _parse_status(
         if missing_fields:
             logger.warning("Missing key fields in modern MQTT payload: %s", missing_fields)
 
-        # Callers only parse once a state is known (_has_print_state). Firmware 02.01
-        # reports idle as "" with print_status.enable true, so "enable" does not mean
-        # printing; only the state does (live probe 2026-10-21).
-        print_state = print_status.get("state") or "standby"
-        printing = print_state in ("printing", "paused")
+        # Callers only parse once a state is known (_has_print_state). A named state is
+        # authoritative. An empty state is ambiguous: firmware 02.01 reports idle as ""
+        # with machine_status.status 1 (and print_status.enable true, so "enable" does
+        # not mean printing). Until "" is captured during a print, read it as printing
+        # unless the idle status code says otherwise, so detection stays on.
+        raw_state = print_status.get("state")
+        if raw_state == "":
+            printing = machine_status.get("status") != _MACHINE_STATUS_IDLE
+            print_state = "printing" if printing else "standby"
+        else:
+            print_state = raw_state or "standby"
+            printing = print_state in ("printing", "paused")
 
         elapsed_seconds = float(print_status.get("print_duration", 0.0))
         current_layer = int(print_status.get("current_layer", 0))

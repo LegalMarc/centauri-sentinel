@@ -90,6 +90,13 @@ printer with hot plastic in it.
 - **Pause only through `_publish_pause()`.** Confirmed detection and the ML
   fail-closed path are its only callers. The watcher never pauses during `IDLE`
   or `WARMUP`, and calls `stop()` only for the auto-stop escalation.
+- **An unknown print state is never idle.** Status pushes are deltas, so after a
+  listener (re)connect the client knows temperatures but not whether a print is
+  running. It fetches one GET_STATUS snapshot (retried every 30 s) and `status()`
+  raises until a print state is known, so the watcher marks the status stale and
+  goes `OFFLINE` (alerted) rather than `IDLE`, which would end the job and stop
+  detection mid-print. An empty state counts as printing unless
+  `machine_status.status` is 1, the idle code seen live.
 - **State follows the printer, not the intent.** The watcher moves to `PAUSED`
   only after the pause command is acknowledged, or after live status confirms
   the printer really is paused. A failed pause leaves it `ARMED` so the next

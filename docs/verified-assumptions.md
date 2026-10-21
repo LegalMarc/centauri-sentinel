@@ -220,8 +220,9 @@ Run from the Coolify terminal of the sentinel container against 192.168.40.18.
   `tool_head`, `ztemperature_sensor`.
 - **Idle reads as an empty state.** Idle after a finished job: `print_status.state` is `""`,
   `print_status.enable` is `true`, `filename` is `""`, and `machine_status.status` is `1`.
-  So `enable` does not mean "printing", and `""` is the idle state on this firmware.
-  The state values during a print are still to be captured with the same request.
+  So `enable` does not mean "printing". Sentinel reads `""` as idle only with
+  `machine_status.status` 1, and otherwise as printing, until a GET_STATUS capture
+  during a print shows what a running print reports.
 
 ### pycentauri status (0.4.2)
 
