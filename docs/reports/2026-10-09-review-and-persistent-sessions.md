@@ -164,8 +164,14 @@ Still open:
 
 Still open:
 
-- Q3: run `python -m sentinel.diagnostics mqtt-slots` (plain command now works on a quiet
-  idle printer) and record capacity and expiry in `docs/verified-assumptions.md` §3.
+- Q3 closed (2026-10-21): the printer holds about 6 registrations, each about 60 s after its
+  session closes; re-registering a held pair answers "already registered" and commands on
+  it are honoured (GET_STATUS measured). Sentinel now reuses one pair for control and one
+  for status (`3cd25c4`, reviewed, deployed via deployment `500quecvw6lx38j1qnkknbhu`,
+  snapshot loaded, ready). Recorded in `docs/verified-assumptions.md` §3.
+- Owner decision: reuse is measured for GET_STATUS only. A pause on a reused pair would be
+  confirmed by the supervised `python -m sentinel printer-cmd pause` check during a print
+  (verified-assumptions §3), not run on an idle printer without the owner.
 - FM1/Q1: capture GET_STATUS during a real print (the probe in `docs/verified-assumptions.md`
   §3) to confirm a running print never reports `state ""` with machine_status.status 1.
   Until then do not rely on Sentinel unattended for a long print.
