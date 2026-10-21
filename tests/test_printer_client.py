@@ -2302,3 +2302,21 @@ async def test_control_commands_on_one_id_never_overlap() -> None:
     client._send_on = session  # type: ignore[method-assign]
     await asyncio.gather(client._send_command(1021), client._send_command(1022))
     assert peak == 1
+
+
+async def test_control_and_status_pairs_never_share_a_client_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pairs = iter([("0cliSAME00", "a" * 27), ("0cliSAME00", "b" * 27), ("0cliOTHER0", "c" * 27)])
+    monkeypatch.setattr("sentinel.printer.client._generate_cc2_ids", lambda: next(pairs))
+    seen: list[str] = []
+
+    async def session(client_id: str, request_id: str, method: int, params: Any) -> Any:
+        seen.append(client_id)
+        return {}
+
+    client = PrinterClient(_SETTINGS)
+    client._send_on = session  # type: ignore[method-assign]
+    await client._send_command(1021)
+    await client._send_command(1002)
+    assert seen == ["0cliSAME00", "0cliOTHER0"]

@@ -141,7 +141,8 @@ diagnostic. Sentinel reuses one `client_id`/`request_id` pair for pause/resume/s
 for status snapshots, so it holds at most two; re-registering a held pair answers
 `already registered`, which the printer accepts. A pause refused with `too many clients` is
 retried with backoff, and the watcher retries on its next tick. When the table is full,
-wait a minute.
+wait a minute. Pause, resume and stop share one pair, so a pause can wait up to about 18 s
+behind a resume or stop whose session hangs.
 
 **Measure it on the real printer.** Open the Coolify terminal on the `sentinel` service
 (the container has the printer's `PRINTER_IP` and `PRINTER_ACCESS_CODE`) and run, **while

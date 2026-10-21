@@ -366,9 +366,9 @@ class PrinterClient:
         self._status_client_id = f"{self._client_id}-status"
         self._cmd_client_id = f"{self._client_id}-cmd"
         # One registered id pair per purpose, reused for every command. The printer holds
-        # only a handful of registrations (4 free after Sentinel's own in a live test)
-        # and keeps each for minutes after its session closes, so a fresh pair per
-        # command filled every slot and a later pause was refused. Control and status
+        # about 6 registrations and keeps each about 60 s after its session closes (live
+        # test 2026-10-21), so a burst of fresh pairs can fill them and get a pause
+        # refused. Control and status
         # get separate pairs so a pause never waits behind a status snapshot; each lock
         # keeps one MQTT session per client id at a time.
         self._reg_ids: dict[str, tuple[str, str]] = {}
@@ -898,7 +898,12 @@ class PrinterClient:
         purpose = "status" if method == CC2_CMD_GET_STATUS else "control"
         async with self._reg_locks[purpose]:
             if purpose not in self._reg_ids:
-                self._reg_ids[purpose] = _generate_cc2_ids()
+                # Two pairs made in the same millisecond can share a client id (one
+                # random hex digit), and two sessions on one id kick each other.
+                taken = {ids[0] for ids in self._reg_ids.values()}
+                while (ids := _generate_cc2_ids())[0] in taken:
+                    pass
+                self._reg_ids[purpose] = ids
             client_id, request_id = self._reg_ids[purpose]
             return await self._send_on(client_id, request_id, method, params)
 

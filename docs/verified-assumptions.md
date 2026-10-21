@@ -229,7 +229,8 @@ Run from the Coolify terminal of the sentinel container against 192.168.40.18.
   the first registration (`--expiry-wait`, 30 s poll), so registrations last about 60 s
   after their session closes.
 - **Re-registering a held pair** answers `{"error": "already registered"}`, and a GET_STATUS
-  sent on that pair is acknowledged (0.09 s). Sentinel therefore reuses one pair for
+  sent on that pair is acknowledged (0.09 s; measured for GET_STATUS only, not yet for a
+  pause). Sentinel therefore reuses one pair for
   control commands and one for status snapshots, and treats `already registered` as
   registered.
 
