@@ -74,3 +74,46 @@ service while the printer is idle, then decide whether to reuse one registration
   868 tests pass. Merged to local `main`; not pushed.
 
 Next: owner decides when to push (Q1). After deploy, run the mqtt-slots diagnostic (Q3).
+
+## Phase 3 (2026-10-20/21): QA, push and deploy
+
+QA on local `main` before pushing (all passed):
+
+- `ruff check`, `ruff format --check`, `mypy sentinel/ tests/`: clean. pytest: 870 passed,
+  93.69% coverage.
+- `docs_sync.py audit`: clean.
+- `docker build`: succeeded. The image contains `ob.js`, `openbridge.css`, `NotoSans.ttf` and
+  `LICENSE.txt` under `/app/sentinel/web/static/vendor/openbridge`.
+- Manual UI pass in the built-in browser against both preview servers. Checked: Monitor fold
+  at 1440×900 and 1280×720; Pause, Resume and Stop (a second Stop click under 600 ms is
+  ignored); snooze chip; local times in History; Save and Enter; ML-outage toggle round trip;
+  all four palettes with tracks visible; one bottom row at 375×812; styled login; user menu;
+  both Log out paths (API returns 401 with no `WWW-Authenticate`); a session ended elsewhere
+  sends the open page to /login in about 1 s.
+
+Found and fixed in `899cc7f`, with regression tests:
+
+- At 1280×720 the rail (recent activity) scrolled the page by 120 px. Side by side, the rail
+  is now capped at the height left under the bars and scrolls on its own.
+- The preview's fake watcher ignored Snooze, so the "Snoozed to HH:MM" chip could not be
+  checked. It now writes the same settings as `WatcherLoop.snooze`.
+
+Pushed `44077a5..899cc7f` (19 commits). That range includes `96e1c9d` (ADR 0001, docs only),
+which another session committed to `main` during QA. CI run 39541708354: the first attempt
+failed because the test runner could not resolve github.com during checkout. The rerun passed
+(869 passed, 1 skipped by design because the runner is root, 93.66% coverage), and the Docker
+build passed.
+
+Deploy: no webhook is configured, so the push did not deploy. Deployed through the Coolify
+API (`POST /api/v1/deploy`, application `orlnd6yvyq885pegzrl4omvt`, deployment
+`cpce5pry75eljezmrjkmzcuc`, commit `899cc7f`). `/healthz` returns 200. `/readyz` reports db,
+watcher, mqtt and camera all OK. `/login` serves asset version `7e774e30cfe2`.
+
+Still open:
+
+- Owner signs in once (old 1-hour cookies do not carry over) and reports the camera
+  resolution from the camera chip.
+- Q3: run `python -m sentinel.diagnostics mqtt-slots` in the Coolify terminal while the
+  printer is idle, then act on its last JSON line (see `docs/troubleshooting.md`).
+- Coolify has no push webhook for this app. Either add one or deploy through the API or UI
+  after each push.
