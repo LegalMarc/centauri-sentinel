@@ -92,19 +92,25 @@ printer with hot plastic in it.
   or `WARMUP`, and calls `stop()` only for the auto-stop escalation.
 - **An unknown print state is never idle.** Status pushes are deltas, so after a
   listener (re)connect the client knows temperatures but not which job is running.
-  Every connection loads its own GET_STATUS snapshot, and `status()` raises until
-  it has, so the watcher marks the status stale and goes `OFFLINE` (alerted) rather
-  than `IDLE` or reading a filename-less push as a new job, either of which would
-  end the job and reset detection mid-print. An empty state counts as printing
-  unless `machine_status.status` is 1, the idle code seen live.
+  Every connection loads its own GET_STATUS snapshot. Until it has, the previous
+  connection's state (if its last push is under 60 s old), with this connection's
+  pushes on top, may answer "printing" with the same filename, so a reconnect
+  mid-print neither flaps `OFFLINE` nor reads as a new job. It never answers idle:
+  if that view is not printing, `status()` raises, the watcher marks the status
+  stale and goes `OFFLINE` (alerted) rather than `IDLE`, which would end the job
+  and stop detection. An empty state counts as printing unless
+  `machine_status.status` is 1, the idle code seen live.
 - **Snapshots never crowd out a pause.** Each snapshot registers one command
   session, and registrations share the printer's client slots with pause and stop.
-  So snapshots are rate limited across reconnects (20 s apart, 30 per hour), back
-  off 30 s after a failure, wait while a pause, resume or stop is in flight, and a
-  snapshot answered after its connection dropped is discarded.
-- **A dead status link is noticed in 15 s mid-print.** The listener reconnects and
-  `status()` reports stale after 15 s without a push while printing or paused, and
-  after 45 s when idle, where live gaps between pushes reach 12 s.
+  So snapshots are rate limited across reconnects (5 s apart, 30 per hour), back
+  off 30 s after a failure, wait while a pause, resume or stop is in flight
+  (including its retry backoff), and a snapshot answered after its connection
+  dropped is discarded. A pause refused with "too many clients" is retried, since
+  nothing was published.
+- **The status link is dead after 45 s of silence.** Idle gaps between pushes
+  reach 12 s and the print-time cadence is not captured, so a shorter limit would
+  only add reconnects and snapshots. Pause and stop open their own sessions, and
+  MQTT keepalive notices a dead TCP link.
 - **State follows the printer, not the intent.** The watcher moves to `PAUSED`
   only after the pause command is acknowledged, or after live status confirms
   the printer really is paused. A failed pause leaves it `ARMED` so the next

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import json
 import logging
 import secrets
@@ -65,15 +66,18 @@ _RETRY_ATTEMPTS = 3
 _RETRY_WAIT = tenacity.wait_exponential(multiplier=0.5, min=0.5, max=4)
 _PAUSE_DEBOUNCE_S = 30.0  # minimum seconds between successive pause() publishes
 # Treat the status link as dead (reconnect, report stale) after this much push silence.
-# A printing printer pushes progress constantly, so a short limit catches a dead link
-# fast. An idle one pushes only small deltas, with live gaps of up to 12 s.
-_SILENCE_PRINTING_S = 15.0
-_SILENCE_IDLE_S = 45.0
+# An idle printer pushes only small deltas, with live gaps of up to 12 s; the print-time
+# cadence is not captured yet. Pause/stop use their own sessions, and MQTT keepalive
+# notices a dead TCP link, so a short limit would only add reconnects (and snapshots).
+_STATUS_SILENCE_S = 45.0
+# After a reconnect, the previous connection's state may still answer "printing" (never
+# "idle") until the new snapshot loads, if its last push is at most this old.
+_PROVISIONAL_MAX_S = 60.0
 # GET_STATUS snapshots each register one command session, and the printer's client
 # slots are shared with pause/stop. Retry a failed one after this long, and never
 # register more often than the minimum interval or the hourly cap, across reconnects.
 _SNAPSHOT_RETRY_S = 30.0
-_SNAPSHOT_MIN_INTERVAL_S = 20.0
+_SNAPSHOT_MIN_INTERVAL_S = 5.0
 _SNAPSHOT_MAX_PER_HOUR = 30
 # While a pause/resume/stop is in flight, wait this long before trying a snapshot.
 _SNAPSHOT_CONTROL_BACKOFF_S = 2.0
@@ -343,7 +347,9 @@ class PrinterClient:
         self._baseline_gen = -1
         self._snapshot_times: deque[float] = deque()
         self._control_in_flight = 0
-        self._last_printing = False
+        # The last usable state of an earlier connection, and when its last push came.
+        self._provisional: dict[str, Any] | None = None
+        self._provisional_at = 0.0
         self._state_lock = asyncio.Lock()
         self._last_update_time: float = 0.0
         self.malformed_messages_count: int = 0
@@ -364,17 +370,48 @@ class PrinterClient:
         """Return True if the background listener is running and status updates are fresh."""
         if self._listener_task is None or self._listener_task.done():
             return False
-        return (time.monotonic() - self._last_update_time) <= self._silence_limit()
+        return (time.monotonic() - self._last_update_time) <= _STATUS_SILENCE_S
 
-    def _silence_limit(self) -> float:
-        return _SILENCE_PRINTING_S if self._last_printing else _SILENCE_IDLE_S
+    def _current_view(self) -> dict[str, Any] | None:
+        """The merged state that is safe to parse now, or None if it is not known.
 
-    def _state_known(self) -> bool:
-        """True once the current connection's state can be parsed safely."""
+        Known means this connection's GET_STATUS snapshot is merged. Until then, a
+        recent earlier connection's state, with this connection's pushes on top, may
+        answer only "printing": it keeps detection on through a reconnect mid-print
+        without ever reporting idle from old data.
+        """
         data = self._accumulated_data.get("data", self._accumulated_data)
         if isinstance(data, dict) and data.get("Attributes"):
-            return True  # legacy format: every push carries the full CurrentStatus
-        return self._baseline_gen == self._conn_gen and _has_print_state(self._accumulated_data)
+            return self._accumulated_data  # legacy format: every push is complete
+        if self._baseline_gen == self._conn_gen:
+            return self._accumulated_data if _has_print_state(self._accumulated_data) else None
+        if (
+            self._provisional is not None
+            and time.monotonic() - self._provisional_at <= _PROVISIONAL_MAX_S
+        ):
+            view = copy.deepcopy(self._provisional)
+            for key in ("result", "data"):
+                block = self._accumulated_data.get(key)
+                if isinstance(block, dict):
+                    _deep_merge(view.setdefault(key, {}), block)
+            if _has_print_state(view) and _parse_status(view).printing:
+                return view
+        return None
+
+    def _state_known(self) -> bool:
+        return self._current_view() is not None
+
+    def _retire_connection(self) -> None:
+        """Keep the ending connection's usable state as provisional, then clear it.
+
+        Call with _state_lock held, before _last_update_time is reset.
+        """
+        if self._accumulated_data:
+            view = self._current_view()
+            if view is not None:
+                self._provisional = copy.deepcopy(view)
+                self._provisional_at = self._last_update_time
+        self._accumulated_data = {}
 
     @property
     def stop_pending(self) -> bool:
@@ -426,7 +463,7 @@ class PrinterClient:
             )
         self._last_pause_at = now
         try:
-            await self._with_retry(lambda: self._send_command(CC2_CMD_PAUSE_PRINT))
+            await self._control(CC2_CMD_PAUSE_PRINT)
         except (PrinterCommandUnacknowledgedError, asyncio.CancelledError):
             # Restart the window from now: the ack wait itself can take most of it.
             # A cancelled publish is also an unknown outcome (the command may have
@@ -451,7 +488,7 @@ class PrinterClient:
 
     async def resume(self) -> None:
         """Send resume command and clear the pause debounce anchor."""
-        await self._with_retry(lambda: self._send_command(CC2_CMD_RESUME_PRINT))
+        await self._control(CC2_CMD_RESUME_PRINT)
         self.clear_pause_debounce()
 
     async def stop(self) -> None:
@@ -462,25 +499,28 @@ class PrinterClient:
         """
         self._stop_pending = True
         try:
-            await self._with_retry(lambda: self._send_command(CC2_CMD_STOP_PRINT))
+            await self._control(CC2_CMD_STOP_PRINT)
         except Exception:
             logger.exception("Stop command failed, flag remains pending")
             raise
 
     async def reconfigure(self, host: str) -> None:
         """Update the printer IP address and restart the connection."""
-        await self._cancel_snapshot()  # an in-flight snapshot must not reach the new host
+        # Stop the listener first (it can start snapshots), then any snapshot, so
+        # nothing registers on the new host with the old serial.
+        await self._stop_listener()
+        await self._cancel_snapshot()
         self._host = host
         await self.close()
 
     async def close(self) -> None:
         """Clean up the persistent background listener and reset state."""
+        await self._stop_listener()  # first: it can start snapshots
         await self._cancel_snapshot()
-        await self._stop_listener()
         self._serial_number = None
         self._accumulated_data = {}
+        self._provisional = None
         self._last_update_time = 0.0
-        self._last_printing = False
         # A pending stop is an intent aimed at whatever printer we were just
         # talking to. close()/reconfigure() means we're now talking to a
         # (possibly different) printer at a (possibly different) address, so
@@ -505,6 +545,7 @@ class PrinterClient:
             # flap as "connected" for the first 15 s of each reconnect attempt.
             await self._cancel_snapshot()
             self._accumulated_data = {}
+            self._provisional = None
             self._last_update_time = 0.0
             self._listener_task = asyncio.create_task(self._listen_loop())
 
@@ -531,17 +572,18 @@ class PrinterClient:
                 raise PrinterTimeoutError("Status request ended before the print state was known")
 
         now = time.monotonic()
-        if now - self._last_update_time > self._silence_limit():
+        if now - self._last_update_time > _STATUS_SILENCE_S:
             # Await the old listener so the next one does not reuse its MQTT client id
             # while the old session is still open (the broker would kick one of them).
-            await self._cancel_snapshot()
             await self._stop_listener()
+            await self._cancel_snapshot()
             raise PrinterTimeoutError("Status request timed out")
 
         async with self._state_lock:
-            status = _parse_status(self._accumulated_data, self._file_layers_cache)
-        self._last_printing = status.printing
-        return status
+            view = self._current_view()
+            if view is None:
+                raise PrinterTimeoutError("Print state not known")
+            return _parse_status(view, self._file_layers_cache)
 
     async def _stop_listener(self) -> None:
         task, self._listener_task = self._listener_task, None
@@ -572,20 +614,22 @@ class PrinterClient:
                     async with self._state_lock:
                         # A new connection needs its own snapshot: pushes are deltas
                         # and the printer may have changed while we were away.
+                        self._retire_connection()
                         self._conn_gen += 1
-                        self._accumulated_data = {}
+                    if self._serial_number is not None:
+                        self._ensure_snapshot()  # no need to wait for the first push
 
                     stream_empty = True
                     messages_iter = aiter(client.messages)
                     while True:
                         try:
-                            async with asyncio.timeout(self._silence_limit()):
+                            async with asyncio.timeout(_STATUS_SILENCE_S):
                                 message = await anext(messages_iter)
                         except StopAsyncIteration:
                             break
                         except TimeoutError as exc:
                             raise PrinterTimeoutError(
-                                f"MQTT read timeout (no status push for {self._silence_limit():.0f}s)"
+                                f"MQTT read timeout (no status push for {_STATUS_SILENCE_S:.0f}s)"
                             ) from exc
                         stream_empty = False
                         try:
@@ -686,10 +730,10 @@ class PrinterClient:
                     logger.critical("MQTT permanent authentication failure: %s", exc)
                     raise
                 logger.warning("Printer MQTT status connection failed: %s. Reconnecting...", exc)
-                if self._snapshot_task is not None:
-                    self._snapshot_task.cancel()  # it belongs to the dead connection
+                # An in-flight snapshot for this connection is dropped by its
+                # generation check when the next connection starts.
                 async with self._state_lock:
-                    self._accumulated_data.clear()
+                    self._retire_connection()
                     self._last_update_time = 0.0
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, 30.0)
@@ -718,6 +762,9 @@ class PrinterClient:
             wait = max(wait, self._snapshot_times[-1] + _SNAPSHOT_MIN_INTERVAL_S - now)
         return max(0.0, wait)
 
+    async def _request_snapshot(self) -> dict[str, Any]:
+        return await self._send_command(CC2_CMD_GET_STATUS)
+
     async def _snapshot_loop(self) -> None:
         """Merge a GET_STATUS snapshot for the current connection.
 
@@ -741,7 +788,7 @@ class PrinterClient:
                 continue
             self._snapshot_times.append(time.monotonic())
             try:
-                response = await self._send_command(CC2_CMD_GET_STATUS)
+                response = await self._request_snapshot()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -767,23 +814,21 @@ class PrinterClient:
                     _fill_missing(block, snapshot)
                 self._accumulated_data.setdefault("method", METHOD_STATUS_PUSH)
                 self._baseline_gen = gen
+                self._provisional = None
             logger.info("Printer status snapshot loaded")
             return
 
-    async def _send_command(
-        self, method: int, params: dict[str, Any] | None = None
-    ) -> dict[str, Any]:
-        """``_send_registered`` that marks pause/resume/stop as in flight, so a status
-        snapshot does not compete with them for the printer's client slots."""
-        if method == CC2_CMD_GET_STATUS:
-            return await self._send_registered(method, params)
+    async def _control(self, method: int) -> None:
+        """Send pause/resume/stop with retries, marked in flight for the whole
+        sequence (backoffs included) so status snapshots do not compete with it
+        for the printer's client slots."""
         self._control_in_flight += 1
         try:
-            return await self._send_registered(method, params)
+            await self._with_retry(lambda: self._send_command(method))
         finally:
             self._control_in_flight -= 1
 
-    async def _send_registered(
+    async def _send_command(
         self, method: int, params: dict[str, Any] | None = None
     ) -> dict[str, Any]:
         """Register, publish a control command, and confirm the printer's ack.
@@ -970,6 +1015,9 @@ class PrinterClient:
                 (
                     PrinterTimeoutError,
                     PrinterProtocolError,
+                    # "too many clients" and other registration refusals: nothing was
+                    # published yet, so retrying with backoff cannot duplicate a command.
+                    PrinterRegistrationError,
                     aiomqtt.MqttError,
                     OSError,
                     ConnectionError,

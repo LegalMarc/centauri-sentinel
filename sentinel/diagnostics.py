@@ -164,10 +164,18 @@ def classify_print_state(content: dict[str, Any]) -> PrintState | None:
             and isinstance(machine_status, dict)
             and machine_status.get("status") == _MACHINE_STATUS_IDLE
         )
+        # A machine status other than the idle code is a busy signal even next to a
+        # named idle state: a print start may push machine_status before print_status.
+        machine_busy = (
+            isinstance(machine_status, dict)
+            and "status" in machine_status
+            and machine_status.get("status") != _MACHINE_STATUS_IDLE
+        )
         idle = (
-            # Named states are authoritative; enable is true even when idle (live capture),
-            # so it says nothing about a running job.
+            # Named states are authoritative over enable, which is true even when idle
+            # (live capture), so it says nothing about a running job.
             (label in _IDLE_PRINT_STATES or empty_idle)
+            and not machine_busy
             # Both formats present: either one saying busy wins.
             and (legacy is None or legacy.idle)
         )

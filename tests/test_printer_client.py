@@ -6,6 +6,7 @@ Uses unittest.mock to stub aiomqtt.Client so no real MQTT broker is needed.
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import time
 from typing import Any
@@ -43,21 +44,27 @@ _SETTINGS = Settings(printer_ip="10.0.0.1", printer_access_code="secret")
 
 
 @pytest.fixture(autouse=True)
-async def _cancel_snapshot_tasks(monkeypatch: pytest.MonkeyPatch) -> Any:
-    """Start GET_STATUS snapshots only in tests that stub ``_send_command``, and cancel
-    them afterwards. Elsewhere a snapshot would outlive the test's aiomqtt patch and
-    open a real connection, whose executor thread delays the event loop's shutdown."""
+async def _no_network_snapshots(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Snapshots run their real loop in every test. Unless a test stubs
+    ``_send_command``, the GET_STATUS request fails at once instead of opening a real
+    connection (whose executor thread would delay the event loop's shutdown), and
+    every snapshot task is cancelled afterwards."""
     tasks: list[asyncio.Task[None]] = []
-    original = PrinterClient._ensure_snapshot
+    original_ensure = PrinterClient._ensure_snapshot
+    original_request = PrinterClient._request_snapshot
 
     def tracking(self: PrinterClient) -> None:
-        if "_send_command" not in vars(self):
-            return
-        original(self)
+        original_ensure(self)
         if self._snapshot_task is not None:
             tasks.append(self._snapshot_task)
 
+    async def request(self: PrinterClient) -> dict[str, Any]:
+        if "_send_command" not in vars(self):
+            raise PrinterTimeoutError("no printer in this test (stub _send_command)")
+        return await original_request(self)
+
     monkeypatch.setattr(PrinterClient, "_ensure_snapshot", tracking)
+    monkeypatch.setattr(PrinterClient, "_request_snapshot", request)
     yield
     for task in tasks:
         task.cancel()
@@ -118,12 +125,17 @@ def _make_message(payload: dict[str, Any]) -> MagicMock:
     return msg
 
 
-def _make_mqtt_cm(messages: list[dict[str, Any]]) -> Any:
-    """Return a mock that behaves like `async with aiomqtt.Client(...) as client:`."""
+def _make_mqtt_cm(messages: list[dict[str, Any]], *, hold: bool = False) -> Any:
+    """Return a mock that behaves like `async with aiomqtt.Client(...) as client:`.
+
+    With ``hold`` the stream stays open after the messages instead of ending (an
+    ended stream makes the listener reconnect)."""
 
     async def _aiter_messages() -> Any:
         for m in messages:
             yield _make_message(m)
+        if hold:
+            await asyncio.sleep(3600)
 
     client_mock = AsyncMock()
     client_mock.subscribe = AsyncMock()
@@ -1756,7 +1768,8 @@ async def test_print_end_keeps_the_other_blocks() -> None:
         [
             _modern_payload("printing", filename="benchy.gcode", thumbnail="abc"),
             {"method": 6000, "result": {"print_status": {"state": "complete"}}},
-        ]
+        ],
+        hold=True,
     )
     client = PrinterClient(_SETTINGS)
     client._send_command = AsyncMock(return_value=_IDLE_SNAPSHOT)  # type: ignore[method-assign]
@@ -1894,18 +1907,37 @@ async def test_snapshot_waits_for_an_in_flight_pause(monkeypatch: pytest.MonkeyP
     assert client._baseline_gen == 1
 
 
-async def test_control_commands_are_marked_in_flight() -> None:
+async def test_pause_is_in_flight_through_its_retries() -> None:
+    """The counter spans the whole pause, backoff included, so no snapshot registers
+    between two pause attempts. "too many clients" is retried: nothing was sent."""
     client = PrinterClient(_SETTINGS)
     seen: list[int] = []
 
     async def fake(method: int, params: Any = None) -> dict[str, Any]:
         seen.append(client._control_in_flight)
+        if len(seen) == 1:
+            raise PrinterRegistrationError("too many clients")
         return {}
 
-    client._send_registered = fake  # type: ignore[method-assign]
-    await client._send_command(1021)
-    await client._send_command(1002)
-    assert seen == [1, 0]
+    client._send_command = fake  # type: ignore[method-assign]
+    await client.pause()
+    assert seen == [1, 1]
+    assert client._control_in_flight == 0
+
+
+async def test_in_flight_counter_survives_cancellation() -> None:
+    client = PrinterClient(_SETTINGS)
+
+    async def hang(method: int, params: Any = None) -> dict[str, Any]:
+        await asyncio.sleep(3600)
+        return {}
+
+    client._send_command = hang  # type: ignore[method-assign]
+    task = asyncio.create_task(client.stop())
+    await asyncio.sleep(0.01)
+    assert client._control_in_flight == 1
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
     assert client._control_in_flight == 0
 
 
@@ -1958,15 +1990,126 @@ async def test_close_and_reconfigure_cancel_the_snapshot() -> None:
         assert task is not None and task.cancelled()
 
 
-def test_silence_limit_is_short_while_printing() -> None:
+def test_status_link_is_dead_after_45_s_of_silence() -> None:
     from sentinel.printer import client as mod
 
     client = PrinterClient(_SETTINGS)
-    assert client._silence_limit() == mod._SILENCE_IDLE_S == 45.0
-    client._last_printing = True
-    assert client._silence_limit() == mod._SILENCE_PRINTING_S == 15.0
-    client._last_update_time = time.monotonic() - 20.0
     client._listener_task = MagicMock(done=MagicMock(return_value=False))
-    assert client.is_connected is False  # 20 s of silence is a dead link mid-print
-    client._last_printing = False
-    assert client.is_connected is True
+    client._last_update_time = time.monotonic() - 20.0
+    assert client.is_connected is True  # a print-time gap is not a dead link
+    client._last_update_time = time.monotonic() - mod._STATUS_SILENCE_S - 1
+    assert client.is_connected is False
+
+
+# ---------------------------------------------------------------------------
+# Provisional state across a reconnect (review N1, N2)
+# ---------------------------------------------------------------------------
+
+_PRINTING: dict[str, Any] = {
+    "print_status": {"state": "printing", "filename": "benchy.gcode"},
+    "machine_status": {"status": 2, "progress": 40},
+    "heater_bed": {"temperature": 60, "target": 60},
+    "thumbnail": "abc",
+}
+
+
+def _reconnected(client: PrinterClient, deltas: dict[str, Any] | None = None) -> None:
+    """A known printing connection that has just been replaced by a new one."""
+    _known(client, copy.deepcopy(_PRINTING))
+    client._retire_connection()
+    client._conn_gen += 1
+    client._accumulated_data = {"method": 6000, "result": deltas or {}}
+    client._last_update_time = time.monotonic()
+
+
+async def test_reconnect_mid_print_keeps_reporting_printing() -> None:
+    """While the new connection's snapshot is pending, the last known print keeps
+    detection on (no OFFLINE flap per reconnect), with its filename and thumbnail."""
+    client = PrinterClient(_SETTINGS)
+    _reconnected(client, {"machine_status": {"progress": 41}})
+    client._listener_task = asyncio.create_task(_alive_listener())
+    s = await client._fetch_status()
+    await client.close()
+    assert s.printing is True
+    assert s.filename == "benchy.gcode"
+    assert s.thumbnail_base64 == "abc"
+    assert s.progress == 41.0  # this connection's pushes win
+
+
+async def test_provisional_state_never_reports_idle(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A push on the new connection says the print ended: that must wait for the
+    snapshot, not be answered from old data."""
+    monkeypatch.setattr("sentinel.printer.client._TIMEOUT_S", 0.2)
+    client = PrinterClient(_SETTINGS)
+    _reconnected(client, {"print_status": {"state": "complete"}})
+    client._listener_task = asyncio.create_task(_alive_listener())
+    with pytest.raises(PrinterTimeoutError):
+        await client._fetch_status()
+    await client.close()
+
+
+async def test_provisional_state_expires(monkeypatch: pytest.MonkeyPatch) -> None:
+    from sentinel.printer import client as mod
+
+    monkeypatch.setattr("sentinel.printer.client._TIMEOUT_S", 0.2)
+    client = PrinterClient(_SETTINGS)
+    _reconnected(client)
+    client._provisional_at = time.monotonic() - mod._PROVISIONAL_MAX_S - 1
+    client._listener_task = asyncio.create_task(_alive_listener())
+    with pytest.raises(PrinterTimeoutError):
+        await client._fetch_status()
+    await client.close()
+
+
+async def test_listener_reconnect_end_to_end() -> None:
+    """Drive the real listener through a reconnect: the generation advances, the
+    print keeps reporting while the new snapshot is pending, then the snapshot loads."""
+    first_conn = [_modern_payload("printing", filename="benchy.gcode")]
+    cm, _ = _make_mqtt_cm(first_conn)  # the stream ends after one push: a clean reconnect
+    client = PrinterClient(_SETTINGS)
+    gate = asyncio.Event()
+    calls = 0
+
+    async def snapshot(method: int, params: Any = None) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            await gate.wait()  # hold the second connection's snapshot
+        return {"result": {"print_status": {"state": "printing", "filename": "benchy.gcode"}}}
+
+    client._send_command = snapshot  # type: ignore[method-assign]
+    with patch("sentinel.printer.client.aiomqtt.Client", return_value=cm):
+        s1 = await client.status()
+        gen1 = client._conn_gen
+        for _ in range(100):  # the listener reconnects after its 0.5 s backoff
+            await asyncio.sleep(0.02)
+            if client._conn_gen > gen1:
+                break
+        assert client._conn_gen > gen1
+        assert client._baseline_gen < client._conn_gen  # the new snapshot is pending
+        s2 = await client.status()
+        gate.set()
+        await client.close()
+    assert s1.printing and s2.printing
+    assert s2.filename == "benchy.gcode"
+
+
+async def test_close_stops_the_listener_before_the_snapshot() -> None:
+    cm, _ = _make_mqtt_cm([_EXTRUDER_DELTA], hold=True)
+    client = PrinterClient(_SETTINGS)
+    started = asyncio.Event()
+
+    async def slow(method: int, params: Any = None) -> dict[str, Any]:
+        started.set()
+        await asyncio.sleep(3600)
+        return {}
+
+    client._send_command = slow  # type: ignore[method-assign]
+    with patch("sentinel.printer.client.aiomqtt.Client", return_value=cm):
+        client._listener_task = asyncio.create_task(client._listen_loop())
+        await asyncio.wait_for(started.wait(), 2)
+        task = client._snapshot_task
+        await client.close()
+    assert client._listener_task is None
+    assert task is not None and task.cancelled()
+    assert client._snapshot_task is None

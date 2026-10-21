@@ -647,6 +647,9 @@ _IDLE_SNAPSHOT_RESULT: dict[str, Any] = {
         ({"print_status": {"state": ""}, "machine_status": {"status": 2}}, True),
         ({"print_status": {"state": ""}}, True),
         ({"print_status": {"state": "", "enable": True}, "machine_status": {}}, True),
+        # A print start may push machine_status before print_status (review F6).
+        ({"print_status": {"state": "standby"}, "machine_status": {"status": 2}}, True),
+        ({"print_status": {"state": "standby"}, "machine_status": {"status": 1}}, False),
     ],
 )
 def test_empty_state_is_idle_only_with_the_idle_status_code(
