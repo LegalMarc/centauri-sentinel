@@ -201,7 +201,8 @@ async def test_discover_printer_parses_the_print_state() -> None:
         ({"print_status": {"state": ""}}, True),
         ({"print_status": {"state": None}}, True),
         ({"print_status": {"state": "printing_start"}}, True),
-        ({"print_status": {"state": "standby", "enable": True}}, True),
+        # Named states are authoritative: idle firmware reports enable true (live capture).
+        ({"print_status": {"state": "standby", "enable": True}}, False),
         # Both formats present: the modern field wins over legacy Attributes.
         ({"Attributes": {"Name": "CC2"}, "print_status": {"state": "printing"}}, True),
         ({"Attributes": {"CurrentStatus": 0}}, False),
@@ -210,8 +211,7 @@ async def test_discover_printer_parses_the_print_state() -> None:
         ({"Attributes": {"CurrentStatus": "0"}}, False),
         ({"Attributes": {"CurrentStatus": False}}, True),
         ({"Attributes": {"CurrentStatus": 0.7}}, True),
-        ({"print_status": {"state": "standby", "enable": 1}}, True),
-        ({"print_status": {"state": "standby", "enable": "true"}}, True),
+        ({"print_status": {"state": "complete", "enable": 1}}, False),
         ({"Attributes": {"CurrentStatus": 1}, "print_status": {"state": "standby"}}, True),
         ({"Attributes": {"CurrentStatus": 0}, "print_status": {"state": "standby"}}, False),
     ],
@@ -412,7 +412,7 @@ async def test_refuses_when_the_print_state_is_unknown(
 ) -> None:
     monkeypatch.setattr(diagnostics, "_SERIAL_TIMEOUT_S", 0.05)
     snapshot = AsyncMock(return_value=None)  # GET_STATUS failed too
-    monkeypatch.setattr(diagnostics, "snapshot_print_state", snapshot)
+    monkeypatch.setattr(diagnostics, "snapshot_status", snapshot)
     broker = _FakeBroker(print_state=None)
     with _patched(broker), pytest.raises(diagnostics.PrinterBusyError) as exc:
         await diagnostics.run_mqtt_slots(_SETTINGS)
@@ -667,10 +667,10 @@ async def test_quiet_idle_printer_uses_http_serial_and_get_status(
         raise diagnostics.PrinterTimeoutError("no status push within 15s")
 
     http = AsyncMock(return_value=_SERIAL)
-    snapshot = AsyncMock(return_value=diagnostics.classify_print_state(_IDLE_SNAPSHOT_RESULT))
+    snapshot = AsyncMock(return_value=_IDLE_SNAPSHOT_RESULT)
     monkeypatch.setattr(diagnostics, "discover_printer", no_push)
     monkeypatch.setattr(diagnostics, "http_serial", http)
-    monkeypatch.setattr(diagnostics, "snapshot_print_state", snapshot)
+    monkeypatch.setattr(diagnostics, "snapshot_status", snapshot)
     broker = _FakeBroker(capacity=2, print_state=None)
     with _patched(broker):
         report = await diagnostics.run_mqtt_slots(_SETTINGS, max_registrations=5)
@@ -695,18 +695,88 @@ async def test_refuses_when_neither_push_nor_http_gives_a_serial(
     assert broker.published == []
 
 
-async def test_snapshot_print_state_reads_get_status() -> None:
+async def test_snapshot_status_reads_get_status() -> None:
     reader = MagicMock()
     reader._send_command = AsyncMock(
         return_value={"id": 1, "method": 1002, "result": _IDLE_SNAPSHOT_RESULT}
     )
-    state = await diagnostics.snapshot_print_state(reader, _SERIAL)
+    content = await diagnostics.snapshot_status(reader, _SERIAL)
     reader._send_command.assert_awaited_once_with(1002)
     assert reader._serial_number == _SERIAL
-    assert state is not None and not diagnostics.is_print_active(state)
+    assert content == _IDLE_SNAPSHOT_RESULT
 
 
-async def test_snapshot_print_state_is_none_on_failure() -> None:
+async def test_snapshot_status_is_none_on_failure() -> None:
     reader = MagicMock()
     reader._send_command = AsyncMock(side_effect=diagnostics.PrinterTimeoutError("no ack"))
-    assert await diagnostics.snapshot_print_state(reader, _SERIAL) is None
+    assert await diagnostics.snapshot_status(reader, _SERIAL) is None
+
+
+async def test_state_watch_sees_a_machine_status_change_from_the_idle_seed() -> None:
+    """A print start that pushes only machine_status (no print_status.state) must read
+    as busy once the watch starts from the idle snapshot."""
+    broker = _FakeBroker(print_state=None)
+    with _patched(broker):
+        async with diagnostics._StateWatch("10.0.0.1", 1883, "secret") as watch:
+            watch.seed(_IDLE_SNAPSHOT_RESULT)
+            first = await watch.latest()
+            assert first is not None and not diagnostics.is_print_active(first)
+            broker.status_sessions[0]._queue.append(
+                _message(
+                    f"elegoo/{_SERIAL}/api_status",
+                    {"method": 6000, "result": {"machine_status": {"status": 2}}},
+                )
+            )
+            later = await watch.latest()
+    assert later is not None and diagnostics.is_print_active(later)
+
+
+async def test_state_watch_returns_under_continuous_pushes() -> None:
+    broker = _FakeBroker()
+    with _patched(broker):
+        async with diagnostics._StateWatch("10.0.0.1", 1883, "secret") as watch:
+            session = broker.status_sessions[0]
+
+            async def flood() -> None:
+                while True:
+                    session.push_state()
+                    await asyncio.sleep(0.001)
+
+            pusher = asyncio.create_task(flood())
+            try:
+                state = await asyncio.wait_for(watch.latest(), 1.0)
+            finally:
+                pusher.cancel()
+                await asyncio.gather(pusher, return_exceptions=True)
+    assert state is not None and state.label == "standby"
+
+
+async def test_state_watch_reports_a_closed_subscription() -> None:
+    broker = _FakeBroker()
+    with _patched(broker):
+        async with diagnostics._StateWatch("10.0.0.1", 1883, "secret") as watch:
+            watch._error = aiomqtt.MqttError("lost")
+            with pytest.raises(aiomqtt.MqttError):
+                await watch.latest()
+
+
+async def test_watch_opens_before_the_state_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    order: list[str] = []
+    real_enter = diagnostics._StateWatch.__aenter__
+
+    async def enter(self: Any) -> Any:
+        order.append("watch")
+        return await real_enter(self)
+
+    real_discover = diagnostics.discover_printer
+
+    async def discover(*a: Any) -> Any:
+        order.append("check")
+        return await real_discover(*a)
+
+    monkeypatch.setattr(diagnostics._StateWatch, "__aenter__", enter)
+    monkeypatch.setattr(diagnostics, "discover_printer", discover)
+    broker = _FakeBroker(capacity=99)
+    with _patched(broker):
+        await diagnostics.run_mqtt_slots(_SETTINGS, max_registrations=1)
+    assert order[:2] == ["watch", "check"]

@@ -36,6 +36,7 @@ from sentinel.printer.client import (
     _TIMEOUT_S,
     PrinterClient,
     _deep_merge,
+    _fill_missing,
     _generate_cc2_ids,
 )
 from sentinel.printer.errors import PrinterProtocolError, PrinterTimeoutError
@@ -63,8 +64,8 @@ WARNING = (
 _EXPIRY_POLL_S = 30.0
 # How long to wait for the first status push when learning the serial number.
 _SERIAL_TIMEOUT_S = 15.0
-# How long each re-check waits for queued status pushes before reading the state.
-_WATCH_DRAIN_S = 0.5
+# How long each re-check lets already-queued status pushes be merged.
+_WATCH_SETTLE_S = 0.2
 # machine_status.status reported by an idle printer (live probe 2026-10-21).
 _MACHINE_STATUS_IDLE = 1
 
@@ -138,8 +139,8 @@ class PrintState:
 def classify_print_state(content: dict[str, Any]) -> PrintState | None:
     """Read the job state straight from merged status-push content.
 
-    Prefers the modern ``print_status.state`` field (with ``enable`` as a
-    second busy signal); falls back to the legacy ``Attributes.CurrentStatus``,
+    Prefers the modern ``print_status.state`` field (an empty state is idle only
+    with ``machine_status.status`` 1); falls back to the legacy ``Attributes.CurrentStatus``,
     where only 0 is known to mean idle. Returns None when no push has carried
     a state yet (partial deltas often omit it).
     """
@@ -164,7 +165,9 @@ def classify_print_state(content: dict[str, Any]) -> PrintState | None:
             and machine_status.get("status") == _MACHINE_STATUS_IDLE
         )
         idle = (
-            ((label in _IDLE_PRINT_STATES and not print_status.get("enable")) or empty_idle)
+            # Named states are authoritative; enable is true even when idle (live capture),
+            # so it says nothing about a running job.
+            (label in _IDLE_PRINT_STATES or empty_idle)
             # Both formats present: either one saying busy wins.
             and (legacy is None or legacy.idle)
         )
@@ -247,8 +250,8 @@ async def http_serial(host: str, access_code: str) -> str | None:
         return None
 
 
-async def snapshot_print_state(reader: PrinterClient, serial: str) -> PrintState | None:
-    """The print state from one GET_STATUS query, or None if it fails.
+async def snapshot_status(reader: PrinterClient, serial: str) -> dict[str, Any] | None:
+    """The printer's full status from one GET_STATUS query, or None if it fails.
 
     Status pushes are deltas and carry no print state while it is not changing, so
     this is the only way to learn it from an idle printer. It costs one registration.
@@ -260,45 +263,68 @@ async def snapshot_print_state(reader: PrinterClient, serial: str) -> PrintState
         logger.warning("GET_STATUS failed: %s", exc)
         return None
     result = response.get("result")
-    return classify_print_state(result) if isinstance(result, dict) else None
+    return result if isinstance(result, dict) else None
 
 
 class _StateWatch:
-    """A status subscription held open while registering, to see a print start.
+    """A status subscription held open for the whole run, to see a print start.
 
-    A print starting pushes its new state, so draining the queued pushes at each
-    re-check sees it whenever it happened. No state push means no change.
+    A background task merges every push as it arrives, so a re-check never waits on
+    the stream and no push is lost. Seeded with the starting status, a change in
+    ``print_status`` or ``machine_status`` away from idle reads as busy.
     """
 
     def __init__(self, host: str, port: int, access_code: str) -> None:
         self._cm = _make_client(host, port, access_code, f"sentinel-diag-{_generate_cc2_ids()[0]}")
         self._merged: dict[str, Any] = {}
-        self._messages: Any = None
+        self._task: asyncio.Task[None] | None = None
+        self._error: BaseException | None = None
 
     async def __aenter__(self) -> _StateWatch:
         client = await self._cm.__aenter__()
-        await client.subscribe("elegoo/+/api_status")
-        self._messages = aiter(client.messages)
+        try:
+            await client.subscribe("elegoo/+/api_status")
+        except BaseException:
+            await self._cm.__aexit__(None, None, None)
+            raise
+        self._task = asyncio.create_task(self._consume(aiter(client.messages)))
         return self
 
     async def __aexit__(self, *exc: object) -> None:
+        if self._task is not None:
+            self._task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._task
         await self._cm.__aexit__(*exc)  # type: ignore[arg-type]
 
+    async def _consume(self, messages: Any) -> None:
+        try:
+            while True:
+                message = await anext(messages)
+                try:
+                    payload = json.loads(message.payload)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(payload, dict) and payload.get("method") == METHOD_STATUS_PUSH:
+                    content = payload.get("result") or payload.get("data") or {}
+                    if isinstance(content, dict):
+                        _deep_merge(self._merged, content)
+        except asyncio.CancelledError:
+            raise
+        except StopAsyncIteration:
+            self._error = PrinterProtocolError("status subscription closed")
+        except Exception as exc:
+            self._error = exc
+
+    def seed(self, content: dict[str, Any]) -> None:
+        """Start from a known status; pushes already merged are newer and are kept."""
+        _fill_missing(self._merged, content)
+
     async def latest(self) -> PrintState | None:
-        """Drain queued pushes; return the newest state seen, or None if none carried one."""
-        while True:
-            try:
-                message = await asyncio.wait_for(anext(self._messages), _WATCH_DRAIN_S)
-            except TimeoutError:
-                break
-            try:
-                payload = json.loads(message.payload)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(payload, dict) and payload.get("method") == METHOD_STATUS_PUSH:
-                content = payload.get("result") or payload.get("data") or {}
-                if isinstance(content, dict):
-                    _deep_merge(self._merged, content)
+        """The state merged so far, or None if nothing said what the printer is doing."""
+        await asyncio.sleep(_WATCH_SETTLE_S)  # let pushes already queued be merged
+        if self._error is not None:
+            raise self._error
         return classify_print_state(self._merged)
 
 
@@ -401,48 +427,50 @@ async def run_mqtt_slots(
         used_client_ids.add(ids[0])
         return ids
 
-    serial: str | None
-    status: PrintState | None
-    try:
-        serial, status = await discover_printer(host, port, access_code)
-    except PrinterTimeoutError:
-        serial, status = None, None  # a quiet idle printer; fall back below
-    if serial is None:
-        serial = await http_serial(host, access_code)
-        if serial is None:
-            raise PrinterTimeoutError(
-                "no status push and no answer from /system/info; cannot learn the serial number"
-            )
-    state_source = "status push"
-    snapshot_registrations = 0
-    if status is None:
-        # Pushes are deltas: an idle printer does not repeat its state. Ask for it.
-        status = await snapshot_print_state(reader, serial)
-        state_source = "GET_STATUS"
-        snapshot_registrations = 1
-    if not force:
-        if status is None:
-            raise PrinterBusyError(
-                "unknown",
-                "cannot tell whether a print is active (no status push carried a print state "
-                "and GET_STATUS failed); refusing to occupy the printer's client slots. "
-                "Use --force to run anyway.",
-            )
-        if is_print_active(status):
-            raise PrinterBusyError(
-                status.label,
-                f"the printer is {status.label}: filling its client slots would make it "
-                "refuse Sentinel's pause/stop commands. Run this while the printer is idle, "
-                "or use --force to run anyway.",
-            )
-    start_state = status.label if status is not None else "unknown"
-
     async with contextlib.AsyncExitStack() as stack:
-        # Open before the first registration so a print that starts at any point is
-        # seen at the next re-check (--force skips the re-checks).
+        # Open the watch before checking the state, so a print that starts at any point
+        # after the check is seen at the next re-check (--force skips the re-checks).
         watch = (
             None if force else await stack.enter_async_context(_StateWatch(host, port, access_code))
         )
+        serial: str | None
+        status: PrintState | None
+        try:
+            serial, status = await discover_printer(host, port, access_code)
+        except PrinterTimeoutError:
+            serial, status = None, None  # a quiet idle printer; fall back below
+        if serial is None:
+            serial = await http_serial(host, access_code)
+            if serial is None:
+                raise PrinterTimeoutError(
+                    "no status push and no answer from /system/info; cannot learn the serial number"
+                )
+        state_source = "status push"
+        snapshot_registrations = 0
+        if status is None:
+            # Pushes are deltas: an idle printer does not repeat its state. Ask for it.
+            content = await snapshot_status(reader, serial)
+            state_source = "GET_STATUS"
+            snapshot_registrations = 1
+            status = classify_print_state(content) if content is not None else None
+            if content is not None and watch is not None:
+                watch.seed(content)
+        if not force:
+            if status is None:
+                raise PrinterBusyError(
+                    "unknown",
+                    "cannot tell whether a print is active (no status push carried a print "
+                    "state and GET_STATUS failed); refusing to occupy the printer's client "
+                    "slots. Use --force to run anyway.",
+                )
+            if is_print_active(status):
+                raise PrinterBusyError(
+                    status.label,
+                    f"the printer is {status.label}: filling its client slots would make it "
+                    "refuse Sentinel's pause/stop commands. Run this while the printer is "
+                    "idle, or use --force to run anyway.",
+                )
+        start_state = status.label if status is not None else "unknown"
         return await _registration_tests(
             settings,
             serial,

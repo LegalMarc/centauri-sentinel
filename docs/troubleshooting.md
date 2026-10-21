@@ -158,8 +158,9 @@ other empty or unrecognised state, or no state at all counts as busy. An idle pr
 only temperature deltas, so when no push within 15 s says what it is doing, the tool reads
 the serial from `GET /system/info` and the state from one read-only GET_STATUS query. That
 query registers once, reported as `registrations_before_tests`; count it when reading the
-capacity. While registering, it keeps a status subscription open and stops the expiry wait
-as soon as a push says a print started. When the state is not idle it is busy: it prints `REFUSED: ...`
+capacity. It opens a status subscription before checking the state and keeps it for the
+whole run, starting from the snapshot's state, so the expiry wait stops as soon as a push
+says a print started, including a `machine_status` change away from idle. When the state is not idle it is busy: it prints `REFUSED: ...`
 and a JSON line with `"refused": true` and the `print_state`, registers nothing, and exits 2.
 Pass `--force` to run anyway (for example to reproduce the refusal during a print), accepting
 that Sentinel cannot pause that print until the slots expire. It prints a warning, a human

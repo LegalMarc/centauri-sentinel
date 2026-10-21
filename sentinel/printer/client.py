@@ -19,6 +19,7 @@ import logging
 import secrets
 import time
 import uuid
+from collections import deque
 from typing import TYPE_CHECKING, Any, TypeVar
 
 import aiomqtt
@@ -63,11 +64,19 @@ _COMMAND_ACK_TIMEOUT_S = 10.0
 _RETRY_ATTEMPTS = 3
 _RETRY_WAIT = tenacity.wait_exponential(multiplier=0.5, min=0.5, max=4)
 _PAUSE_DEBOUNCE_S = 30.0  # minimum seconds between successive pause() publishes
-# An idle printer pushes only small deltas, with live gaps of up to 12 s; treat the
-# link as dead (reconnect, report stale) only after this much silence.
-_STATUS_SILENCE_S = 45.0
-# Retry a failed GET_STATUS snapshot after this long, while the print state is unknown.
+# Treat the status link as dead (reconnect, report stale) after this much push silence.
+# A printing printer pushes progress constantly, so a short limit catches a dead link
+# fast. An idle one pushes only small deltas, with live gaps of up to 12 s.
+_SILENCE_PRINTING_S = 15.0
+_SILENCE_IDLE_S = 45.0
+# GET_STATUS snapshots each register one command session, and the printer's client
+# slots are shared with pause/stop. Retry a failed one after this long, and never
+# register more often than the minimum interval or the hourly cap, across reconnects.
 _SNAPSHOT_RETRY_S = 30.0
+_SNAPSHOT_MIN_INTERVAL_S = 20.0
+_SNAPSHOT_MAX_PER_HOUR = 30
+# While a pause/resume/stop is in flight, wait this long before trying a snapshot.
+_SNAPSHOT_CONTROL_BACKOFF_S = 2.0
 # machine_status.status reported by an idle printer (live probe 2026-10-21).
 _MACHINE_STATUS_IDLE = 1
 
@@ -126,8 +135,12 @@ def _has_print_state(payload: dict[str, Any]) -> bool:
     data = payload.get("data", payload)
     if isinstance(data, dict) and data.get("Attributes"):
         return True  # legacy format: CurrentStatus is always present
-    print_status = payload.get("result", {}).get("print_status")
-    return isinstance(print_status, dict) and "state" in print_status
+    result = payload.get("result", {})
+    print_status = result.get("print_status")
+    if not isinstance(print_status, dict) or "state" not in print_status:
+        return False
+    # An empty state is read through machine_status.status (see _parse_status).
+    return print_status["state"] != "" or isinstance(result.get("machine_status"), dict)
 
 
 def _parse_status(
@@ -323,6 +336,14 @@ class PrinterClient:
         self._accumulated_data: dict[str, Any] = {}
         self._listener_task: asyncio.Task[None] | None = None
         self._snapshot_task: asyncio.Task[None] | None = None
+        # Each listener connection is a generation. The state is known only once that
+        # generation's GET_STATUS snapshot is merged: pushes are deltas, so a push alone
+        # cannot say which job is running (its filename, for one).
+        self._conn_gen = 0
+        self._baseline_gen = -1
+        self._snapshot_times: deque[float] = deque()
+        self._control_in_flight = 0
+        self._last_printing = False
         self._state_lock = asyncio.Lock()
         self._last_update_time: float = 0.0
         self.malformed_messages_count: int = 0
@@ -343,7 +364,17 @@ class PrinterClient:
         """Return True if the background listener is running and status updates are fresh."""
         if self._listener_task is None or self._listener_task.done():
             return False
-        return (time.monotonic() - self._last_update_time) <= _STATUS_SILENCE_S
+        return (time.monotonic() - self._last_update_time) <= self._silence_limit()
+
+    def _silence_limit(self) -> float:
+        return _SILENCE_PRINTING_S if self._last_printing else _SILENCE_IDLE_S
+
+    def _state_known(self) -> bool:
+        """True once the current connection's state can be parsed safely."""
+        data = self._accumulated_data.get("data", self._accumulated_data)
+        if isinstance(data, dict) and data.get("Attributes"):
+            return True  # legacy format: every push carries the full CurrentStatus
+        return self._baseline_gen == self._conn_gen and _has_print_state(self._accumulated_data)
 
     @property
     def stop_pending(self) -> bool:
@@ -438,20 +469,18 @@ class PrinterClient:
 
     async def reconfigure(self, host: str) -> None:
         """Update the printer IP address and restart the connection."""
+        await self._cancel_snapshot()  # an in-flight snapshot must not reach the new host
         self._host = host
         await self.close()
 
     async def close(self) -> None:
         """Clean up the persistent background listener and reset state."""
-        if self._listener_task is not None:
-            self._listener_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._listener_task
-            self._listener_task = None
         await self._cancel_snapshot()
+        await self._stop_listener()
         self._serial_number = None
         self._accumulated_data = {}
         self._last_update_time = 0.0
+        self._last_printing = False
         # A pending stop is an intent aimed at whatever printer we were just
         # talking to. close()/reconfigure() means we're now talking to a
         # (possibly different) printer at a (possibly different) address, so
@@ -474,15 +503,15 @@ class PrinterClient:
             # Seed _last_update_time to 0.0 (not time.monotonic()) so is_connected returns
             # False until a real MQTT status push arrives — a permanent auth failure must not
             # flap as "connected" for the first 15 s of each reconnect attempt.
+            await self._cancel_snapshot()
             self._accumulated_data = {}
             self._last_update_time = 0.0
-            await self._cancel_snapshot()
             self._listener_task = asyncio.create_task(self._listen_loop())
 
-        if not _has_print_state(self._accumulated_data):
+        if not self._state_known():
             try:
                 async with asyncio.timeout(_TIMEOUT_S):
-                    while not _has_print_state(self._accumulated_data):
+                    while not self._state_known():
                         # close()/reconfigure() can null the task while we wait.
                         task = self._listener_task
                         if task is None:
@@ -497,19 +526,29 @@ class PrinterClient:
                 raise PrinterTimeoutError(
                     "Status request timed out (print state not known yet)"
                 ) from exc
-            if not _has_print_state(self._accumulated_data):
+            if not self._state_known():
                 # The listener ended without an error before a state arrived.
                 raise PrinterTimeoutError("Status request ended before the print state was known")
 
         now = time.monotonic()
-        if now - self._last_update_time > _STATUS_SILENCE_S:
-            if self._listener_task is not None:
-                self._listener_task.cancel()
-                self._listener_task = None
+        if now - self._last_update_time > self._silence_limit():
+            # Await the old listener so the next one does not reuse its MQTT client id
+            # while the old session is still open (the broker would kick one of them).
+            await self._cancel_snapshot()
+            await self._stop_listener()
             raise PrinterTimeoutError("Status request timed out")
 
         async with self._state_lock:
-            return _parse_status(self._accumulated_data, self._file_layers_cache)
+            status = _parse_status(self._accumulated_data, self._file_layers_cache)
+        self._last_printing = status.printing
+        return status
+
+    async def _stop_listener(self) -> None:
+        task, self._listener_task = self._listener_task, None
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
 
     async def _listen_loop(self) -> None:
         """Background loop that maintains a persistent connection to MQTT."""
@@ -530,18 +569,23 @@ class PrinterClient:
                 ) as client:
                     await client.subscribe("elegoo/+/api_status")
                     delay = 0.5  # reset backoff on successful connect
+                    async with self._state_lock:
+                        # A new connection needs its own snapshot: pushes are deltas
+                        # and the printer may have changed while we were away.
+                        self._conn_gen += 1
+                        self._accumulated_data = {}
 
                     stream_empty = True
                     messages_iter = aiter(client.messages)
                     while True:
                         try:
-                            async with asyncio.timeout(_STATUS_SILENCE_S):
+                            async with asyncio.timeout(self._silence_limit()):
                                 message = await anext(messages_iter)
                         except StopAsyncIteration:
                             break
                         except TimeoutError as exc:
                             raise PrinterTimeoutError(
-                                f"MQTT read timeout (no status push for {_STATUS_SILENCE_S:.0f}s)"
+                                f"MQTT read timeout (no status push for {self._silence_limit():.0f}s)"
                             ) from exc
                         stream_empty = False
                         try:
@@ -614,8 +658,11 @@ class PrinterClient:
                                         self._accumulated_data[k] = v
 
                                 self._last_update_time = time.monotonic()
-                                state_known = _has_print_state(self._accumulated_data)
-                            if not state_known:
+                            if (
+                                self._serial_number is not None
+                                and self._baseline_gen != self._conn_gen
+                                and not self._state_known()
+                            ):
                                 self._ensure_snapshot()
 
                     if stream_empty or not has_received:
@@ -639,8 +686,11 @@ class PrinterClient:
                     logger.critical("MQTT permanent authentication failure: %s", exc)
                     raise
                 logger.warning("Printer MQTT status connection failed: %s. Reconnecting...", exc)
+                if self._snapshot_task is not None:
+                    self._snapshot_task.cancel()  # it belongs to the dead connection
                 async with self._state_lock:
                     self._accumulated_data.clear()
+                    self._last_update_time = 0.0
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, 30.0)
 
@@ -656,42 +706,84 @@ class PrinterClient:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
 
-    async def _snapshot_loop(self) -> None:
-        """Fill the merged state from GET_STATUS until the print state is known.
+    def _snapshot_wait(self) -> float:
+        """Seconds until the rate limit allows another snapshot registration."""
+        now = time.monotonic()
+        while self._snapshot_times and now - self._snapshot_times[0] >= 3600.0:
+            self._snapshot_times.popleft()
+        wait = 0.0
+        if len(self._snapshot_times) >= _SNAPSHOT_MAX_PER_HOUR:
+            wait = self._snapshot_times[0] + 3600.0 - now
+        if self._snapshot_times:
+            wait = max(wait, self._snapshot_times[-1] + _SNAPSHOT_MIN_INTERVAL_S - now)
+        return max(0.0, wait)
 
-        Each attempt registers one short-lived command session, so failures are
-        retried slowly. The snapshot only fills keys the merged state lacks: every
-        key already present came from a push received after the (re)connect, which
-        is at least as new as the snapshot.
+    async def _snapshot_loop(self) -> None:
+        """Merge a GET_STATUS snapshot for the current connection.
+
+        Each attempt registers one short-lived command session, so attempts are rate
+        limited across reconnects, wait out an in-flight pause/stop, and back off after
+        a failure. A snapshot answered after the connection changed is dropped. It only
+        fills keys the merged state lacks: every key already present came from a push on
+        this connection, which is at least as new as the snapshot. It does not touch
+        _last_update_time, which only status pushes keep alive.
         """
-        while not _has_print_state(self._accumulated_data):
+        while True:
+            gen = self._conn_gen
+            if self._baseline_gen == gen:
+                return
+            wait = self._snapshot_wait()
+            if wait > 0:
+                await asyncio.sleep(wait)
+                continue
+            if self._control_in_flight:
+                await asyncio.sleep(_SNAPSHOT_CONTROL_BACKOFF_S)
+                continue
+            self._snapshot_times.append(time.monotonic())
             try:
                 response = await self._send_command(CC2_CMD_GET_STATUS)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 logger.warning(
-                    "Printer status snapshot failed: %s. Retrying in %.0fs",
-                    exc,
-                    _SNAPSHOT_RETRY_S,
+                    "Printer status snapshot failed: %s. Retrying in %.0fs", exc, _SNAPSHOT_RETRY_S
                 )
                 await asyncio.sleep(_SNAPSHOT_RETRY_S)
                 continue
             snapshot = response.get("result")
-            if not isinstance(snapshot, dict) or "print_status" not in snapshot:
-                logger.warning("Printer status snapshot had no print_status; retrying later")
+            if not isinstance(snapshot, dict) or not _has_print_state({"result": snapshot}):
+                logger.warning(
+                    "Printer status snapshot had no usable print state. Retrying in %.0fs",
+                    _SNAPSHOT_RETRY_S,
+                )
                 await asyncio.sleep(_SNAPSHOT_RETRY_S)
                 continue
             snapshot = {k: v for k, v in snapshot.items() if k != "error_code"}
             async with self._state_lock:
+                if gen != self._conn_gen:
+                    continue  # the connection changed while we waited: take a new one
                 for key in ("result", "data"):
                     block = self._accumulated_data.setdefault(key, {})
                     _fill_missing(block, snapshot)
                 self._accumulated_data.setdefault("method", METHOD_STATUS_PUSH)
-                self._last_update_time = time.monotonic()
+                self._baseline_gen = gen
             logger.info("Printer status snapshot loaded")
+            return
 
     async def _send_command(
+        self, method: int, params: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """``_send_registered`` that marks pause/resume/stop as in flight, so a status
+        snapshot does not compete with them for the printer's client slots."""
+        if method == CC2_CMD_GET_STATUS:
+            return await self._send_registered(method, params)
+        self._control_in_flight += 1
+        try:
+            return await self._send_registered(method, params)
+        finally:
+            self._control_in_flight -= 1
+
+    async def _send_registered(
         self, method: int, params: dict[str, Any] | None = None
     ) -> dict[str, Any]:
         """Register, publish a control command, and confirm the printer's ack.
