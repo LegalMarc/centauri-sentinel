@@ -354,16 +354,9 @@ async def _run(args: argparse.Namespace) -> None:
 
         await _clamp_stored_detection_settings(db)
 
-        db_printer_ip = await db.get_setting("printer_ip")
-        if db_printer_ip:
-            from sentinel.network import validate_printer_ip
+        from sentinel.network import apply_printer_ip_override
 
-            try:
-                settings.printer_ip = validate_printer_ip(db_printer_ip)
-            except ValueError as exc:
-                logger.error("Stored printer_ip failed SSRF validation: %s", exc)
-                # fallback to the config default
-                pass
+        apply_printer_ip_override(settings, await db.get_setting("printer_ip"))
 
         camera = MjpegGrabber(settings)
         printer = PrinterClient(settings)

@@ -569,3 +569,57 @@ def test_cli_requires_a_subcommand() -> None:
     with pytest.raises(SystemExit) as exc:
         diagnostics.main([])
     assert exc.value.code == 2
+
+
+# ---------------------------------------------------------------------------
+# Printer address: the dashboard-saved address wins over PRINTER_IP, as in the service
+# ---------------------------------------------------------------------------
+
+
+def _db_with_printer_ip(path: Any, value: str | None) -> str:
+    import sqlite3
+
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE runtime_settings (key TEXT PRIMARY KEY, value TEXT)")
+    if value is not None:
+        conn.execute("INSERT INTO runtime_settings VALUES ('printer_ip', ?)", (value,))
+    conn.commit()
+    conn.close()
+    return str(path)
+
+
+def test_stored_printer_ip_reads_the_saved_address(tmp_path: Any) -> None:
+    db = _db_with_printer_ip(tmp_path / "s.db", "192.168.40.20")
+    assert diagnostics.stored_printer_ip(db) == "192.168.40.20"
+
+
+def test_stored_printer_ip_is_none_without_a_saved_address(tmp_path: Any) -> None:
+    assert diagnostics.stored_printer_ip(_db_with_printer_ip(tmp_path / "s.db", None)) is None
+    assert diagnostics.stored_printer_ip(str(tmp_path / "missing.db")) is None
+    assert not (tmp_path / "missing.db").exists(), "must not create the database"
+
+
+@pytest.mark.parametrize(
+    ("stored", "expected"),
+    [("192.168.40.20", "192.168.40.20"), (None, "10.0.0.1"), ("not a host!", "10.0.0.1")],
+)
+async def test_mqtt_slots_dials_the_address_the_service_uses(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch, stored: str | None, expected: str
+) -> None:
+    """Production saved a new address from the dashboard; the diagnostic kept dialling the
+    stale PRINTER_IP and failed with 'No route to host' while the service was connected.
+    A saved address that fails validation is ignored, as the service ignores it."""
+    db = _db_with_printer_ip(tmp_path / "s.db", stored)
+    settings = Settings(printer_ip="10.0.0.1", printer_access_code="secret", db_path=db)
+    seen: dict[str, str] = {}
+
+    async def fake_run(s: Settings, **_: Any) -> dict[str, Any]:
+        seen["ip"] = s.printer_ip
+        return {}
+
+    monkeypatch.setattr("sentinel.config.get_settings", lambda: settings)
+    monkeypatch.setattr(diagnostics, "run_mqtt_slots", fake_run)
+    monkeypatch.setattr(diagnostics, "format_summary", lambda _r: "")
+    args = diagnostics._build_parser().parse_args(["mqtt-slots"])
+    assert await diagnostics._mqtt_slots(args) == 0
+    assert seen["ip"] == expected

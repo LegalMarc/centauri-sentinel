@@ -141,7 +141,8 @@ fills its client table and later registrations are refused until the old ones ex
 
 **Measure it on the real printer.** Open the Coolify terminal on the `sentinel` service
 (the container has the printer's `PRINTER_IP` and `PRINTER_ACCESS_CODE`) and run, **while
-the printer is idle**:
+the printer is idle**. Like the service, it uses the address saved in Settings > Printer
+over `PRINTER_IP`, and prints the address it dials first:
 
 ```bash
 python -m sentinel.diagnostics mqtt-slots

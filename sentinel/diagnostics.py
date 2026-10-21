@@ -19,8 +19,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
+import sqlite3
 import sys
 import time
 from dataclasses import asdict, dataclass
@@ -28,7 +30,7 @@ from typing import TYPE_CHECKING, Any
 
 import aiomqtt
 
-from sentinel.network import resolve_and_validate_printer_ip
+from sentinel.network import apply_printer_ip_override, resolve_and_validate_printer_ip
 from sentinel.printer.client import (
     _TIMEOUT_S,
     PrinterClient,
@@ -497,12 +499,32 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def stored_printer_ip(db_path: str) -> str | None:
+    """The printer address saved from the dashboard, read without writing to the database.
+
+    The service prefers it over PRINTER_IP, so the diagnostic must too or it dials a stale
+    address. Returns None when there is no database or no saved address.
+    """
+    try:
+        with contextlib.closing(
+            sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
+        ) as conn:
+            row = conn.execute(
+                "SELECT value FROM runtime_settings WHERE key = ?", ("printer_ip",)
+            ).fetchone()
+    except sqlite3.Error:
+        return None
+    return str(row[0]) if row and row[0] else None
+
+
 async def _mqtt_slots(args: argparse.Namespace) -> int:
     from sentinel.config import get_settings
 
     print(WARNING, flush=True)
     print(flush=True)
     settings = get_settings()
+    apply_printer_ip_override(settings, stored_printer_ip(settings.db_path))
+    print(f"Printer: {settings.printer_ip}", flush=True)
     try:
         report = await run_mqtt_slots(
             settings,

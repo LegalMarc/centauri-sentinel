@@ -4,8 +4,22 @@ import ipaddress
 import logging
 import re
 import socket
+from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+def apply_printer_ip_override(settings: Any, stored: str | None) -> None:
+    """Use the printer address saved from the dashboard (runtime setting) over PRINTER_IP.
+
+    An address that fails SSRF validation is logged and ignored, keeping PRINTER_IP.
+    """
+    if not stored:
+        return
+    try:
+        settings.printer_ip = validate_printer_ip(stored)
+    except ValueError as exc:
+        logger.error("Stored printer_ip failed SSRF validation: %s", exc)
 
 
 def validate_printer_ip(v: str) -> str:
