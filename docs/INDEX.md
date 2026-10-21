@@ -24,6 +24,7 @@ Read this file first. Each line: `path` — one-sentence scope. anchors: heading
 
 ## docs/adr/
 - `docs/adr/0000-template.md` — Copy-me template for a new architecture decision record. anchors: status, context, decision, consequences, date
+- `docs/adr/0001-openbridge-1-0-1.md` — Why the dashboard stays on OpenBridge web components 1.0.1 (Apache-2.0) instead of AGPL 2.x, and when to revisit (2027-03-28). anchors: status, context, decision, consequences, date covers: web/package.json
 
 ## docs/backlog/
 - `docs/backlog/audit-fixes.md` — Checklist of coded fixes (B1..Bn) from the pre-beta audit, grouped by defect class. anchors: bugs--correctness, security--privacy, performance--scalability, stability--reliability, maintainability--operational-readiness

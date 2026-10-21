@@ -33,7 +33,7 @@ apply right now; snooze uses the selected length (10 minutes by default).
 OpenBridge is a maritime bridge design system. Sentinel uses
 `@oicl/openbridge-webcomponents` **1.0.1**, the last release licensed Apache-2.0. Version
 2.0.0 is AGPL-3.0-only (each 2.x release becomes Apache-2.0 180 days after it ships), so do
-not upgrade without checking the license of the target version. The full license texts for
+not upgrade without checking the license of the target version (see [ADR 0001](adr/0001-openbridge-1-0-1.md)). The full license texts for
 everything in the bundle (OpenBridge, Lit, Noto Sans) are in `web/THIRD_PARTY_LICENSES.txt`,
 copied next to the bundle as `LICENSE.txt`. The OpenBridge name and logo are not used in the UI.
 
