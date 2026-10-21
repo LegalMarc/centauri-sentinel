@@ -15,7 +15,8 @@ and account buttons) and a command bar (views on the left, printer commands on t
   stream's real aspect ratio (read from the first frame), so there is no letterboxing. The
   native resolution shows in the camera's corner. A rail on the right holds the failure
   watch (score against the pause threshold, confirm streak, heartbeat), temperatures,
-  recent activity and the slicer thumbnail.
+  recent activity and the slicer thumbnail. When the rail is taller than the screen, the
+  rail scrolls on its own and the page does not.
 - **History** lists jobs, detections and pauses in local time, with the clear-history
   action at the bottom (two clicks, no browser dialog).
 - **Settings** holds the detection settings, the printer address, and the account actions
@@ -74,6 +75,8 @@ uv run python tools/dev_preview.py --scenario printing
 The preview runs the real app, routes, templates, auth and SQLite repository against a fake
 printer, camera and watcher, seeded with sample history. The camera streams
 `tools/preview_assets/sample_frame.jpg`. Scenarios are `printing`, `paused`, `idle` and
-`offline`; Pause, Resume and Stop change the fake's state. `--auth` enables login with the
-preview-only credentials defined in `tools/dev_preview.py`. `.claude/launch.json` defines
-both as `dashboard-preview` (port 8765) and `dashboard-preview-auth` (port 8766).
+`offline`; Pause, Resume and Stop change the fake's state, and Snooze records the same
+settings the real watcher writes (it does not expire; restart the preview). `--auth`
+enables login with the preview-only credentials defined in `tools/dev_preview.py`.
+`.claude/launch.json` defines both as `dashboard-preview` (port 8765) and
+`dashboard-preview-auth` (port 8766).

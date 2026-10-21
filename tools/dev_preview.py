@@ -17,6 +17,7 @@ import argparse
 import asyncio
 import os
 import tempfile
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -120,7 +121,8 @@ class FakeDispatcher:
 class Preview:
     """The fake watcher: what routes.py reads from WatcherLoop."""
 
-    def __init__(self, scenario: str) -> None:
+    def __init__(self, scenario: str, db: Database) -> None:
+        self._db = db
         self.printer = FakePrinter(self)
         self.dispatcher = FakeDispatcher()
         self.last_ml_observation = LastMlObservation(score=0.18, ts=datetime.now(tz=UTC))
@@ -151,7 +153,10 @@ class Preview:
         return False
 
     async def snooze(self, seconds: float) -> None:
-        return None
+        # The same two settings WatcherLoop.snooze writes, so the dashboard shows
+        # "Snoozed to HH:MM". Nothing re-enables detection; restart the preview.
+        await self._db.set_setting("snooze_until_utc", str(time.time() + seconds))
+        await self._db.set_setting("detection_enabled", "false")
 
     def note_operator_pause(self) -> None:
         return None
@@ -209,7 +214,7 @@ async def _main(args: argparse.Namespace) -> None:
         db,
     )
     app = create_app(
-        settings, db=db, watcher=Preview(args.scenario), camera=FakeCamera(), sessions=sessions
+        settings, db=db, watcher=Preview(args.scenario, db), camera=FakeCamera(), sessions=sessions
     )
 
     async def _heartbeat() -> None:

@@ -294,6 +294,22 @@ async def test_status_page_assets_are_static_and_versioned(app: object) -> None:
     assert js.status_code == 200
 
 
+async def test_monitor_rail_cannot_scroll_the_page(app: object) -> None:
+    """Side by side, the rail is capped at the height left under the bars and
+    scrolls itself; at 1280x720 its recent-activity list once pushed the page
+    120 px past the viewport."""
+    import re
+
+    async with _client(app) as c:
+        css = (await c.get("/static/dashboard.css")).text
+    assert re.search(r"--view-h:\s*calc\(100dvh", css)
+    assert re.search(r"--cam-max-h:\s*calc\(var\(--view-h\)", css)
+    wide = re.search(r"@media \(min-width: 901px\) \{\s*\.rail \{([^}]*)\}", css)
+    assert wide, "side-by-side rail rule missing"
+    assert "max-height: var(--view-h)" in wide.group(1)
+    assert "overflow-y: auto" in wide.group(1)
+
+
 async def test_status_page_no_meta_refresh(app: object) -> None:
     async with _client(app) as c:
         r = await c.get("/")

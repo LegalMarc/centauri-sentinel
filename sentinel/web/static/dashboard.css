@@ -148,7 +148,8 @@ main { flex: 1; min-height: 0; }
      --job-h is measured by script. The camera is as wide as the column allows
      unless that would push the job strip below the fold. */
   --job-h: 7rem;
-  --cam-max-h: calc(100dvh - env(safe-area-inset-top, 0px) - var(--bar-h) - var(--cmd-h) - 2 * var(--gutter) - var(--job-h) - 12px);
+  --view-h: calc(100dvh - env(safe-area-inset-top, 0px) - var(--bar-h) - var(--cmd-h) - 2 * var(--gutter));
+  --cam-max-h: calc(var(--view-h) - var(--job-h) - 12px);
   --arn: 1.7778;
   display: grid;
   grid-template-columns: minmax(0, 1fr) var(--rail-w);
@@ -284,6 +285,10 @@ main { flex: 1; min-height: 0; }
 .job-stats dd { margin: 0; font-weight: 600; }
 
 .rail { display: flex; flex-direction: column; gap: var(--gutter); min-width: 0; }
+/* Side by side, the rail scrolls on its own so a short screen never scrolls the page. */
+@media (min-width: 901px) {
+  .rail { max-height: var(--view-h); overflow-y: auto; overscroll-behavior: contain; }
+}
 .panel {
   padding: 16px 18px;
   border-radius: var(--radius);
