@@ -109,10 +109,31 @@ API (`POST /api/v1/deploy`, application `orlnd6yvyq885pegzrl4omvt`, deployment
 `cpce5pry75eljezmrjkmzcuc`, commit `899cc7f`). `/healthz` returns 200. `/readyz` reports db,
 watcher, mqtt and camera all OK. `/login` serves asset version `7e774e30cfe2`.
 
+Owner feedback after signing in, fixed in `30f4e25` and deployed through the API
+(deployment `o7shu0vzghfbvm5namtpmhml`, asset version `2e7aba2b228f`, `/readyz` ready):
+
+- Snooze length is now a menu on the Snooze button. It opens upward on phones.
+- The camera chip showed "LIVE" with no resolution because the `load` event is unreliable for
+  MJPEG. The size is now also read on every poll.
+- The score age read "896678s ago". It now reads "10d ago".
+- With the printer idle, the phone bar shows only Snooze, as designed.
+
 Still open:
 
-- Owner signs in once (old 1-hour cookies do not carry over) and reports the camera
-  resolution from the camera chip.
+- **F1 (critical, needs a decision and hardware).** The status listener only subscribes to
+  pushes, and the printer pushes deltas. After every listener (re)connect the merged state
+  is cleared and holds only the blocks that changed since. Production logs show
+  `print_status`, `machine_status` and `heater_bed` missing, so the bed reads "—".
+  `_parse_status` defaults a missing `print_status.state` to "idle", so a reconnect,
+  restart or redeploy mid-print makes the watcher record the job as ended and go IDLE. It
+  then stays IDLE until the state changes, so detection is off for the rest of the print.
+  An idle printer also hits the 15 s read timeout and reconnects about every 30 s.
+  Proposed fix: request a full snapshot (`1002` GET_STATUS) after each status connect;
+  treat a merged state without `print_status.state` as unknown (stale), never idle; keep
+  the last state across reconnects; and stop treating 15 s of silence while idle as a
+  failure. GET_STATUS needs a registered command session, so settle Q3 (slot capacity)
+  first.
+- Read the camera resolution from the chip now that it renders.
 - Q3: run `python -m sentinel.diagnostics mqtt-slots` in the Coolify terminal while the
   printer is idle, then act on its last JSON line (see `docs/troubleshooting.md`).
 - Coolify has no push webhook for this app. Either add one or deploy through the API or UI
