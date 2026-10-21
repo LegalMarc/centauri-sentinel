@@ -26,8 +26,14 @@ State is shown in form as well as text: a caution frame and banner around the ca
 the print is paused, status chips coloured from the OpenBridge alert palette, and the
 gauge turning red when the score crosses the threshold.
 
+Snooze opens a menu of lengths (5 min, 10 min, 30 min, 1 hour); choosing one snoozes
+detection and the Failure watch chip shows "Snoozed to HH:MM". The camera chip shows the
+stream's native resolution, read from the frame on every poll because browsers do not
+reliably fire `load` for an MJPEG image. The score age reads in the largest whole unit
+("42s ago", "7m ago", "10d ago").
+
 On phones (≤ 640 px) the commands move to a bottom bar that shows only the commands that
-apply right now; snooze uses the selected length (10 minutes by default).
+apply right now. With the printer idle that is Snooze alone. The snooze menu opens upward.
 
 ## OpenBridge components
 

@@ -112,17 +112,8 @@ obc-button.danger.arming {
   --normal-hover-background-color: var(--alert-alarm-color);
   --element-active-color: #fff;
 }
-.snooze { display: inline-flex; align-items: stretch; }
-.snooze obc-button { min-width: 0; }
-.snooze select {
-  border: 1px solid var(--normal-enabled-border-color);
-  border-left: 0;
-  border-radius: 0 var(--radius) var(--radius) 0;
-  background: var(--normal-enabled-background-color);
-  padding: 0 28px 0 10px;
-  font-weight: 600;
-  cursor: pointer;
-}
+.snooze { position: relative; display: inline-flex; align-items: stretch; }
+.snooze-menu { position: absolute; top: calc(100% + 4px); right: 0; min-width: 12rem; }
 
 .banner {
   display: flex;
@@ -455,17 +446,20 @@ td a { color: var(--accent); }
   position: fixed;
   top: calc(env(safe-area-inset-top, 0px) + var(--bar-h) + 4px);
   right: 8px;
+  min-width: 15rem;
+}
+.popmenu {
   z-index: 40;
   display: grid;
-  min-width: 15rem;
   padding: 6px;
   border-radius: var(--radius);
   background: var(--container-global-color);
   border: 1px solid var(--line);
   box-shadow: 0 8px 24px rgb(0 0 0 / 0.35);
 }
-.user-menu form { margin: 0; }
-.user-menu button {
+.popmenu[hidden] { display: none; }
+.popmenu form { margin: 0; }
+.popmenu button {
   width: 100%;
   padding: 10px 12px;
   border: 0;
@@ -474,8 +468,8 @@ td a { color: var(--accent); }
   text-align: left;
   cursor: pointer;
 }
-.user-menu button:hover { background: var(--flat-hover-background-color); }
-.user-menu .who { padding: 8px 12px; color: var(--ink-faint); font-size: 13px; border-bottom: 1px solid var(--divider); margin-bottom: 4px; }
+.popmenu button:hover, .popmenu button:focus-visible { background: var(--flat-hover-background-color); }
+.popmenu .who { padding: 8px 12px; color: var(--ink-faint); font-size: 13px; border-bottom: 1px solid var(--divider); margin-bottom: 4px; }
 .toast {
   position: fixed;
   left: 50%;
@@ -521,9 +515,10 @@ td a { color: var(--accent); }
   }
   .controls .sep { display: none; }
   .controls obc-button { min-width: 0; flex: 1 1 0; }
-  /* Phones show only the commands that apply right now; snooze uses the
-     selected length (10 min unless changed on a wider screen). */
-  .controls obc-button[disabled], .snooze select { display: none; }
+  /* Phones show only the commands that apply right now. The snooze menu
+     opens upward from the bottom bar. */
+  .controls obc-button[disabled] { display: none; }
+  .snooze-menu { top: auto; bottom: calc(100% + 12px); }
   .snooze { flex: 1 1 0; }
   .snooze obc-button { flex: 1; }
   .view { padding-bottom: 96px; }

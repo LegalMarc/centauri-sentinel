@@ -3079,3 +3079,47 @@ async def test_login_page_assets_are_versioned(auth_app: object) -> None:
         r = await c.get("/login")
     assert re.search(r'/static/palette\.js\?v=[0-9a-f]{12}"', r.text)
     assert "__ASSET_V__" not in r.text
+
+
+@pytest.mark.parametrize(
+    ("seconds", "expected"),
+    [
+        (None, "never"),
+        (-3, "0s ago"),
+        (42.6, "42s ago"),
+        (59, "59s ago"),
+        (60, "1m ago"),
+        (3599, "59m ago"),
+        (7200, "2h ago"),
+        (896678, "10d ago"),
+    ],
+)
+def test_format_age_is_compact(seconds: float | None, expected: str) -> None:
+    """A score from a print ten days ago reads '10d ago', not '896678s ago'."""
+    from sentinel.web.routes import _format_age
+
+    assert _format_age(seconds) == expected
+
+
+async def test_snooze_length_is_a_menu_on_the_button(app: object) -> None:
+    """The snooze length is picked from a menu opened by the Snooze button, so
+    phones (which hid the old select) can choose it too."""
+    import re
+
+    async with _client(app) as c:
+        body = (await c.get("/")).text
+    assert 'id="snooze-duration"' not in body
+    assert re.search(r'id="btn-snooze"[^>]*aria-haspopup="menu"', body)
+    menu = re.search(
+        r'<div class="popmenu snooze-menu" id="snooze-menu"[^>]*>(.*?)</div>\s*</div>', body, re.S
+    )
+    assert menu, "snooze menu missing"
+    assert re.findall(r'data-seconds="(\d+)"', menu.group(1)) == ["300", "600", "1800", "3600"]
+
+
+async def test_camera_resolution_does_not_rely_on_load_event(app: object) -> None:
+    """Chrome may not fire load for an MJPEG <img>, or fires it before the script
+    runs; the frame size is also read on every poll."""
+    async with _client(app) as c:
+        js = (await c.get("/static/dashboard.js")).text
+    assert "if (live) onFrameLoad();" in js

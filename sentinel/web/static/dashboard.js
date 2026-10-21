@@ -163,6 +163,9 @@ function render(d) {
     img.hidden = true;
     $("camera-offline").hidden = false;
   }
+  // The load event is unreliable for an MJPEG stream (and can fire before this
+  // script runs), so read the frame size on every poll as well.
+  if (live) onFrameLoad();
   $("camera").dataset.state = paused ? "paused" : "live";
   $("cam-banner").hidden = !paused;
   $("cam-banner").textContent = "Paused · check the print, then resume";
@@ -194,7 +197,7 @@ function poll() {
 /* ---- Camera ------------------------------------------------------------ */
 function onFrameLoad() {
   const img = $("camera-feed-img");
-  if (!img.naturalWidth) return;
+  if (!img.naturalWidth || $("cam-res").textContent === `${img.naturalWidth}×${img.naturalHeight}`) return;
   $("camera").style.setProperty("--ar", `${img.naturalWidth} / ${img.naturalHeight}`);
   document.querySelector(".monitor").style.setProperty("--arn", String(img.naturalWidth / img.naturalHeight));
   $("cam-res").textContent = `${img.naturalWidth}×${img.naturalHeight}`;
@@ -258,16 +261,14 @@ function onStop() {
   };
 }
 
-function onSnooze() {
-  const select = $("snooze-duration");
-  const seconds = parseInt(select.value, 10);
+function snooze(seconds, label) {
   sentinelFetch("/api/control/snooze", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ seconds }),
   })
     .then((res) => {
-      if (res.ok) { toast(`Detection snoozed for ${select.options[select.selectedIndex].text}`, "warning"); poll(); }
+      if (res.ok) { toast(`Detection snoozed for ${label}`, "warning"); poll(); }
       else toast("Snooze failed", "alarm");
     })
     .catch((err) => toast(`Snooze failed: ${err.message}`, "alarm"));
@@ -353,7 +354,35 @@ document.querySelectorAll(".view-tab").forEach((tab) => tab.addEventListener("cl
 $("btn-pause").addEventListener("click", (e) => { if (!e.currentTarget.disabled) sendControl("pause", "Pause"); });
 $("btn-resume").addEventListener("click", (e) => { if (!e.currentTarget.disabled) sendControl("resume", "Resume"); });
 $("btn-stop").addEventListener("click", onStop);
-$("btn-snooze").addEventListener("click", onSnooze);
+
+const snoozeBtn = $("btn-snooze"), snoozeMenu = $("snooze-menu");
+function setSnoozeMenu(open) {
+  snoozeMenu.hidden = !open;
+  snoozeBtn.setAttribute("aria-expanded", String(open));
+  if (open) snoozeMenu.querySelector("button").focus();
+}
+snoozeBtn.addEventListener("click", (e) => {
+  e.stopPropagation();
+  if (!snoozeBtn.disabled) setSnoozeMenu(snoozeMenu.hidden);
+});
+snoozeMenu.addEventListener("click", (e) => {
+  const item = e.target.closest("button[data-seconds]");
+  if (!item) return;
+  setSnoozeMenu(false);
+  snooze(parseInt(item.dataset.seconds, 10), item.textContent.trim());
+});
+snoozeMenu.addEventListener("keydown", (e) => {
+  const items = [...snoozeMenu.querySelectorAll("button")];
+  const i = items.indexOf(document.activeElement);
+  if (e.key === "ArrowDown") { e.preventDefault(); items[(i + 1) % items.length].focus(); }
+  else if (e.key === "ArrowUp") { e.preventDefault(); items[(i - 1 + items.length) % items.length].focus(); }
+});
+document.addEventListener("click", (e) => {
+  if (!snoozeMenu.hidden && !snoozeMenu.contains(e.target)) setSnoozeMenu(false);
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !snoozeMenu.hidden) { setSnoozeMenu(false); snoozeBtn.focus(); }
+});
 $("btn-clear-data").addEventListener("click", onClearHistory);
 $("btn-save").addEventListener("click", saveSettings);
 $("settings-form").addEventListener("submit", saveSettings);
@@ -367,6 +396,7 @@ new ResizeObserver(([entry]) => {
   document.querySelector(".monitor").style.setProperty("--job-h", `${Math.ceil(entry.borderBoxSize[0].blockSize)}px`);
 }).observe(document.querySelector(".job"));
 $("camera-feed-img").addEventListener("load", onFrameLoad);
+onFrameLoad();
 $("camera-feed-img").addEventListener("error", onCameraError);
 
 const topbar = $("topbar");

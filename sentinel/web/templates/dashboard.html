@@ -26,19 +26,19 @@
       <button class="view-tab" role="tab" id="tab-settings" data-view="settings" aria-controls="view-settings" aria-selected="false" tabindex="-1"><obi-settings-iec class="icon" aria-hidden="true"></obi-settings-iec>Settings</button>
     </div>
     <div class="controls" role="group" aria-label="Printer controls">
-      <obc-button id="btn-pause" variant="normal" showleadingicon{% if not is_printing %} disabled{% endif %}><obi-media-pause slot="leading-icon"></obi-media-pause>Pause</obc-button>
-      <obc-button id="btn-resume" variant="normal" showleadingicon{% if not is_paused %} disabled{% endif %}><obi-media-play slot="leading-icon"></obi-media-play>Resume</obc-button>
-      <obc-button id="btn-stop" class="danger" variant="normal" showleadingicon{% if not (is_printing or is_paused) %} disabled{% endif %}><obi-media-stop slot="leading-icon"></obi-media-stop><span id="stop-label">Stop</span></obc-button>
+      <obc-button id="btn-pause" variant="normal" fullwidth showleadingicon{% if not is_printing %} disabled{% endif %}><obi-media-pause slot="leading-icon"></obi-media-pause>Pause</obc-button>
+      <obc-button id="btn-resume" variant="normal" fullwidth showleadingicon{% if not is_paused %} disabled{% endif %}><obi-media-play slot="leading-icon"></obi-media-play>Resume</obc-button>
+      <obc-button id="btn-stop" class="danger" variant="normal" fullwidth showleadingicon{% if not (is_printing or is_paused) %} disabled{% endif %}><obi-media-stop slot="leading-icon"></obi-media-stop><span id="stop-label">Stop</span></obc-button>
       <span class="sep" aria-hidden="true"></span>
       <div class="snooze">
-        <obc-button id="btn-snooze" variant="normal" showleadingicon segmentposition="left"><obi-alarm-silenced-outlined slot="leading-icon"></obi-alarm-silenced-outlined>Snooze</obc-button>
-        <label class="visually-hidden" for="snooze-duration" hidden>Snooze length</label>
-        <select id="snooze-duration" aria-label="Snooze length">
-          <option value="300">5 min</option>
-          <option value="600" selected>10 min</option>
-          <option value="1800">30 min</option>
-          <option value="3600">1 hour</option>
-        </select>
+        <obc-button id="btn-snooze" variant="normal" fullwidth showleadingicon showtrailingicon aria-haspopup="menu" aria-expanded="false" aria-controls="snooze-menu"><obi-alarm-silenced-outlined slot="leading-icon"></obi-alarm-silenced-outlined>Snooze<obi-chevron-down-google slot="trailing-icon"></obi-chevron-down-google></obc-button>
+        <div class="popmenu snooze-menu" id="snooze-menu" role="menu" aria-label="Snooze detection for" hidden>
+          <div class="who">Snooze detection for</div>
+          <button type="button" role="menuitem" data-seconds="300">5 min</button>
+          <button type="button" role="menuitem" data-seconds="600">10 min</button>
+          <button type="button" role="menuitem" data-seconds="1800">30 min</button>
+          <button type="button" role="menuitem" data-seconds="3600">1 hour</button>
+        </div>
       </div>
     </div>
   </nav>
@@ -323,7 +323,7 @@
 </div>
 
 {% if auth_enabled %}
-<div class="user-menu" id="user-menu" role="menu" hidden>
+<div class="popmenu user-menu" id="user-menu" role="menu" hidden>
   <div class="who">Signed in</div>
   <form method="post" action="/logout"><button type="submit" role="menuitem">Log out</button></form>
   <form method="post" action="/logout-all"><button type="submit" role="menuitem">Log out all devices</button></form>

@@ -16,6 +16,7 @@ import "@oicl/openbridge-webcomponents/dist/icons/icon-media-pause.js";
 import "@oicl/openbridge-webcomponents/dist/icons/icon-media-play.js";
 import "@oicl/openbridge-webcomponents/dist/icons/icon-media-stop.js";
 import "@oicl/openbridge-webcomponents/dist/icons/icon-alarm-silenced-outlined.js";
+import "@oicl/openbridge-webcomponents/dist/icons/icon-chevron-down-google.js";
 import "@oicl/openbridge-webcomponents/dist/icons/icon-camera.js";
 import "@oicl/openbridge-webcomponents/dist/icons/icon-camera-off.js";
 import "@oicl/openbridge-webcomponents/dist/icons/icon-history-google.js";

@@ -47,8 +47,14 @@ def _age_seconds(last: datetime | str | None) -> float | None:
 
 
 def _format_age(seconds: float | None) -> str:
-    """Format an age in seconds as 'Ns ago', or 'never' if unknown."""
-    return f"{seconds:.0f}s ago" if seconds is not None else "never"
+    """Format an age as '42s ago', '7m ago', '3h ago' or '10d ago'; 'never' if unknown."""
+    if seconds is None:
+        return "never"
+    s = max(0, int(seconds))
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        if s >= size:
+            return f"{s // size}{unit} ago"
+    return f"{s}s ago"
 
 
 def format_duration(seconds: float) -> str:
