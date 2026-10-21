@@ -223,6 +223,16 @@ Run from the Coolify terminal of the sentinel container against 192.168.40.18.
   So `enable` does not mean "printing". Sentinel reads `""` as idle only with
   `machine_status.status` 1, and otherwise as printing, until a GET_STATUS capture
   during a print shows what a running print reports.
+- **Registration slots** (`python -m sentinel.diagnostics mqtt-slots`, twice): about 6
+  registrations at once (1 GET_STATUS + 1 reuse + 4 fresh, then `too many clients`; a second
+  run got 3 fresh while a probe's registration was still held). A slot freed 60.6 s after
+  the first registration (`--expiry-wait`, 30 s poll), so registrations last about 60 s
+  after their session closes.
+- **Re-registering a held pair** answers `{"error": "already registered"}`, and a GET_STATUS
+  sent on that pair is acknowledged (0.09 s; measured for GET_STATUS only, not yet for a
+  pause). Sentinel therefore reuses one pair for
+  control commands and one for status snapshots, and treats `already registered` as
+  registered.
 
 ### pycentauri status (0.4.2)
 

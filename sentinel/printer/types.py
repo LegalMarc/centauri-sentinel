@@ -86,4 +86,7 @@ CC2_ACK_OK = 0
 # are honoured — the printer silently ignores unregistered command clients).
 CC2_REG_OK = "ok"
 CC2_REG_TOO_MANY_CLIENTS = "too many clients"
+# Answer to re-registering a pair the printer still holds. Commands on that pair are
+# honoured (live probe 2026-10-21), so it counts as registered.
+CC2_REG_ALREADY = "already registered"
 CC2_REGISTRATION_TIMEOUT_S = 3.0

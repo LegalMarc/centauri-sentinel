@@ -41,6 +41,7 @@ from sentinel.printer.types import (
     CC2_CMD_PAUSE_PRINT,
     CC2_CMD_RESUME_PRINT,
     CC2_CMD_STOP_PRINT,
+    CC2_REG_ALREADY,
     CC2_REG_OK,
     CC2_REG_TOO_MANY_CLIENTS,
     CC2_REGISTRATION_TIMEOUT_S,
@@ -364,6 +365,14 @@ class PrinterClient:
         self._file_layers_cache: dict[str, int] = {}
         self._status_client_id = f"{self._client_id}-status"
         self._cmd_client_id = f"{self._client_id}-cmd"
+        # One registered id pair per purpose, reused for every command. The printer holds
+        # about 6 registrations and keeps each about 60 s after its session closes (live
+        # test 2026-10-21), so a burst of fresh pairs can fill them and get a pause
+        # refused. Control and status
+        # get separate pairs so a pause never waits behind a status snapshot; each lock
+        # keeps one MQTT session per client id at a time.
+        self._reg_ids: dict[str, tuple[str, str]] = {}
+        self._reg_locks = {"control": asyncio.Lock(), "status": asyncio.Lock()}
         # Monotonic per-command id used to match api_response acks to requests.
         self._request_counter: int = 0
 
@@ -526,6 +535,7 @@ class PrinterClient:
 
     async def reconfigure(self, host: str) -> None:
         """Update the printer IP address and restart the connection."""
+        self._reg_ids = {}  # registrations belong to the old printer
         # Stop the listener first (it can start snapshots), then any snapshot, so
         # nothing registers on the new host with the old serial.
         await self._stop_listener()
@@ -868,8 +878,10 @@ class PrinterClient:
         ``error_code`` raises rather than returning silently — a command the
         printer ignores must surface as a real failure, not a false success.
 
-        Fresh per-command ``client_id``/``request_id`` are used so a closed
-        session never leaves a stale registration occupying a client slot.
+        The ``client_id``/``request_id`` pair is reused per purpose (control or
+        status) for the client's lifetime, so Sentinel holds at most two of the
+        printer's few registration slots. Re-registering an existing pair answers
+        "already registered", which counts as registered.
 
         Raises:
             PrinterProtocolError: serial unknown / malformed response.
@@ -883,6 +895,22 @@ class PrinterClient:
 
         Returns the decoded command-response payload on success.
         """
+        purpose = "status" if method == CC2_CMD_GET_STATUS else "control"
+        async with self._reg_locks[purpose]:
+            if purpose not in self._reg_ids:
+                # Two pairs made in the same millisecond can share a client id (one
+                # random hex digit), and two sessions on one id kick each other.
+                taken = {ids[0] for ids in self._reg_ids.values()}
+                while (ids := _generate_cc2_ids())[0] in taken:
+                    pass
+                self._reg_ids[purpose] = ids
+            client_id, request_id = self._reg_ids[purpose]
+            return await self._send_on(client_id, request_id, method, params)
+
+    async def _send_on(
+        self, client_id: str, request_id: str, method: int, params: dict[str, Any] | None
+    ) -> dict[str, Any]:
+        """One registered session on ``client_id``: register, publish, await the ack."""
         if self._serial_number is None:
             raise PrinterProtocolError(
                 "serial unknown — no status received yet; cannot publish command"
@@ -893,7 +921,6 @@ class PrinterClient:
             # A momentary DNS/mDNS failure is transient, so make it retryable. An
             # SSRF rejection (plain ValueError) is a config problem and stays fatal.
             raise PrinterTimeoutError(f"Cannot resolve printer host: {exc}") from exc
-        client_id, request_id = _generate_cc2_ids()
         cmd_id = self._next_request_id()
         command_published = False
         try:
@@ -1001,7 +1028,7 @@ class PrinterClient:
             messages, register_resp_topic, CC2_REGISTRATION_TIMEOUT_S, "registration"
         )
         error = payload.get("error", "")
-        if error == CC2_REG_OK:
+        if error in (CC2_REG_OK, CC2_REG_ALREADY):
             logger.debug("CC2 registration accepted (client_id in topic %s)", register_resp_topic)
             return
         if error == CC2_REG_TOO_MANY_CLIENTS:

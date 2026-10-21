@@ -103,8 +103,10 @@ printer with hot plastic in it.
   stale and goes `OFFLINE` (alerted) rather than `IDLE`, which would end the job
   and stop detection. An empty state counts as printing unless
   `machine_status.status` is 1, the idle code seen live.
-- **Snapshots never crowd out a pause.** Each snapshot registers one command
-  session, and registrations share the printer's client slots with pause and stop.
+- **Snapshots never crowd out a pause.** The printer holds about 6 registrations,
+  each for about 60 s. Sentinel reuses one registered id pair for pause, resume and
+  stop and another for status snapshots, so it holds at most two, and a pause never
+  waits behind a snapshot's session. Each snapshot still opens a session on its pair.
   So snapshots are rate limited across reconnects (5 s apart, 30 per hour), back
   off 30 s after a failure, wait while a pause, resume or stop is in flight
   (including its retry backoff), and a snapshot answered after its connection
