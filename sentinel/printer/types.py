@@ -72,6 +72,10 @@ METHOD_STATUS_PUSH = 6000
 # docs/verified-assumptions.md.
 # ---------------------------------------------------------------------------
 CC2_CMD_PAUSE_PRINT = 1021
+# Read-only full-state query. Status pushes (6000) are deltas, so a listener that
+# starts from nothing needs this snapshot to learn blocks that are not changing
+# (live probe 2026-10-21, docs/verified-assumptions.md).
+CC2_CMD_GET_STATUS = 1002
 CC2_CMD_STOP_PRINT = 1022
 CC2_CMD_RESUME_PRINT = 1023
 

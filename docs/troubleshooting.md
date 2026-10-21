@@ -152,8 +152,15 @@ python -m sentinel.diagnostics mqtt-slots --max 20 --expiry-wait 900
 The tool registers only. It never sends pause, resume, stop or any print command, but it
 does occupy client slots until they expire, which makes the printer refuse Sentinel's
 pause/stop commands in the meantime. It therefore **runs only when the printer reports a
-known idle state** (`standby`, `complete`, `cancelled` or `error`). Printing, paused, an empty
-or unrecognised state, or no state at all counts as busy: it prints `REFUSED: ...`
+known idle state** (`standby`, `complete`, `cancelled` or `error`, or an empty state with
+`machine_status.status` 1, which is how firmware 02.01 reports idle). Printing, paused, any
+other empty or unrecognised state, or no state at all counts as busy. An idle printer pushes
+only temperature deltas, so when no push within 15 s says what it is doing, the tool reads
+the serial from `GET /system/info` and the state from one read-only GET_STATUS query. That
+query registers once, reported as `registrations_before_tests`; count it when reading the
+capacity. It opens a status subscription before checking the state and keeps it for the
+whole run, starting from the snapshot's state, so the expiry wait stops as soon as a push
+says a print started, including a `machine_status` change away from idle. When the state is not idle it is busy: it prints `REFUSED: ...`
 and a JSON line with `"refused": true` and the `print_state`, registers nothing, and exits 2.
 Pass `--force` to run anyway (for example to reproduce the refusal during a print), accepting
 that Sentinel cannot pause that print until the slots expire. It prints a warning, a human

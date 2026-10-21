@@ -138,3 +138,24 @@ Still open:
   printer is idle, then act on its last JSON line (see `docs/troubleshooting.md`).
 - Coolify has no push webhook for this app. Either add one or deploy through the API or UI
   after each push.
+
+## Phase 4 (2026-10-21): F1 status fix and the slot diagnostic
+
+- Coolify web terminal fixed in homelab-iac (`8660d71`): the admin-allowlist router
+  (priority 200) captured `/terminal/ws` and `/app`; two priority-210 routers now send them to
+  the terminal server and reverb.
+- `97fbd7a` (on main, not deployed): the diagnostic uses the printer address saved in
+  Settings, as the service does. Production saves 192.168.40.18; the `PRINTER_IP` env value is
+  stale (update it in Coolify at the next deploy).
+- Live probes (recorded in `docs/verified-assumptions.md` §3): pushes are deltas; GET_STATUS
+  returns the full state; idle is `state ""`, `enable true`, `machine_status.status 1`.
+- Branch `fix/status-snapshot-and-print-state` (pushed, not merged): GET_STATUS snapshot after
+  a reconnect, unknown state never idle, `""` idle only with status 1, `enable` ignored, 45 s
+  silence tolerance; the diagnostic learns the serial over HTTP and the state from GET_STATUS,
+  and watches for a print start with one open subscription. 906 tests pass, 93.59%.
+  A deep-tier review is running.
+
+Next: fix all review findings, re-review until clean, merge, deploy (printer idle; check the
+logs show "Printer status snapshot loaded" and the bed temperature in the dashboard), then
+have the owner run `python -m sentinel.diagnostics mqtt-slots` and capture GET_STATUS during a
+print (`docs/verified-assumptions.md` §3 live probes) before trusting the `""` rule mid-print.
