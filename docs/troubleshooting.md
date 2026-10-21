@@ -134,10 +134,14 @@ detection is confirmed.
 connected to the printer`, while status and detection still work. The printer
 touchscreen or the official app may also refuse new connections.
 
-**Cause (suspected, not yet measured):** every command opens a short MQTT session and
-registers with a fresh `client_id`/`request_id` (`PrinterClient._send_command`). If the
-firmware keeps each registration for minutes after the session closes, a burst of commands
-fills its client table and later registrations are refused until the old ones expire.
+**Cause (measured 2026-10-21, firmware 02.01):** the printer holds about 6 registrations at
+once and keeps each for about 60 s after its session closes (30 s resolution). Anything
+that registers counts: Sentinel's commands and status snapshots, the official app, and this
+diagnostic. Sentinel reuses one `client_id`/`request_id` pair for pause/resume/stop and one
+for status snapshots, so it holds at most two; re-registering a held pair answers
+`already registered`, which the printer accepts. A pause refused with `too many clients` is
+retried with backoff, and the watcher retries on its next tick. When the table is full,
+wait a minute.
 
 **Measure it on the real printer.** Open the Coolify terminal on the `sentinel` service
 (the container has the printer's `PRINTER_IP` and `PRINTER_ACCESS_CODE`) and run, **while

@@ -2232,3 +2232,73 @@ async def test_snapshot_landing_during_backoff_is_discarded(
     assert calls == 2, "the late answer was discarded and the new generation asked again"
     assert client._baseline_gen == 2
     assert client._accumulated_data["result"]["print_status"]["filename"] == "new.gcode"
+
+
+# ---------------------------------------------------------------------------
+# One registration per purpose (live mqtt-slots result 2026-10-21)
+# ---------------------------------------------------------------------------
+
+
+async def test_commands_reuse_one_registration_per_purpose() -> None:
+    """The printer held only 4 free registrations, each kept for minutes after its
+    session closed, so a fresh pair per command filled them and blocked a later pause.
+    Every control command reuses one pair; status snapshots use another."""
+    identifiers: list[str] = []
+    fake = _FakeCommandClient()
+
+    def make(**kwargs: Any) -> Any:
+        identifiers.append(kwargs["identifier"])
+        return _cm_for(fake)
+
+    client = PrinterClient(_SETTINGS)
+    client._serial_number = "F0113TEST"
+    with patch("sentinel.printer.client.aiomqtt.Client", side_effect=make):
+        await client.pause()
+        client.clear_pause_debounce()
+        await client.pause()
+        await client.resume()
+        await client._send_command(1002)
+        await client._send_command(1002)
+    control, status = identifiers[:3], identifiers[3:]
+    assert len(set(control)) == 1
+    assert len(set(status)) == 1
+    assert control[0] != status[0]
+    registrations = [p for t, p in fake.published if t.endswith("/api_register")]
+    assert {r["client_id"] for r in registrations} == {control[0], status[0]}
+
+
+async def test_already_registered_counts_as_registered() -> None:
+    """Re-registering a pair the printer still holds answers "already registered",
+    and the printer honours commands on it (live probe 2026-10-21)."""
+    fake = _FakeCommandClient(register_error="already registered")
+    client = PrinterClient(_SETTINGS)
+    client._serial_number = "F0113TEST"
+    with patch("sentinel.printer.client.aiomqtt.Client", return_value=_cm_for(fake)):
+        await client.pause()
+    assert len(fake.command_publishes) == 1
+
+
+async def test_reconfigure_registers_new_ids() -> None:
+    client = PrinterClient(_SETTINGS)
+    client._reg_ids = {"control": ("0cliold000", "x" * 27)}
+    await client.reconfigure("10.0.0.2")
+    assert client._reg_ids == {}
+
+
+async def test_control_commands_on_one_id_never_overlap() -> None:
+    """Two sessions with one MQTT client id would kick each other off the broker."""
+    active = 0
+    peak = 0
+
+    async def session(client_id: str, request_id: str, method: int, params: Any) -> Any:
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        await asyncio.sleep(0.02)
+        active -= 1
+        return {}
+
+    client = PrinterClient(_SETTINGS)
+    client._send_on = session  # type: ignore[method-assign]
+    await asyncio.gather(client._send_command(1021), client._send_command(1022))
+    assert peak == 1
