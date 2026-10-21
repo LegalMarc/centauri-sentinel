@@ -2113,3 +2113,122 @@ async def test_close_stops_the_listener_before_the_snapshot() -> None:
     assert client._listener_task is None
     assert task is not None and task.cancelled()
     assert client._snapshot_task is None
+
+
+# ---------------------------------------------------------------------------
+# Provisional state on the listener's error path (review pass 3)
+# ---------------------------------------------------------------------------
+
+
+async def test_listener_error_mid_print_keeps_reporting_printing() -> None:
+    """The common reconnect: the connection fails. During the backoff and until the
+    new snapshot loads, status() must keep answering from the last print without
+    tearing down the reconnecting listener (H1)."""
+
+    def failing_cm() -> Any:
+        async def messages() -> Any:
+            yield _make_message(_modern_payload("printing", filename="benchy.gcode"))
+            await asyncio.sleep(0.05)
+            raise aiomqtt.MqttError("connection lost")
+
+        client_mock = AsyncMock()
+        client_mock.messages.__aiter__ = lambda _: messages()
+        cm = AsyncMock()
+        cm.__aenter__ = AsyncMock(return_value=client_mock)
+        cm.__aexit__ = AsyncMock(return_value=False)
+        return cm
+
+    client = PrinterClient(_SETTINGS)
+    gate = asyncio.Event()
+    calls = 0
+
+    async def snapshot(method: int, params: Any = None) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            await gate.wait()
+        return {"result": {"print_status": {"state": "printing", "filename": "benchy.gcode"}}}
+
+    client._send_command = snapshot  # type: ignore[method-assign]
+    with patch("sentinel.printer.client.aiomqtt.Client", side_effect=lambda **_: failing_cm()):
+        s1 = await client.status()
+        gen1 = client._conn_gen
+        for _ in range(100):
+            await asyncio.sleep(0.01)
+            if client._conn_gen > gen1:
+                break
+        assert client._conn_gen > gen1, "the error path starts a new generation"
+        listener = client._listener_task
+        s2 = await client.status()  # during the backoff: last update time is 0
+        assert client._listener_task is listener, "the reconnect was not torn down"
+        assert client._provisional is not None
+        gate.set()
+        await client.close()
+    assert s1.printing and s2.printing
+    assert s2.filename == "benchy.gcode"
+
+
+def test_a_contradicting_connection_clears_the_provisional_state() -> None:
+    """Connection B sees the print complete and drops before its snapshot: C must not
+    answer "printing" from A's older view (M1)."""
+    client = PrinterClient(_SETTINGS)
+    _reconnected(client, {"print_status": {"state": "complete"}})
+    assert client._current_view() is None
+    client._retire_connection()
+    assert client._provisional is None
+
+
+def test_chained_reconnects_do_not_extend_the_provisional_age() -> None:
+    client = PrinterClient(_SETTINGS)
+    _reconnected(client)
+    first_at = client._provisional_at
+    client._last_update_time = first_at + 30  # a later delta on the unconfirmed connection
+    client._accumulated_data = {"method": 6000, "result": {"extruder": {"temperature": 30}}}
+    client._retire_connection()
+    assert client._provisional is not None
+    assert client._provisional_at == first_at
+
+
+def test_provisional_check_does_not_log(caplog: pytest.LogCaptureFixture) -> None:
+    client = PrinterClient(_SETTINGS)
+    _reconnected(client)
+    with caplog.at_level("WARNING"):
+        for _ in range(20):
+            assert client._current_view() is not None
+    assert caplog.records == []
+
+
+async def test_snapshot_landing_during_backoff_is_discarded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The error path advances the generation, so a snapshot for the dead connection
+    that answers during the backoff never merges (L3)."""
+    monkeypatch.setattr("sentinel.printer.client._SNAPSHOT_MIN_INTERVAL_S", 0.0)
+    client = PrinterClient(_SETTINGS)
+    client._conn_gen = 1
+    client._accumulated_data = {"method": 6000, "result": {"extruder": {"temperature": 22}}}
+    in_flight = asyncio.Event()
+    release = asyncio.Event()
+    calls = 0
+
+    async def snapshot(method: int, params: Any = None) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:  # the dead connection's request answers late
+            in_flight.set()
+            await release.wait()
+            return {"result": {"print_status": {"state": "printing", "filename": "old.gcode"}}}
+        return {"result": {"print_status": {"state": "printing", "filename": "new.gcode"}}}
+
+    client._send_command = snapshot  # type: ignore[method-assign]
+    task = asyncio.create_task(client._snapshot_loop())
+    await asyncio.wait_for(in_flight.wait(), 1)
+    async with client._state_lock:  # what the listener's error branch does
+        client._retire_connection()
+        client._conn_gen += 1
+        client._last_update_time = 0.0
+    release.set()
+    await asyncio.wait_for(task, 1)
+    assert calls == 2, "the late answer was discarded and the new generation asked again"
+    assert client._baseline_gen == 2
+    assert client._accumulated_data["result"]["print_status"]["filename"] == "new.gcode"

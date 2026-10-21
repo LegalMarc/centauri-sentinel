@@ -92,10 +92,13 @@ printer with hot plastic in it.
   or `WARMUP`, and calls `stop()` only for the auto-stop escalation.
 - **An unknown print state is never idle.** Status pushes are deltas, so after a
   listener (re)connect the client knows temperatures but not which job is running.
-  Every connection loads its own GET_STATUS snapshot. Until it has, the previous
-  connection's state (if its last push is under 60 s old), with this connection's
-  pushes on top, may answer "printing" with the same filename, so a reconnect
-  mid-print neither flaps `OFFLINE` nor reads as a new job. It never answers idle:
+  Every connection loads its own GET_STATUS snapshot. Until it has, the state of
+  the last connection whose snapshot loaded, with later pushes on top, may answer
+  "printing" with the same filename for 60 s after that connection's last push
+  (further reconnects do not extend it, and a push that contradicts "printing"
+  ends it). So a reconnect mid-print neither flaps `OFFLINE` nor reads as a new
+  job. If one job ends and another starts while the link is down, the old job's
+  name shows until the snapshot loads; detection stays on. It never answers idle:
   if that view is not printing, `status()` raises, the watcher marks the status
   stale and goes `OFFLINE` (alerted) rather than `IDLE`, which would end the job
   and stop detection. An empty state counts as printing unless

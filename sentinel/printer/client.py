@@ -147,6 +147,23 @@ def _has_print_state(payload: dict[str, Any]) -> bool:
     return print_status["state"] != "" or isinstance(result.get("machine_status"), dict)
 
 
+def _print_state_of(print_status: dict[str, Any], machine_status: Any) -> tuple[bool, str]:
+    """(printing, label) from the print_status and machine_status blocks.
+
+    A named state is authoritative. An empty state is ambiguous: firmware 02.01 reports
+    idle as "" with machine_status.status 1 (and print_status.enable true, so "enable"
+    does not mean printing). Until "" is captured during a print, it reads as printing
+    unless the idle status code says otherwise, so detection stays on.
+    """
+    raw_state = print_status.get("state")
+    if raw_state == "":
+        status = machine_status.get("status") if isinstance(machine_status, dict) else None
+        printing = status != _MACHINE_STATUS_IDLE
+        return printing, "printing" if printing else "standby"
+    label = raw_state or "standby"
+    return label in ("printing", "paused"), label
+
+
 def _parse_status(
     payload: dict[str, Any], layers_cache: dict[str, int] | None = None
 ) -> PrinterStatus:
@@ -243,18 +260,8 @@ def _parse_status(
         if missing_fields:
             logger.warning("Missing key fields in modern MQTT payload: %s", missing_fields)
 
-        # Callers only parse once a state is known (_has_print_state). A named state is
-        # authoritative. An empty state is ambiguous: firmware 02.01 reports idle as ""
-        # with machine_status.status 1 (and print_status.enable true, so "enable" does
-        # not mean printing). Until "" is captured during a print, read it as printing
-        # unless the idle status code says otherwise, so detection stays on.
-        raw_state = print_status.get("state")
-        if raw_state == "":
-            printing = machine_status.get("status") != _MACHINE_STATUS_IDLE
-            print_state = "printing" if printing else "standby"
-        else:
-            print_state = raw_state or "standby"
-            printing = print_state in ("printing", "paused")
+        # Callers only parse once a state is known (_has_print_state).
+        printing, print_state = _print_state_of(print_status, machine_status)
 
         elapsed_seconds = float(print_status.get("print_duration", 0.0))
         current_layer = int(print_status.get("current_layer", 0))
@@ -394,7 +401,11 @@ class PrinterClient:
                 block = self._accumulated_data.get(key)
                 if isinstance(block, dict):
                     _deep_merge(view.setdefault(key, {}), block)
-            if _has_print_state(view) and _parse_status(view).printing:
+            result = view.get("result", {})
+            if (
+                _has_print_state(view)
+                and _print_state_of(result.get("print_status", {}), result.get("machine_status"))[0]
+            ):
                 return view
         return None
 
@@ -404,13 +415,21 @@ class PrinterClient:
     def _retire_connection(self) -> None:
         """Keep the ending connection's usable state as provisional, then clear it.
 
-        Call with _state_lock held, before _last_update_time is reset.
+        Call with _state_lock held, before _last_update_time is reset. Its age counts
+        from the last push of the last connection whose snapshot loaded: chaining a
+        provisional view through further reconnects never extends it.
         """
         if self._accumulated_data:
+            confirmed = self._baseline_gen == self._conn_gen
             view = self._current_view()
-            if view is not None:
+            if view is None:
+                # This connection's pushes contradict "printing" (or nothing usable is
+                # left): do not carry an older printing view past them.
+                self._provisional = None
+            else:
                 self._provisional = copy.deepcopy(view)
-                self._provisional_at = self._last_update_time
+                if confirmed:
+                    self._provisional_at = self._last_update_time
         self._accumulated_data = {}
 
     @property
@@ -572,7 +591,11 @@ class PrinterClient:
                 raise PrinterTimeoutError("Status request ended before the print state was known")
 
         now = time.monotonic()
-        if now - self._last_update_time > _STATUS_SILENCE_S:
+        # A provisional view has its own age limit, and while it is served the listener
+        # is reconnecting (its pushes do not count yet): tearing it down would restart
+        # the reconnect and drop the provisional state.
+        confirmed = self._baseline_gen == self._conn_gen or self._provisional is None
+        if confirmed and now - self._last_update_time > _STATUS_SILENCE_S:
             # Await the old listener so the next one does not reuse its MQTT client id
             # while the old session is still open (the broker would kick one of them).
             await self._stop_listener()
@@ -730,11 +753,14 @@ class PrinterClient:
                     logger.critical("MQTT permanent authentication failure: %s", exc)
                     raise
                 logger.warning("Printer MQTT status connection failed: %s. Reconnecting...", exc)
-                # An in-flight snapshot for this connection is dropped by its
-                # generation check when the next connection starts.
                 async with self._state_lock:
                     self._retire_connection()
+                    # A new generation at once, so a snapshot for the dead connection
+                    # that lands during the backoff is discarded, not merged.
+                    self._conn_gen += 1
                     self._last_update_time = 0.0
+                if self._snapshot_task is not None:
+                    self._snapshot_task.cancel()  # its registration is wasted anyway
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, 30.0)
 
