@@ -1175,8 +1175,8 @@ async def test_fetch_status_wait_survives_close_during_wait() -> None:
 
 async def test_fetch_status_stale_update() -> None:
     client = PrinterClient(_SETTINGS)
-    client._accumulated_data = {"method": 6000}
-    client._last_update_time = time.monotonic() - 20.0
+    client._accumulated_data = {"method": 6000, "result": {"print_status": {"state": "printing"}}}
+    client._last_update_time = time.monotonic() - 60.0
 
     async def dummy():
         pass
@@ -1625,3 +1625,118 @@ def test_command_ack_timeout_matches_reference_implementation() -> None:
     from sentinel.printer.client import _COMMAND_ACK_TIMEOUT_S
 
     assert _COMMAND_ACK_TIMEOUT_S == 10.0
+
+
+# ---------------------------------------------------------------------------
+# Delta pushes and the GET_STATUS snapshot (live probe 2026-10-21)
+# ---------------------------------------------------------------------------
+
+# GET_STATUS reply captured from the idle printer (firmware 02.01.00.00), trimmed.
+_IDLE_SNAPSHOT: dict[str, Any] = {
+    "id": 1,
+    "method": 1002,
+    "result": {
+        "error_code": 0,
+        "external_device": {"camera": True, "type": "0303", "u_disk": False},
+        "extruder": {"filament_detect_enable": 1, "target": 0, "temperature": 22},
+        "heater_bed": {"target": 0, "temperature": 20},
+        "machine_status": {"exception_status": [], "progress": 0, "status": 1},
+        "print_status": {
+            "current_layer": 15,
+            "enable": True,
+            "filename": "",
+            "print_duration": 5851,
+            "remaining_time_sec": 0,
+            "state": "",
+        },
+    },
+}
+_EXTRUDER_DELTA: dict[str, Any] = {
+    "id": 7,
+    "method": 6000,
+    "result": {"extruder": {"temperature": 23}},
+}
+
+
+def test_idle_snapshot_is_not_printing() -> None:
+    """Idle firmware reports state "" with enable true; enable must not mean printing."""
+    s = _parse_status({"method": 6000, "result": _IDLE_SNAPSHOT["result"]})
+    assert s.printing is False
+    assert s.print_state == "standby"
+    assert s.bed_temp == 20.0
+
+
+def test_has_print_state() -> None:
+    from sentinel.printer.client import _has_print_state
+
+    assert _has_print_state({"result": {"print_status": {"state": ""}}})
+    assert not _has_print_state({"result": {"extruder": {"temperature": 22}}})
+    assert not _has_print_state({"result": {"print_status": {"print_duration": 5}}})
+    assert not _has_print_state({})
+    assert _has_print_state(_status_payload())  # legacy format always carries its status
+
+
+async def test_status_with_only_deltas_is_unknown_not_idle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After a reconnect the printer sends only deltas. Without a print state, status()
+    must fail (the watcher then marks it stale) rather than report idle, which would end
+    a running print's job and disarm detection."""
+    monkeypatch.setattr("sentinel.printer.client._TIMEOUT_S", 0.3)
+    monkeypatch.setattr("sentinel.printer.client._SNAPSHOT_RETRY_S", 0.05)
+    cm, _ = _make_mqtt_cm([_EXTRUDER_DELTA])
+    client = PrinterClient(_SETTINGS)
+    client._send_command = AsyncMock(side_effect=PrinterRegistrationError("too many clients"))  # type: ignore[method-assign]
+    with patch("sentinel.printer.client.aiomqtt.Client", return_value=cm):
+        with pytest.raises(PrinterTimeoutError):
+            await client.status()
+        await client.close()
+    assert client._send_command.await_count >= 1
+
+
+async def test_status_loads_the_snapshot_when_pushes_are_deltas() -> None:
+    cm, _ = _make_mqtt_cm([_EXTRUDER_DELTA])
+    client = PrinterClient(_SETTINGS)
+    client._send_command = AsyncMock(return_value=_IDLE_SNAPSHOT)  # type: ignore[method-assign]
+    with patch("sentinel.printer.client.aiomqtt.Client", return_value=cm):
+        s = await client.status()
+        await client.close()
+    client._send_command.assert_awaited_with(1002)
+    assert s.printing is False
+    assert s.bed_temp == 20.0
+    assert s.extruder_temp == 23.0, "a push received after the reconnect must win over the snapshot"
+
+
+async def test_snapshot_is_retried_after_a_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("sentinel.printer.client._SNAPSHOT_RETRY_S", 0.01)
+    cm, _ = _make_mqtt_cm([_EXTRUDER_DELTA])
+    client = PrinterClient(_SETTINGS)
+    client._send_command = AsyncMock(  # type: ignore[method-assign]
+        side_effect=[PrinterTimeoutError("registration timed out"), _IDLE_SNAPSHOT]
+    )
+    with patch("sentinel.printer.client.aiomqtt.Client", return_value=cm):
+        s = await client.status()
+        await client.close()
+    assert client._send_command.await_count == 2
+    assert s.print_state == "standby"
+
+
+async def test_print_end_keeps_the_other_blocks() -> None:
+    """Ending a print drops the job's fields only. The bed block is pushed only when it
+    changes, so clearing it would leave the bed temperature unknown."""
+    cm, _ = _make_mqtt_cm(
+        [
+            _modern_payload("printing", filename="benchy.gcode", thumbnail="abc"),
+            {"method": 6000, "result": {"print_status": {"state": "complete"}}},
+        ]
+    )
+    client = PrinterClient(_SETTINGS)
+    with patch("sentinel.printer.client.aiomqtt.Client", return_value=cm):
+        s = await client.status()
+        await asyncio.sleep(0.05)
+        s = await client.status()
+        await client.close()
+    assert s.printing is False
+    assert s.filename is None
+    assert s.thumbnail_base64 is None
+    assert s.bed_temp == 60.0
