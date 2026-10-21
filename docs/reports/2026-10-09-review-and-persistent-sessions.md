@@ -149,13 +149,26 @@ Still open:
   stale (update it in Coolify at the next deploy).
 - Live probes (recorded in `docs/verified-assumptions.md` §3): pushes are deltas; GET_STATUS
   returns the full state; idle is `state ""`, `enable true`, `machine_status.status 1`.
-- Branch `fix/status-snapshot-and-print-state` (pushed, not merged): GET_STATUS snapshot after
-  a reconnect, unknown state never idle, `""` idle only with status 1, `enable` ignored, 45 s
-  silence tolerance; the diagnostic learns the serial over HTTP and the state from GET_STATUS,
-  and watches for a print start with one open subscription. 906 tests pass, 93.59%.
-  A deep-tier review is running.
+- Branch `fix/status-snapshot-and-print-state`: four deep-tier review passes (F1-F16, then
+  N1-N5, then H1/M1/M2/L1-L3, then clean: "ready to merge"). Merged as `3522ffb`.
+  Design: every MQTT connection loads its own GET_STATUS snapshot before its state counts;
+  until then the last confirmed connection's state may answer only "printing", for 60 s
+  after its last push; snapshots are rate limited (5 s apart, 30/hour), wait while a
+  pause/resume/stop is in flight, and a late answer for a dead connection is discarded;
+  one 45 s silence limit; `enable` ignored; `""` idle only with machine_status.status 1.
+  931 tests pass, 93.58% coverage.
+- Deployed 2026-10-21 through the Coolify API (deployment `0tmoz6m498gv4eqc4fagwuvs`,
+  commit `3522ffb`), printer idle. `/readyz` ready, mqtt connected. Logs: "Printer status
+  snapshot loaded" 2 s after start, no "Missing key" warnings, no reconnects.
+  `PRINTER_IP` in Coolify updated from 192.168.40.17 to 192.168.40.18 (the saved address).
 
-Next: fix all review findings, re-review until clean, merge, deploy (printer idle; check the
-logs show "Printer status snapshot loaded" and the bed temperature in the dashboard), then
-have the owner run `python -m sentinel.diagnostics mqtt-slots` and capture GET_STATUS during a
-print (`docs/verified-assumptions.md` §3 live probes) before trusting the `""` rule mid-print.
+Still open:
+
+- Q3: run `python -m sentinel.diagnostics mqtt-slots` (plain command now works on a quiet
+  idle printer) and record capacity and expiry in `docs/verified-assumptions.md` §3.
+- FM1/Q1: capture GET_STATUS during a real print (the probe in `docs/verified-assumptions.md`
+  §3) to confirm a running print never reports `state ""` with machine_status.status 1.
+  Until then do not rely on Sentinel unattended for a long print.
+- Confirm in the dashboard: bed temperature shows, camera chip shows the resolution.
+- `auth.exode.com` 502: no authentik containers on servany; the route is dead (owner's call).
+- Coolify has no push webhook for this app; deploy through the API after each push.
