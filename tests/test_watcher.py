@@ -2835,14 +2835,37 @@ async def test_offline_while_paused_then_printing_sets_resume_cooldown() -> None
     printer.clear_pause_debounce.assert_called()
 
 
-async def test_snooze_with_detection_disabled_stays_disabled_after_expiry() -> None:
+def _gate_snooze_sleep(monkeypatch: pytest.MonkeyPatch, delays: set[float]) -> asyncio.Event:
+    """Make snooze timers (identified by their delay) wait on a returned event
+    instead of the wall clock, so expiry happens exactly when the test says."""
+    release = asyncio.Event()
+    real_sleep = asyncio.sleep
+
+    async def gated_sleep(delay: float, *args: Any, **kwargs: Any) -> None:
+        if delay in delays:
+            await release.wait()
+        else:
+            await real_sleep(delay, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "sleep", gated_sleep)
+    return release
+
+
+async def test_snooze_with_detection_disabled_stays_disabled_after_expiry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     dispatcher = _make_dispatcher()
     watcher, _printer, _camera, _ml, db = await _make_watcher(dispatcher=dispatcher)
     await db.set_setting("detection_enabled", "false")
+    release = _gate_snooze_sleep(monkeypatch, {0.05})
 
     await watcher.snooze(0.05)
+    task = watcher._snooze_task
+    assert task is not None
     assert (await db.get_setting("detection_enabled")) == "false"
-    await asyncio.sleep(0.1)
+
+    release.set()  # the snooze expires now
+    await task
 
     assert (await db.get_setting("detection_enabled")) == "false"
     assert (await db.get_setting("snooze_until_utc")) == "0"
@@ -2850,12 +2873,19 @@ async def test_snooze_with_detection_disabled_stays_disabled_after_expiry() -> N
     dispatcher.dispatch_text.assert_not_called()
 
 
-async def test_resnooze_keeps_original_detection_intent() -> None:
+async def test_resnooze_keeps_original_detection_intent(monkeypatch: pytest.MonkeyPatch) -> None:
     watcher, _printer, _camera, _ml, db = await _make_watcher()
     await db.set_setting("detection_enabled", "true")
+    release = _gate_snooze_sleep(monkeypatch, {0.2, 0.05})
     await watcher.snooze(0.2)
     await watcher.snooze(0.05)  # detection reads "false" now, only because of the snooze
-    await asyncio.sleep(0.1)
+    task = watcher._snooze_task
+    assert task is not None
+    assert (await db.get_setting("detection_enabled")) == "false"
+
+    release.set()  # the second snooze expires now; the first was cancelled
+    await task
+
     assert (await db.get_setting("detection_enabled")) == "true"
 
 
