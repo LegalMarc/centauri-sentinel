@@ -2876,7 +2876,7 @@ async def test_snooze_with_detection_disabled_stays_disabled_after_expiry(
 async def test_resnooze_keeps_original_detection_intent(monkeypatch: pytest.MonkeyPatch) -> None:
     watcher, _printer, _camera, _ml, db = await _make_watcher()
     await db.set_setting("detection_enabled", "true")
-    release = _gate_snooze_sleep(monkeypatch, {0.2, 0.05})
+    release = _gate_snooze_sleep(monkeypatch, {0.05})
     await watcher.snooze(0.2)
     await watcher.snooze(0.05)  # detection reads "false" now, only because of the snooze
     task = watcher._snooze_task
